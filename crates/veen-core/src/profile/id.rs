@@ -23,6 +23,18 @@ impl ProfileId {
     }
 }
 
+impl From<[u8; 32]> for ProfileId {
+    fn from(value: [u8; 32]) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&[u8; 32]> for ProfileId {
+    fn from(value: &[u8; 32]) -> Self {
+        Self(*value)
+    }
+}
+
 impl AsRef<[u8]> for ProfileId {
     fn as_ref(&self) -> &[u8] {
         &self.0
@@ -95,3 +107,5 @@ impl<'de> Deserialize<'de> for ProfileId {
         deserializer.deserialize_bytes(ProfileIdVisitor)
     }
 }
+
+crate::hexutil::impl_fixed_hex_from_str!(ProfileId, 32);

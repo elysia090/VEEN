@@ -1,5 +1,15 @@
 use super::{HubId, HUB_ID_LEN};
 use crate::ht;
+use hex::encode;
+
+#[test]
+fn hub_id_parses_from_hex_string() {
+    let bytes = [0xAB; HUB_ID_LEN];
+    let hex = encode(bytes);
+    let parsed = hex.parse::<HubId>().expect("parse hub id");
+    assert_eq!(parsed.as_bytes(), &bytes);
+    assert_eq!(parsed.to_string(), hex);
+}
 
 #[test]
 fn hub_id_derives_from_public_key() {

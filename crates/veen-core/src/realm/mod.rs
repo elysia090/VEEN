@@ -158,5 +158,7 @@ impl<'de> Deserialize<'de> for RealmId {
     }
 }
 
+crate::hexutil::impl_fixed_hex_from_str!(RealmId, REALM_ID_LEN);
+
 #[cfg(test)]
 mod tests;

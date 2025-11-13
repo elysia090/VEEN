@@ -132,6 +132,8 @@ impl<'de> Deserialize<'de> for SchemaId {
     }
 }
 
+crate::hexutil::impl_fixed_hex_from_str!(SchemaId, SCHEMA_ID_LEN);
+
 /// Wrapper for optional owner public keys carried by schema descriptors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SchemaOwner([u8; SCHEMA_ID_LEN]);
@@ -246,6 +248,8 @@ impl<'de> Deserialize<'de> for SchemaOwner {
     }
 }
 
+crate::hexutil::impl_fixed_hex_from_str!(SchemaOwner, SCHEMA_ID_LEN);
+
 /// Schema descriptor carried on `stream_schema_meta` as defined by META0+.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -356,6 +360,25 @@ mod tests {
         let err = SchemaId::from_slice(&bytes[..SCHEMA_ID_LEN - 1]).expect_err("length error");
         assert_eq!(err.expected(), SCHEMA_ID_LEN);
         assert_eq!(err.actual(), SCHEMA_ID_LEN - 1);
+    }
+
+    #[test]
+    fn schema_identifiers_round_trip_via_strings() {
+        let id_bytes = [0xAB; SCHEMA_ID_LEN];
+        let owner_bytes = [0xCD; SCHEMA_ID_LEN];
+
+        let id_hex = hex::encode(id_bytes);
+        let owner_hex = hex::encode(owner_bytes);
+
+        let parsed_id = id_hex.parse::<SchemaId>().expect("parse schema id");
+        let parsed_owner = owner_hex
+            .parse::<SchemaOwner>()
+            .expect("parse schema owner");
+
+        assert_eq!(parsed_id.as_bytes(), &id_bytes);
+        assert_eq!(parsed_id.to_string(), id_hex);
+        assert_eq!(parsed_owner.as_bytes(), &owner_bytes);
+        assert_eq!(parsed_owner.to_string(), owner_hex);
     }
 
     #[test]

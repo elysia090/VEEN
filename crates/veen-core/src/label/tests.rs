@@ -4,6 +4,22 @@ use hex::ToHex;
 use super::{Label, StreamId, LABEL_LEN, STREAM_ID_LEN};
 
 #[test]
+fn stream_and_label_round_trip_via_strings() {
+    let stream_bytes = [0x12; STREAM_ID_LEN];
+    let label_bytes = [0x34; LABEL_LEN];
+    let stream_hex = stream_bytes.encode_hex::<String>();
+    let label_hex = label_bytes.encode_hex::<String>();
+
+    let parsed_stream = stream_hex.parse::<StreamId>().expect("parse stream id");
+    let parsed_label = label_hex.parse::<Label>().expect("parse label");
+
+    assert_eq!(parsed_stream.as_bytes(), &stream_bytes);
+    assert_eq!(parsed_stream.to_string(), stream_hex);
+    assert_eq!(parsed_label.as_bytes(), &label_bytes);
+    assert_eq!(parsed_label.to_string(), label_hex);
+}
+
+#[test]
 fn derive_label_matches_known_vector() {
     let routing_key = b"routing-key";
     let mut stream_id_bytes = [0u8; STREAM_ID_LEN];

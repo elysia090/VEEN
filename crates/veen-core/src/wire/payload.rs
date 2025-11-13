@@ -146,6 +146,8 @@ impl<'de> Deserialize<'de> for AttachmentId {
     }
 }
 
+crate::hexutil::impl_fixed_hex_from_str!(AttachmentId, HASH_LEN);
+
 /// Canonical attachment Merkle root committed in `payload_hdr.att_root`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AttachmentRoot([u8; HASH_LEN]);
@@ -317,6 +319,8 @@ impl<'de> Deserialize<'de> for AttachmentRoot {
     }
 }
 
+crate::hexutil::impl_fixed_hex_from_str!(AttachmentRoot, HASH_LEN);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AttachmentNode([u8; HASH_LEN]);
 
@@ -351,6 +355,25 @@ mod tests {
     use hex::FromHex;
 
     use super::*;
+
+    #[test]
+    fn attachment_identifiers_round_trip_via_strings() {
+        let id_bytes = [0x11; HASH_LEN];
+        let root_bytes = [0x22; HASH_LEN];
+
+        let id_hex = hex::encode(id_bytes);
+        let root_hex = hex::encode(root_bytes);
+
+        let parsed_id = id_hex.parse::<AttachmentId>().expect("parse attachment id");
+        let parsed_root = root_hex
+            .parse::<AttachmentRoot>()
+            .expect("parse attachment root");
+
+        assert_eq!(parsed_id.as_bytes(), &id_bytes);
+        assert_eq!(parsed_id.to_string(), id_hex);
+        assert_eq!(parsed_root.as_bytes(), &root_bytes);
+        assert_eq!(parsed_root.to_string(), root_hex);
+    }
 
     #[test]
     fn payload_header_round_trip() {
