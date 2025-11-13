@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -87,7 +87,7 @@ impl HubRuntimeConfig {
     }
 }
 
-fn parse_config(contents: &str, path: &PathBuf) -> Result<FileConfig> {
+fn parse_config(contents: &str, path: &Path) -> Result<FileConfig> {
     let deserializer = toml::Deserializer::new(contents);
     let parsed = serde_path_to_error::deserialize(deserializer)
         .with_context(|| format!("parsing hub configuration at {}", path.display()))?;
