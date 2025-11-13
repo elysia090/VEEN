@@ -1,3 +1,5 @@
+use crate::ht;
+
 use super::{RealmId, REALM_ID_LEN};
 
 #[test]
@@ -40,4 +42,11 @@ fn admin_stream_derivations_match_spec() {
         schema_meta.to_string(),
         "20e9eec16bda9716ffa61fa2b2386eaf4f0be0c54253bffcc37554494b91ba44"
     );
+}
+
+#[test]
+fn realm_id_derivation_matches_spec() {
+    let derived = RealmId::derive("example-app");
+    let expected = RealmId::from(ht("id/realm", b"example-app"));
+    assert_eq!(derived, expected);
 }
