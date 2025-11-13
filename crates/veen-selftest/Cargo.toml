@@ -1,0 +1,16 @@
+[package]
+name = "veen-selftest"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Self-test harness scaffold for the VEEN reference implementation."
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+veen-core = { path = "../veen-core" }
