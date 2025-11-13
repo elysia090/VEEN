@@ -81,14 +81,7 @@ impl AsRef<[u8]> for SchemaId {
     }
 }
 
-impl fmt::Display for SchemaId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(SchemaId);
 
 impl Serialize for SchemaId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -197,14 +190,7 @@ impl AsRef<[u8]> for SchemaOwner {
     }
 }
 
-impl fmt::Display for SchemaOwner {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(SchemaOwner);
 
 impl Serialize for SchemaOwner {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

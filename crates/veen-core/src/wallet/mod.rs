@@ -154,14 +154,7 @@ impl AsRef<[u8]> for TransferId {
     }
 }
 
-impl fmt::Display for TransferId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(TransferId);
 
 impl Serialize for TransferId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -241,14 +234,7 @@ impl AsRef<[u8]> for WalletId {
     }
 }
 
-impl fmt::Display for WalletId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(WalletId);
 
 impl Serialize for WalletId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

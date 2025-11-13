@@ -57,14 +57,7 @@ impl TryFrom<Vec<u8>> for ProfileId {
     }
 }
 
-impl fmt::Display for ProfileId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(ProfileId);
 
 impl Serialize for ProfileId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

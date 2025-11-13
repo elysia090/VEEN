@@ -71,14 +71,7 @@ impl AsRef<[u8]> for PrincipalId {
     }
 }
 
-impl fmt::Display for PrincipalId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(PrincipalId);
 
 impl Serialize for PrincipalId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
