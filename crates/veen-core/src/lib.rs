@@ -7,8 +7,10 @@
 
 mod hash;
 pub mod label;
+mod length;
 pub mod profile;
 
 pub use crate::hash::ht;
 pub use crate::label::{Label, StreamId};
+pub use crate::length::LengthError;
 pub use crate::profile::{Profile, ProfileId};

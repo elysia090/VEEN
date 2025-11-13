@@ -92,4 +92,15 @@ mod tests {
         let result: Result<ProfileId, _> = from_reader(invalid.as_slice());
         assert!(result.is_err(), "expected profile id length enforcement");
     }
+
+    #[test]
+    fn profile_id_from_slice_enforces_length() {
+        let valid = [0x55; 32];
+        let id = ProfileId::from_slice(&valid).expect("valid profile id");
+        assert_eq!(id.as_ref(), &valid);
+
+        let err = ProfileId::from_slice(&valid[..31]).expect_err("length error");
+        assert_eq!(err.expected(), 32);
+        assert_eq!(err.actual(), 31);
+    }
 }

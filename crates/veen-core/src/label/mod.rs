@@ -1,9 +1,9 @@
-use std::fmt;
+use std::{convert::TryFrom, fmt};
 
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::ht;
+use crate::{ht, LengthError};
 
 /// Length in bytes of a VEEN stream identifier.
 pub const STREAM_ID_LEN: usize = 32;
@@ -25,6 +25,17 @@ impl StreamId {
     pub const fn as_bytes(&self) -> &[u8; STREAM_ID_LEN] {
         &self.0
     }
+
+    /// Attempts to construct a [`StreamId`] from an arbitrary byte slice,
+    /// enforcing the exact length required by the specification.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, LengthError> {
+        if bytes.len() != STREAM_ID_LEN {
+            return Err(LengthError::new(STREAM_ID_LEN, bytes.len()));
+        }
+        let mut out = [0u8; STREAM_ID_LEN];
+        out.copy_from_slice(bytes);
+        Ok(Self::new(out))
+    }
 }
 
 impl From<[u8; STREAM_ID_LEN]> for StreamId {
@@ -36,6 +47,22 @@ impl From<[u8; STREAM_ID_LEN]> for StreamId {
 impl From<&[u8; STREAM_ID_LEN]> for StreamId {
     fn from(value: &[u8; STREAM_ID_LEN]) -> Self {
         Self::new(*value)
+    }
+}
+
+impl TryFrom<&[u8]> for StreamId {
+    type Error = LengthError;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        Self::from_slice(value)
+    }
+}
+
+impl TryFrom<Vec<u8>> for StreamId {
+    type Error = LengthError;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::from_slice(&value)
     }
 }
 
@@ -76,12 +103,7 @@ impl<'de> Visitor<'de> for StreamIdVisitor {
     where
         E: DeError,
     {
-        if v.len() != STREAM_ID_LEN {
-            return Err(E::invalid_length(v.len(), &self));
-        }
-        let mut bytes = [0u8; STREAM_ID_LEN];
-        bytes.copy_from_slice(v);
-        Ok(StreamId::new(bytes))
+        StreamId::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
     }
 
     fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
@@ -126,6 +148,17 @@ impl Label {
     pub const fn as_bytes(&self) -> &[u8; LABEL_LEN] {
         &self.0
     }
+
+    /// Attempts to construct a [`Label`] from an arbitrary byte slice,
+    /// enforcing the exact length defined by the specification.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, LengthError> {
+        if bytes.len() != LABEL_LEN {
+            return Err(LengthError::new(LABEL_LEN, bytes.len()));
+        }
+        let mut out = [0u8; LABEL_LEN];
+        out.copy_from_slice(bytes);
+        Ok(Self(out))
+    }
 }
 
 impl From<[u8; LABEL_LEN]> for Label {
@@ -143,6 +176,22 @@ impl From<&[u8; LABEL_LEN]> for Label {
 impl AsRef<[u8]> for Label {
     fn as_ref(&self) -> &[u8] {
         self.as_bytes()
+    }
+}
+
+impl TryFrom<&[u8]> for Label {
+    type Error = LengthError;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        Self::from_slice(value)
+    }
+}
+
+impl TryFrom<Vec<u8>> for Label {
+    type Error = LengthError;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::from_slice(&value)
     }
 }
 
@@ -177,12 +226,7 @@ impl<'de> Visitor<'de> for LabelVisitor {
     where
         E: DeError,
     {
-        if v.len() != LABEL_LEN {
-            return Err(E::invalid_length(v.len(), &self));
-        }
-        let mut bytes = [0u8; LABEL_LEN];
-        bytes.copy_from_slice(v);
-        Ok(Label(bytes))
+        Label::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
     }
 
     fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
