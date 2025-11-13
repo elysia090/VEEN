@@ -242,24 +242,17 @@ impl RevocationView {
         target: RevocationTarget,
         time: u64,
     ) -> Option<&RevocationRecord> {
-        self.records
-            .get(&(kind, target))
-            .and_then(|records| {
-                records
-                    .iter()
-                    .filter(|record| record.is_active_at(time))
-                    .max_by_key(|record| record.ts)
-            })
+        self.records.get(&(kind, target)).and_then(|records| {
+            records
+                .iter()
+                .filter(|record| record.is_active_at(time))
+                .max_by_key(|record| record.ts)
+        })
     }
 
     /// Returns `true` if the specified `(kind, target)` is revoked at `time`.
     #[must_use]
-    pub fn is_revoked(
-        &self,
-        kind: RevocationKind,
-        target: RevocationTarget,
-        time: u64,
-    ) -> bool {
+    pub fn is_revoked(&self, kind: RevocationKind, target: RevocationTarget, time: u64) -> bool {
         self.active_record_at(kind, target, time).is_some()
     }
 

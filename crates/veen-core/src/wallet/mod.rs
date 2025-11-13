@@ -1,7 +1,9 @@
-use std::{convert::TryFrom, fmt};
+use std::{collections::HashSet, convert::TryFrom, fmt};
 
+use ciborium::value::Value;
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_bytes::ByteBuf;
 use thiserror::Error;
 
 use crate::{
@@ -295,6 +297,541 @@ pub enum WalletError {
     NonAsciiCurrency { index: usize, byte: u8 },
 }
 
+/// Wallet opening event body as defined by `wallet.open.v1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalletOpenEvent {
+    pub wallet_id: WalletId,
+    pub realm_id: RealmId,
+    pub ctx_id: ContextId,
+    pub currency: String,
+    pub created_at: u64,
+}
+
+/// Wallet closing event body as defined by `wallet.close.v1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalletCloseEvent {
+    pub wallet_id: WalletId,
+    pub ts: u64,
+}
+
+/// Deposit event body as defined by `wallet.deposit.v1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalletDepositEvent {
+    pub wallet_id: WalletId,
+    pub amount: u64,
+    pub ts: u64,
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<ByteBuf>,
+}
+
+/// Withdraw event body as defined by `wallet.withdraw.v1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalletWithdrawEvent {
+    pub wallet_id: WalletId,
+    pub amount: u64,
+    pub ts: u64,
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<ByteBuf>,
+}
+
+/// Transfer event body as defined by `wallet.transfer.v1`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalletTransferEvent {
+    pub wallet_id: WalletId,
+    pub to_wallet_id: WalletId,
+    pub amount: u64,
+    pub ts: u64,
+    pub transfer_id: TransferId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WalletTransferEventDe {
+    wallet_id: WalletId,
+    to_wallet_id: WalletId,
+    amount: u64,
+    ts: u64,
+    transfer_id: TransferId,
+    #[serde(default)]
+    metadata: Option<Value>,
+}
+
+impl<'de> Deserialize<'de> for WalletTransferEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = WalletTransferEventDe::deserialize(deserializer)?;
+        if let Some(ref metadata) = value.metadata {
+            if !matches!(metadata, Value::Map(_)) {
+                return Err(DeError::custom("metadata must be a CBOR map"));
+            }
+        }
+        Ok(Self {
+            wallet_id: value.wallet_id,
+            to_wallet_id: value.to_wallet_id,
+            amount: value.amount,
+            ts: value.ts,
+            transfer_id: value.transfer_id,
+            metadata: value.metadata,
+        })
+    }
+}
+
+/// Adjustment event body as defined by `wallet.adjust.v1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalletAdjustEvent {
+    pub wallet_id: WalletId,
+    pub delta: i128,
+    pub ts: u64,
+    pub reason: String,
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub reference: Option<ByteBuf>,
+}
+
+/// Limit configuration event body as defined by `wallet.limit.v1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalletLimitEvent {
+    pub wallet_id: WalletId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily_limit: Option<u64>,
+    pub ts: u64,
+}
+
+/// Freeze event body as defined by `wallet.freeze.v1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalletFreezeEvent {
+    pub wallet_id: WalletId,
+    pub ts: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Unfreeze event body as defined by `wallet.unfreeze.v1`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalletUnfreezeEvent {
+    pub wallet_id: WalletId,
+    pub ts: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Errors returned when applying WAL events to a [`WalletState`].
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum WalletFoldError {
+    /// The wallet identifier derived from the event fields does not match the provided value.
+    #[error("wallet identifier mismatch (expected {expected}, found {actual})")]
+    WalletIdMismatch {
+        expected: WalletId,
+        actual: WalletId,
+    },
+    /// The currency code was not valid ASCII.
+    #[error("currency code must be ASCII, found non-ASCII byte {byte:#04x} at index {index}")]
+    NonAsciiCurrency { index: usize, byte: u8 },
+    /// The wallet has not been opened yet.
+    #[error("wallet has not been opened")]
+    WalletNotOpen,
+    /// The wallet has been closed and cannot accept mutations.
+    #[error("wallet is closed")]
+    WalletClosed,
+    /// The wallet is frozen and cannot accept outgoing debits.
+    #[error("wallet is frozen")]
+    WalletFrozen,
+    /// The wallet does not have an identifier associated with it yet.
+    #[error("wallet identifier is unknown; process wallet.open.v1 first")]
+    WalletIdUnknown,
+    /// The event does not reference this wallet.
+    #[error(
+        "transfer does not involve wallet {wallet_id}; found source {event_wallet_id} and destination {to_wallet_id}"
+    )]
+    TransferNotApplicable {
+        wallet_id: WalletId,
+        event_wallet_id: WalletId,
+        to_wallet_id: WalletId,
+    },
+    /// The debit amount exceeds the available balance.
+    #[error("insufficient balance for debit: have {balance}, need {amount}")]
+    InsufficientFunds { balance: u64, amount: u64 },
+    /// Adding the provided amount would overflow the balance counter.
+    #[error("balance overflow")]
+    BalanceOverflow,
+    /// Subtracting the provided amount would underflow the balance counter.
+    #[error("balance underflow")]
+    BalanceUnderflow,
+    /// The pending daily spend counter would overflow.
+    #[error("pending daily spent overflow")]
+    DailySpentOverflow,
+    /// The debit would exceed the configured daily limit.
+    #[error("daily limit exceeded: limit {limit}, attempted {attempted}")]
+    DailyLimitExceeded { limit: u64, attempted: u64 },
+    /// The adjustment would result in a negative balance.
+    #[error("adjustment would result in a negative balance")]
+    NegativeBalance,
+}
+
+impl From<WalletError> for WalletFoldError {
+    fn from(value: WalletError) -> Self {
+        match value {
+            WalletError::NonAsciiCurrency { index, byte } => Self::NonAsciiCurrency { index, byte },
+        }
+    }
+}
+
+/// Canonical helper implementing the day-based reset check described in the specification.
+#[must_use]
+pub fn needs_daily_limit_reset(last_reset_ts: u64, now: u64) -> bool {
+    if last_reset_ts == 0 {
+        return true;
+    }
+    last_reset_ts / 86_400 != now / 86_400
+}
+
+/// Materialized wallet state derived by folding WAL events.
+#[derive(Debug, Clone)]
+pub struct WalletState {
+    wallet_id: Option<WalletId>,
+    exists: bool,
+    closed: bool,
+    balance: u64,
+    frozen: bool,
+    daily_limit: Option<u64>,
+    pending_daily_spent: u64,
+    last_limit_reset_ts: u64,
+    seen_debit_transfers: HashSet<TransferId>,
+    seen_credit_transfers: HashSet<TransferId>,
+}
+
+impl Default for WalletState {
+    fn default() -> Self {
+        Self {
+            wallet_id: None,
+            exists: false,
+            closed: false,
+            balance: 0,
+            frozen: false,
+            daily_limit: None,
+            pending_daily_spent: 0,
+            last_limit_reset_ts: 0,
+            seen_debit_transfers: HashSet::new(),
+            seen_credit_transfers: HashSet::new(),
+        }
+    }
+}
+
+impl WalletState {
+    /// Creates an empty wallet state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the wallet identifier if one has been set.
+    #[must_use]
+    pub fn wallet_id(&self) -> Option<WalletId> {
+        self.wallet_id
+    }
+
+    /// Returns whether the wallet currently exists.
+    #[must_use]
+    pub fn exists(&self) -> bool {
+        self.exists
+    }
+
+    /// Returns whether the wallet has been closed.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Returns the current wallet balance.
+    #[must_use]
+    pub fn balance(&self) -> u64 {
+        self.balance
+    }
+
+    /// Returns whether the wallet is currently frozen.
+    #[must_use]
+    pub fn is_frozen(&self) -> bool {
+        self.frozen
+    }
+
+    /// Returns the configured daily limit, if any.
+    #[must_use]
+    pub fn daily_limit(&self) -> Option<u64> {
+        self.daily_limit
+    }
+
+    /// Returns the amount spent in the current daily window.
+    #[must_use]
+    pub fn pending_daily_spent(&self) -> u64 {
+        self.pending_daily_spent
+    }
+
+    /// Returns the timestamp that anchors the current daily limit window.
+    #[must_use]
+    pub fn last_limit_reset_ts(&self) -> u64 {
+        self.last_limit_reset_ts
+    }
+
+    /// Applies a wallet opening event.
+    pub fn apply_open(&mut self, event: &WalletOpenEvent) -> Result<(), WalletFoldError> {
+        let expected = WalletId::derive(event.realm_id, event.ctx_id, &event.currency)?;
+        if expected != event.wallet_id {
+            return Err(WalletFoldError::WalletIdMismatch {
+                expected,
+                actual: event.wallet_id,
+            });
+        }
+
+        if let Some(current) = self.wallet_id {
+            if current != event.wallet_id {
+                return Err(WalletFoldError::WalletIdMismatch {
+                    expected: current,
+                    actual: event.wallet_id,
+                });
+            }
+        } else {
+            self.wallet_id = Some(event.wallet_id);
+        }
+
+        if !self.exists {
+            self.exists = true;
+            self.closed = false;
+            self.balance = 0;
+            self.frozen = false;
+            self.daily_limit = None;
+            self.pending_daily_spent = 0;
+            self.last_limit_reset_ts = event.created_at;
+            self.seen_debit_transfers.clear();
+            self.seen_credit_transfers.clear();
+        }
+
+        Ok(())
+    }
+
+    /// Applies a wallet closing event.
+    pub fn apply_close(&mut self, event: &WalletCloseEvent) -> Result<(), WalletFoldError> {
+        if !self.exists {
+            return Ok(());
+        }
+
+        self.expect_wallet(event.wallet_id)?;
+        self.closed = true;
+        Ok(())
+    }
+
+    /// Applies a deposit event.
+    pub fn apply_deposit(&mut self, event: &WalletDepositEvent) -> Result<(), WalletFoldError> {
+        self.expect_wallet(event.wallet_id)?;
+        self.ensure_open()?;
+        self.balance = self
+            .balance
+            .checked_add(event.amount)
+            .ok_or(WalletFoldError::BalanceOverflow)?;
+        Ok(())
+    }
+
+    /// Applies a withdrawal event.
+    pub fn apply_withdraw(&mut self, event: &WalletWithdrawEvent) -> Result<(), WalletFoldError> {
+        self.expect_wallet(event.wallet_id)?;
+        self.debit(event.amount, event.ts)
+    }
+
+    /// Applies a transfer event, handling both source debits and destination credits.
+    pub fn apply_transfer(&mut self, event: &WalletTransferEvent) -> Result<(), WalletFoldError> {
+        let wallet_id = self.wallet_id.ok_or(WalletFoldError::WalletIdUnknown)?;
+
+        if event.wallet_id == wallet_id {
+            if self.seen_debit_transfers.contains(&event.transfer_id) {
+                return Ok(());
+            }
+            self.debit(event.amount, event.ts)?;
+            self.seen_debit_transfers.insert(event.transfer_id);
+            return Ok(());
+        }
+
+        if event.to_wallet_id == wallet_id {
+            if self.seen_credit_transfers.contains(&event.transfer_id) {
+                return Ok(());
+            }
+            self.ensure_open()?;
+            self.balance = self
+                .balance
+                .checked_add(event.amount)
+                .ok_or(WalletFoldError::BalanceOverflow)?;
+            self.seen_credit_transfers.insert(event.transfer_id);
+            return Ok(());
+        }
+
+        Err(WalletFoldError::TransferNotApplicable {
+            wallet_id,
+            event_wallet_id: event.wallet_id,
+            to_wallet_id: event.to_wallet_id,
+        })
+    }
+
+    /// Applies an adjustment event.
+    pub fn apply_adjust(&mut self, event: &WalletAdjustEvent) -> Result<(), WalletFoldError> {
+        self.expect_wallet(event.wallet_id)?;
+        self.ensure_open()?;
+
+        let current = i128::from(self.balance);
+        let new_balance = current + event.delta;
+        if new_balance < 0 {
+            return Err(WalletFoldError::NegativeBalance);
+        }
+        let new_balance =
+            u64::try_from(new_balance).map_err(|_| WalletFoldError::BalanceOverflow)?;
+        self.balance = new_balance;
+        Ok(())
+    }
+
+    /// Applies a limit configuration event.
+    pub fn apply_limit(&mut self, event: &WalletLimitEvent) -> Result<(), WalletFoldError> {
+        self.expect_wallet(event.wallet_id)?;
+        self.ensure_open()?;
+
+        self.daily_limit = event.daily_limit;
+        match self.daily_limit {
+            Some(_) => {
+                if self.last_limit_reset_ts == 0
+                    || needs_daily_limit_reset(self.last_limit_reset_ts, event.ts)
+                {
+                    self.pending_daily_spent = 0;
+                    self.last_limit_reset_ts = event.ts;
+                }
+            }
+            None => {
+                self.pending_daily_spent = 0;
+                self.last_limit_reset_ts = 0;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Applies a freeze event.
+    pub fn apply_freeze(&mut self, event: &WalletFreezeEvent) -> Result<(), WalletFoldError> {
+        if !self.exists {
+            return Err(WalletFoldError::WalletNotOpen);
+        }
+        self.expect_wallet(event.wallet_id)?;
+        self.frozen = true;
+        Ok(())
+    }
+
+    /// Applies an unfreeze event.
+    pub fn apply_unfreeze(&mut self, event: &WalletUnfreezeEvent) -> Result<(), WalletFoldError> {
+        if !self.exists {
+            return Err(WalletFoldError::WalletNotOpen);
+        }
+        self.expect_wallet(event.wallet_id)?;
+        self.frozen = false;
+        Ok(())
+    }
+
+    fn expect_wallet(&self, wallet_id: WalletId) -> Result<(), WalletFoldError> {
+        if !self.exists {
+            return Err(WalletFoldError::WalletNotOpen);
+        }
+        if let Some(current) = self.wallet_id {
+            if current != wallet_id {
+                return Err(WalletFoldError::WalletIdMismatch {
+                    expected: current,
+                    actual: wallet_id,
+                });
+            }
+        } else {
+            return Err(WalletFoldError::WalletIdUnknown);
+        }
+        Ok(())
+    }
+
+    fn ensure_open(&self) -> Result<(), WalletFoldError> {
+        if !self.exists {
+            return Err(WalletFoldError::WalletNotOpen);
+        }
+        if self.closed {
+            return Err(WalletFoldError::WalletClosed);
+        }
+        Ok(())
+    }
+
+    fn ensure_active(&self) -> Result<(), WalletFoldError> {
+        self.ensure_open()?;
+        if self.frozen {
+            return Err(WalletFoldError::WalletFrozen);
+        }
+        Ok(())
+    }
+
+    fn debit(&mut self, amount: u64, ts: u64) -> Result<(), WalletFoldError> {
+        self.ensure_active()?;
+
+        let pending_update = self.evaluate_daily_limit(amount, ts)?;
+
+        if self.balance < amount {
+            return Err(WalletFoldError::InsufficientFunds {
+                balance: self.balance,
+                amount,
+            });
+        }
+
+        self.balance = self
+            .balance
+            .checked_sub(amount)
+            .ok_or(WalletFoldError::BalanceUnderflow)?;
+
+        if let Some((new_pending, reset)) = pending_update {
+            if reset || self.last_limit_reset_ts == 0 {
+                self.pending_daily_spent = 0;
+                self.last_limit_reset_ts = ts;
+            }
+            self.pending_daily_spent = new_pending;
+        }
+
+        Ok(())
+    }
+
+    fn evaluate_daily_limit(
+        &self,
+        amount: u64,
+        ts: u64,
+    ) -> Result<Option<(u64, bool)>, WalletFoldError> {
+        if let Some(limit) = self.daily_limit {
+            let mut pending = self.pending_daily_spent;
+            let mut reset = false;
+            if needs_daily_limit_reset(self.last_limit_reset_ts, ts) {
+                pending = 0;
+                reset = true;
+            }
+            let new_pending = pending
+                .checked_add(amount)
+                .ok_or(WalletFoldError::DailySpentOverflow)?;
+            if new_pending > limit {
+                return Err(WalletFoldError::DailyLimitExceeded {
+                    limit,
+                    attempted: new_pending,
+                });
+            }
+            Ok(Some((new_pending, reset)))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 /// Returns the canonical wallet stream identifier,
 /// `stream_id_wallet = Ht("wallet/stream", wallet_id)`.
 #[must_use]
@@ -389,6 +926,28 @@ mod tests {
         out
     }
 
+    fn open_wallet_state(
+        realm_name: &str,
+        key_prefix: u8,
+        currency: &str,
+    ) -> (WalletState, WalletId, RealmId, ContextId, u64) {
+        let realm = RealmId::derive(realm_name);
+        let principal_pk = sample_key(key_prefix);
+        let ctx = ContextId::derive(principal_pk, realm).expect("ctx id");
+        let wallet_id = WalletId::derive(realm, ctx, currency).expect("wallet id");
+        let created_at = 1_700_000_000u64 + key_prefix as u64;
+        let open_event = WalletOpenEvent {
+            wallet_id,
+            realm_id: realm,
+            ctx_id: ctx,
+            currency: currency.to_string(),
+            created_at,
+        };
+        let mut state = WalletState::new();
+        state.apply_open(&open_event).expect("apply open");
+        (state, wallet_id, realm, ctx, created_at)
+    }
+
     #[test]
     fn wallet_id_matches_spec_formula() {
         let realm = RealmId::derive("example-realm");
@@ -470,6 +1029,295 @@ mod tests {
         data.extend_from_slice(transfer.as_ref());
 
         assert_eq!(hash, ht("wallet/approval", &data));
+    }
+
+    #[test]
+    fn daily_limit_reset_follows_day_boundary() {
+        let base = 1_700_000_000u64;
+        assert!(needs_daily_limit_reset(0, base));
+        assert!(!needs_daily_limit_reset(base, base + 3_600));
+        assert!(needs_daily_limit_reset(base, base + 86_400));
+    }
+
+    #[test]
+    fn wallet_state_open_initializes_fields() {
+        let (state, wallet_id, _, _, created_at) =
+            open_wallet_state("realm-open-init", 0x20, "USD");
+        assert_eq!(state.wallet_id(), Some(wallet_id));
+        assert!(state.exists());
+        assert!(!state.is_closed());
+        assert_eq!(state.balance(), 0);
+        assert!(!state.is_frozen());
+        assert_eq!(state.daily_limit(), None);
+        assert_eq!(state.pending_daily_spent(), 0);
+        assert_eq!(state.last_limit_reset_ts(), created_at);
+    }
+
+    #[test]
+    fn wallet_state_open_rejects_mismatched_wallet_id() {
+        let realm = RealmId::derive("realm-open-mismatch");
+        let principal_pk = sample_key(0x30);
+        let ctx = ContextId::derive(principal_pk, realm).expect("ctx id");
+        let open = WalletOpenEvent {
+            wallet_id: WalletId::new([0xAA; WALLET_ID_LEN]),
+            realm_id: realm,
+            ctx_id: ctx,
+            currency: "USD".to_string(),
+            created_at: 1_700_000_123,
+        };
+        let mut state = WalletState::new();
+        let err = state.apply_open(&open).expect_err("wallet mismatch");
+        assert!(matches!(err, WalletFoldError::WalletIdMismatch { .. }));
+    }
+
+    #[test]
+    fn wallet_state_withdraw_enforces_balance_and_limit() {
+        let (mut state, wallet_id, _, _, created_at) =
+            open_wallet_state("realm-withdraw", 0x40, "EUR");
+        state
+            .apply_deposit(&WalletDepositEvent {
+                wallet_id,
+                amount: 500,
+                ts: created_at + 1,
+                reference: None,
+            })
+            .unwrap();
+        state
+            .apply_limit(&WalletLimitEvent {
+                wallet_id,
+                daily_limit: Some(200),
+                ts: created_at + 2,
+            })
+            .unwrap();
+        state
+            .apply_withdraw(&WalletWithdrawEvent {
+                wallet_id,
+                amount: 150,
+                ts: created_at + 10,
+                reference: None,
+            })
+            .unwrap();
+        assert_eq!(state.balance(), 350);
+        assert_eq!(state.pending_daily_spent(), 150);
+
+        let err = state
+            .apply_withdraw(&WalletWithdrawEvent {
+                wallet_id,
+                amount: 100,
+                ts: created_at + 20,
+                reference: None,
+            })
+            .expect_err("daily limit exceeded");
+        assert!(matches!(err, WalletFoldError::DailyLimitExceeded { .. }));
+        assert_eq!(state.balance(), 350);
+        assert_eq!(state.pending_daily_spent(), 150);
+
+        state
+            .apply_withdraw(&WalletWithdrawEvent {
+                wallet_id,
+                amount: 100,
+                ts: created_at + 86_400 + 5,
+                reference: None,
+            })
+            .unwrap();
+        assert_eq!(state.balance(), 250);
+        assert_eq!(state.pending_daily_spent(), 100);
+        assert_eq!(state.last_limit_reset_ts(), created_at + 86_400 + 5);
+    }
+
+    #[test]
+    fn wallet_state_transfer_updates_source_and_destination() {
+        let (mut source, source_wallet, realm, _, created_at) =
+            open_wallet_state("realm-transfer", 0x50, "USD");
+        source
+            .apply_deposit(&WalletDepositEvent {
+                wallet_id: source_wallet,
+                amount: 300,
+                ts: created_at + 1,
+                reference: None,
+            })
+            .unwrap();
+        source
+            .apply_limit(&WalletLimitEvent {
+                wallet_id: source_wallet,
+                daily_limit: Some(500),
+                ts: created_at + 2,
+            })
+            .unwrap();
+
+        let dest_principal = sample_key(0x60);
+        let dest_ctx = ContextId::derive(dest_principal, realm).expect("dest ctx");
+        let dest_wallet = WalletId::derive(realm, dest_ctx, "USD").expect("dest wallet");
+        let dest_open = WalletOpenEvent {
+            wallet_id: dest_wallet,
+            realm_id: realm,
+            ctx_id: dest_ctx,
+            currency: "USD".into(),
+            created_at: created_at + 3,
+        };
+        let mut dest = WalletState::new();
+        dest.apply_open(&dest_open).unwrap();
+
+        let transfer_id = TransferId::derive([0x12; TRANSFER_ID_LEN]).expect("transfer id");
+        let transfer = WalletTransferEvent {
+            wallet_id: source_wallet,
+            to_wallet_id: dest_wallet,
+            amount: 120,
+            ts: created_at + 4,
+            transfer_id,
+            metadata: None,
+        };
+
+        source.apply_transfer(&transfer).unwrap();
+        assert_eq!(source.balance(), 180);
+        assert_eq!(source.pending_daily_spent(), 120);
+
+        dest.apply_transfer(&transfer).unwrap();
+        assert_eq!(dest.balance(), 120);
+
+        source.apply_transfer(&transfer).unwrap();
+        dest.apply_transfer(&transfer).unwrap();
+        assert_eq!(source.balance(), 180);
+        assert_eq!(dest.balance(), 120);
+    }
+
+    #[test]
+    fn wallet_state_adjust_respects_non_negative_balance() {
+        let (mut state, wallet_id, _, _, created_at) =
+            open_wallet_state("realm-adjust", 0x70, "USD");
+        state
+            .apply_deposit(&WalletDepositEvent {
+                wallet_id,
+                amount: 100,
+                ts: created_at + 1,
+                reference: None,
+            })
+            .unwrap();
+        state
+            .apply_adjust(&WalletAdjustEvent {
+                wallet_id,
+                delta: 25,
+                ts: created_at + 2,
+                reason: "bonus".into(),
+                reference: None,
+            })
+            .unwrap();
+        assert_eq!(state.balance(), 125);
+
+        let err = state
+            .apply_adjust(&WalletAdjustEvent {
+                wallet_id,
+                delta: -200,
+                ts: created_at + 3,
+                reason: "reversal".into(),
+                reference: None,
+            })
+            .expect_err("negative balance");
+        assert!(matches!(err, WalletFoldError::NegativeBalance));
+        assert_eq!(state.balance(), 125);
+    }
+
+    #[test]
+    fn wallet_state_freeze_blocks_outgoing_debits() {
+        let (mut state, wallet_id, _, _, created_at) =
+            open_wallet_state("realm-freeze", 0x80, "USD");
+        state
+            .apply_deposit(&WalletDepositEvent {
+                wallet_id,
+                amount: 80,
+                ts: created_at + 1,
+                reference: None,
+            })
+            .unwrap();
+        state
+            .apply_freeze(&WalletFreezeEvent {
+                wallet_id,
+                ts: created_at + 2,
+                reason: Some("investigation".into()),
+            })
+            .unwrap();
+
+        let err = state
+            .apply_withdraw(&WalletWithdrawEvent {
+                wallet_id,
+                amount: 10,
+                ts: created_at + 3,
+                reference: None,
+            })
+            .expect_err("wallet frozen");
+        assert!(matches!(err, WalletFoldError::WalletFrozen));
+        assert_eq!(state.balance(), 80);
+
+        state
+            .apply_unfreeze(&WalletUnfreezeEvent {
+                wallet_id,
+                ts: created_at + 4,
+                reason: None,
+            })
+            .unwrap();
+        state
+            .apply_withdraw(&WalletWithdrawEvent {
+                wallet_id,
+                amount: 10,
+                ts: created_at + 5,
+                reference: None,
+            })
+            .unwrap();
+        assert_eq!(state.balance(), 70);
+    }
+
+    #[test]
+    fn wallet_state_close_prevents_mutations() {
+        let (mut state, wallet_id, _, _, created_at) =
+            open_wallet_state("realm-close", 0x90, "USD");
+        state
+            .apply_close(&WalletCloseEvent {
+                wallet_id,
+                ts: created_at + 1,
+            })
+            .unwrap();
+        assert!(state.is_closed());
+
+        let err = state
+            .apply_deposit(&WalletDepositEvent {
+                wallet_id,
+                amount: 10,
+                ts: created_at + 2,
+                reference: None,
+            })
+            .expect_err("wallet closed");
+        assert!(matches!(err, WalletFoldError::WalletClosed));
+    }
+
+    #[test]
+    fn transfer_metadata_requires_map() {
+        use ciborium::value::Value;
+        use ciborium::{de::from_reader, ser::into_writer};
+
+        let transfer_id = TransferId::new([0xAA; TRANSFER_ID_LEN]);
+        let wallet_id = WalletId::new([0xBB; WALLET_ID_LEN]);
+        let to_wallet_id = WalletId::new([0xCC; WALLET_ID_LEN]);
+        let value = Value::Map(vec![
+            (
+                Value::Text("wallet_id".into()),
+                Value::Bytes(wallet_id.as_ref().to_vec()),
+            ),
+            (
+                Value::Text("to_wallet_id".into()),
+                Value::Bytes(to_wallet_id.as_ref().to_vec()),
+            ),
+            (Value::Text("amount".into()), Value::Integer(5u8.into())),
+            (Value::Text("ts".into()), Value::Integer(1u8.into())),
+            (
+                Value::Text("transfer_id".into()),
+                Value::Bytes(transfer_id.as_ref().to_vec()),
+            ),
+            (Value::Text("metadata".into()), Value::Array(vec![])),
+        ]);
+        let mut buf = Vec::new();
+        into_writer(&value, &mut buf).expect("serialize");
+        let result: Result<WalletTransferEvent, _> = from_reader(buf.as_slice());
+        assert!(result.is_err(), "metadata must be map");
     }
 
     #[test]

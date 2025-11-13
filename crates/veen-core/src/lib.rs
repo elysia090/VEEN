@@ -44,10 +44,12 @@ pub use crate::revocation::{
     REVOCATION_TARGET_LEN,
 };
 pub use crate::wallet::{
-    approval_hash, schema_wallet_adjust, schema_wallet_close, schema_wallet_deposit,
-    schema_wallet_freeze, schema_wallet_limit, schema_wallet_open, schema_wallet_transfer,
-    schema_wallet_unfreeze, schema_wallet_withdraw, stream_id_wallet, TransferId, WalletError,
-    WalletId, TRANSFER_ID_LEN, WALLET_ID_LEN,
+    approval_hash, needs_daily_limit_reset, schema_wallet_adjust, schema_wallet_close,
+    schema_wallet_deposit, schema_wallet_freeze, schema_wallet_limit, schema_wallet_open,
+    schema_wallet_transfer, schema_wallet_unfreeze, schema_wallet_withdraw, stream_id_wallet,
+    TransferId, WalletAdjustEvent, WalletCloseEvent, WalletDepositEvent, WalletError,
+    WalletFoldError, WalletFreezeEvent, WalletId, WalletLimitEvent, WalletOpenEvent, WalletState,
+    WalletTransferEvent, WalletUnfreezeEvent, WalletWithdrawEvent, TRANSFER_ID_LEN, WALLET_ID_LEN,
 };
 pub use crate::wire::{
     checkpoint::Checkpoint,
