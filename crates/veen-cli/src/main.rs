@@ -1,8 +1,18 @@
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
+use ed25519_dalek::SigningKey;
+use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
+use tokio::fs;
 use tracing_subscriber::EnvFilter;
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+
+const CLIENT_KEY_VERSION: u8 = 1;
 
 #[derive(Parser)]
 #[command(name = "veen-cli", version, about = "Client and admin tooling for VEEN", long_about = None)]
@@ -173,6 +183,30 @@ struct VerifyStateArgs {
     stream: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct ClientSecretBundle {
+    version: u8,
+    created_at: u64,
+    #[serde(with = "serde_bytes")]
+    client_id: ByteBuf,
+    #[serde(with = "serde_bytes")]
+    dh_public: ByteBuf,
+    #[serde(with = "serde_bytes")]
+    signing_key: ByteBuf,
+    #[serde(with = "serde_bytes")]
+    dh_secret: ByteBuf,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ClientPublicBundle {
+    version: u8,
+    created_at: u64,
+    #[serde(with = "serde_bytes")]
+    client_id: ByteBuf,
+    #[serde(with = "serde_bytes")]
+    dh_public: ByteBuf,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -204,8 +238,59 @@ fn init_tracing() {
     let _ = subscriber.try_init();
 }
 
-async fn handle_keygen(_args: KeygenArgs) -> Result<()> {
-    not_implemented("keygen")
+async fn handle_keygen(args: KeygenArgs) -> Result<()> {
+    let private_path = args.out;
+    let public_path = derive_public_path(&private_path);
+
+    ensure_parent_dir(&private_path).await?;
+    ensure_parent_dir(&public_path).await?;
+    ensure_absent(&private_path).await?;
+    ensure_absent(&public_path).await?;
+
+    let mut rng = OsRng;
+    let signing_key = SigningKey::generate(&mut rng);
+    let verifying_key = signing_key.verifying_key();
+    let dh_secret = StaticSecret::random_from_rng(rng);
+    let dh_public = X25519PublicKey::from(&dh_secret);
+
+    let created_at = current_unix_timestamp()?;
+    let client_id_bytes = verifying_key.to_bytes();
+    let dh_public_bytes = dh_public.to_bytes();
+    let signing_key_bytes = signing_key.to_bytes();
+    let dh_secret_bytes = dh_secret.to_bytes();
+
+    let secret_bundle = ClientSecretBundle {
+        version: CLIENT_KEY_VERSION,
+        created_at,
+        client_id: ByteBuf::from(client_id_bytes.to_vec()),
+        dh_public: ByteBuf::from(dh_public_bytes.to_vec()),
+        signing_key: ByteBuf::from(signing_key_bytes.to_vec()),
+        dh_secret: ByteBuf::from(dh_secret_bytes.to_vec()),
+    };
+
+    let public_bundle = ClientPublicBundle {
+        version: CLIENT_KEY_VERSION,
+        created_at,
+        client_id: ByteBuf::from(client_id_bytes.to_vec()),
+        dh_public: ByteBuf::from(dh_public_bytes.to_vec()),
+    };
+
+    write_cbor_file(&private_path, &secret_bundle)
+        .await
+        .with_context(|| format!("writing private key material to {}", private_path.display()))?;
+    restrict_private_permissions(&private_path).await?;
+    write_cbor_file(&public_path, &public_bundle)
+        .await
+        .with_context(|| format!("writing public identity to {}", public_path.display()))?;
+
+    tracing::info!(
+        client_id = %hex::encode(client_id_bytes),
+        private = %private_path.display(),
+        public = %public_path.display(),
+        "generated VEEN client identity",
+    );
+
+    Ok(())
 }
 
 async fn handle_send(_args: SendArgs) -> Result<()> {
@@ -254,4 +339,68 @@ fn not_implemented(command: &str) -> Result<()> {
     bail!(
         "`veen-cli {command}` is a scaffold. Implement the end-to-end workflow described in doc/GOALS.txt to make this command functional."
     );
+}
+
+async fn ensure_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("creating directory {}", parent.display()))?;
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_absent(path: &Path) -> Result<()> {
+    if fs::try_exists(path)
+        .await
+        .with_context(|| format!("checking existence of {}", path.display()))?
+    {
+        bail!("refusing to overwrite existing file {}", path.display());
+    }
+    Ok(())
+}
+
+fn derive_public_path(private_path: &Path) -> PathBuf {
+    let mut stem = OsString::from(private_path.as_os_str());
+    stem.push(".pub");
+    PathBuf::from(stem)
+}
+
+fn current_unix_timestamp() -> Result<u64> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| anyhow!("system clock is before Unix epoch: {err}"))?;
+    Ok(now.as_secs())
+}
+
+async fn write_cbor_file<T>(path: &Path, value: &T) -> Result<()>
+where
+    T: Serialize,
+{
+    let mut buffer = Vec::new();
+    ciborium::ser::into_writer(value, &mut buffer)
+        .map_err(|err| anyhow!("failed to encode CBOR for {}: {err}", path.display()))?;
+    fs::write(path, buffer)
+        .await
+        .with_context(|| format!("persisting {}", path.display()))?;
+    Ok(())
+}
+
+async fn restrict_private_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let permissions = std::fs::Permissions::from_mode(0o600);
+        fs::set_permissions(path, permissions)
+            .await
+            .with_context(|| format!("setting permissions on {}", path.display()))?;
+    }
+
+    #[cfg(not(unix))]
+    let _ = path;
+
+    Ok(())
 }

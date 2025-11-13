@@ -9,11 +9,17 @@ description = "Command-line client scaffold for the VEEN reference implementatio
 
 [dependencies]
 anyhow.workspace = true
+ciborium.workspace = true
 clap.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_bytes.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 veen-core = { path = "../veen-core" }
+x25519-dalek.workspace = true
+rand.workspace = true
