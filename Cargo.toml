@@ -1,0 +1,22 @@
+[workspace]
+members = [
+    "crates/veen-core"
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+authors = ["VEEN Contributors <dev@example.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://example.com/veen"
+
+[workspace.metadata]
+description = "Modern Rust workspace for the VEEN reference implementation."
+
+[workspace.dependencies]
+anyhow = "1"
+ciborium = "0.2"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "1"
