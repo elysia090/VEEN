@@ -6,7 +6,9 @@
 //! enforcing consistent hashing and encoding behaviour across binaries.
 
 mod hash;
+pub mod label;
 pub mod profile;
 
 pub use crate::hash::ht;
+pub use crate::label::{Label, StreamId};
 pub use crate::profile::{Profile, ProfileId};
