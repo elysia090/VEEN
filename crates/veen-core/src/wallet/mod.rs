@@ -15,6 +15,9 @@ use crate::{
 /// Length in bytes of a VEEN wallet identifier.
 pub const WALLET_ID_LEN: usize = 32;
 
+/// Length in bytes of a VEEN wallet transfer identifier.
+pub const TRANSFER_ID_LEN: usize = 32;
+
 /// Opaque newtype describing the wallet identifier derived from
 /// `(realm_id, ctx_id, currency_code)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -71,6 +74,131 @@ impl WalletId {
         data.extend_from_slice(currency_code.as_bytes());
 
         Ok(Self::from(ht("wallet/id", &data)))
+    }
+}
+
+/// Opaque newtype describing the globally unique transfer identifier derived
+/// from the source message identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TransferId([u8; TRANSFER_ID_LEN]);
+
+impl TransferId {
+    /// Creates a transfer identifier from the provided byte array.
+    #[must_use]
+    pub const fn new(bytes: [u8; TRANSFER_ID_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrows the underlying identifier bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; TRANSFER_ID_LEN] {
+        &self.0
+    }
+
+    /// Attempts to construct a [`TransferId`] from a byte slice, enforcing the
+    /// specification-mandated length.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, LengthError> {
+        if bytes.len() != TRANSFER_ID_LEN {
+            return Err(LengthError::new(TRANSFER_ID_LEN, bytes.len()));
+        }
+        let mut out = [0u8; TRANSFER_ID_LEN];
+        out.copy_from_slice(bytes);
+        Ok(Self::new(out))
+    }
+
+    /// Derives the canonical transfer identifier from the VEEN message
+    /// identifier, i.e. `transfer_id = Ht("wallet/xfer", msg_id)`.
+    pub fn derive(msg_id: impl AsRef<[u8]>) -> Result<Self, LengthError> {
+        let msg_id = msg_id.as_ref();
+        if msg_id.len() != TRANSFER_ID_LEN {
+            return Err(LengthError::new(TRANSFER_ID_LEN, msg_id.len()));
+        }
+        Ok(Self::from(ht("wallet/xfer", msg_id)))
+    }
+}
+
+impl From<[u8; TRANSFER_ID_LEN]> for TransferId {
+    fn from(value: [u8; TRANSFER_ID_LEN]) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<&[u8; TRANSFER_ID_LEN]> for TransferId {
+    fn from(value: &[u8; TRANSFER_ID_LEN]) -> Self {
+        Self::new(*value)
+    }
+}
+
+impl TryFrom<&[u8]> for TransferId {
+    type Error = LengthError;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        Self::from_slice(value)
+    }
+}
+
+impl TryFrom<Vec<u8>> for TransferId {
+    type Error = LengthError;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::from_slice(&value)
+    }
+}
+
+impl AsRef<[u8]> for TransferId {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl fmt::Display for TransferId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Serialize for TransferId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(self.as_ref())
+    }
+}
+
+struct TransferIdVisitor;
+
+impl<'de> Visitor<'de> for TransferIdVisitor {
+    type Value = TransferId;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a 32-byte VEEN wallet transfer identifier")
+    }
+
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+        E: DeError,
+    {
+        TransferId::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
+    }
+
+    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+    where
+        E: DeError,
+    {
+        self.visit_bytes(&v)
+    }
+}
+
+impl<'de> Deserialize<'de> for TransferId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_bytes(TransferIdVisitor)
     }
 }
 
@@ -172,6 +300,27 @@ pub enum WalletError {
 #[must_use]
 pub fn stream_id_wallet(wallet_id: WalletId) -> StreamId {
     StreamId::from(ht("wallet/stream", wallet_id.as_ref()))
+}
+
+/// Computes the canonical approval hash used for multisignature policies,
+/// `approval_hash = Ht("wallet/approval", wallet_id || to_wallet_id ||
+/// u64be(amount) || u64be(ts) || transfer_id)`.
+#[must_use]
+pub fn approval_hash(
+    wallet_id: WalletId,
+    to_wallet_id: WalletId,
+    amount: u64,
+    ts: u64,
+    transfer_id: TransferId,
+) -> [u8; 32] {
+    let mut data =
+        Vec::with_capacity(WALLET_ID_LEN * 2 + std::mem::size_of::<u64>() * 2 + TRANSFER_ID_LEN);
+    data.extend_from_slice(wallet_id.as_ref());
+    data.extend_from_slice(to_wallet_id.as_ref());
+    data.extend_from_slice(&amount.to_be_bytes());
+    data.extend_from_slice(&ts.to_be_bytes());
+    data.extend_from_slice(transfer_id.as_ref());
+    ht("wallet/approval", &data)
 }
 
 /// Returns the schema identifier for `wallet.open.v1`.
@@ -283,6 +432,44 @@ mod tests {
         match err {
             WalletError::NonAsciiCurrency { index, .. } => assert_eq!(index, 0),
         }
+    }
+
+    #[test]
+    fn transfer_id_matches_spec_formula() {
+        let msg_id = [0x44; TRANSFER_ID_LEN];
+        let transfer = TransferId::derive(msg_id).expect("transfer id");
+        assert_eq!(transfer.as_bytes(), &ht("wallet/xfer", &msg_id));
+    }
+
+    #[test]
+    fn transfer_id_from_slice_enforces_length() {
+        let bytes = [0x77; TRANSFER_ID_LEN];
+        let transfer = TransferId::from_slice(&bytes).expect("transfer id");
+        assert_eq!(transfer.as_bytes(), &bytes);
+
+        let err = TransferId::from_slice(&bytes[..TRANSFER_ID_LEN - 1]).expect_err("length error");
+        assert_eq!(err.expected(), TRANSFER_ID_LEN);
+        assert_eq!(err.actual(), TRANSFER_ID_LEN - 1);
+    }
+
+    #[test]
+    fn approval_hash_matches_spec_formula() {
+        let wallet_a = WalletId::new([0x01; WALLET_ID_LEN]);
+        let wallet_b = WalletId::new([0x02; WALLET_ID_LEN]);
+        let transfer = TransferId::derive([0xAB; TRANSFER_ID_LEN]).expect("transfer id");
+        let amount = 1_000u64;
+        let ts = 1_696_000_000u64;
+
+        let hash = approval_hash(wallet_a, wallet_b, amount, ts, transfer);
+
+        let mut data = Vec::new();
+        data.extend_from_slice(wallet_a.as_ref());
+        data.extend_from_slice(wallet_b.as_ref());
+        data.extend_from_slice(&amount.to_be_bytes());
+        data.extend_from_slice(&ts.to_be_bytes());
+        data.extend_from_slice(transfer.as_ref());
+
+        assert_eq!(hash, ht("wallet/approval", &data));
     }
 
     #[test]
