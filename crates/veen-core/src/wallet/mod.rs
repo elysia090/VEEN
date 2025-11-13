@@ -780,17 +780,15 @@ impl WalletState {
             self.wallet_id = Some(event.wallet_id);
         }
 
-        if !self.exists {
-            self.exists = true;
-            self.closed = false;
-            self.balance = 0;
-            self.frozen = false;
-            self.daily_limit = None;
-            self.pending_daily_spent = 0;
-            self.last_limit_reset_ts = event.created_at;
-            self.seen_debit_transfers.clear();
-            self.seen_credit_transfers.clear();
-        }
+        self.exists = true;
+        self.closed = false;
+        self.balance = 0;
+        self.frozen = false;
+        self.daily_limit = None;
+        self.pending_daily_spent = 0;
+        self.last_limit_reset_ts = event.created_at;
+        self.seen_debit_transfers.clear();
+        self.seen_credit_transfers.clear();
 
         Ok(())
     }
@@ -1570,6 +1568,87 @@ mod tests {
             })
             .expect_err("wallet closed");
         assert!(matches!(err, WalletFoldError::WalletClosed));
+    }
+
+    #[test]
+    fn wallet_state_reopen_resets_state() {
+        let (mut state, wallet_id, realm_id, ctx_id, created_at) =
+            open_wallet_state("realm-reopen", 0x91, "USD");
+
+        state
+            .apply_deposit(&WalletDepositEvent {
+                wallet_id,
+                amount: 200,
+                ts: created_at + 1,
+                reference: None,
+            })
+            .unwrap();
+        state
+            .apply_limit(&WalletLimitEvent {
+                wallet_id,
+                daily_limit: Some(150),
+                ts: created_at + 2,
+            })
+            .unwrap();
+        state
+            .apply_withdraw(&WalletWithdrawEvent {
+                wallet_id,
+                amount: 50,
+                ts: created_at + 3,
+                reference: None,
+            })
+            .unwrap();
+        state
+            .apply_freeze(&WalletFreezeEvent {
+                wallet_id,
+                ts: created_at + 4,
+                reason: Some("review".into()),
+            })
+            .unwrap();
+        state
+            .apply_close(&WalletCloseEvent {
+                wallet_id,
+                ts: created_at + 5,
+            })
+            .unwrap();
+
+        let err = state
+            .apply_deposit(&WalletDepositEvent {
+                wallet_id,
+                amount: 10,
+                ts: created_at + 6,
+                reference: None,
+            })
+            .expect_err("wallet closed");
+        assert!(matches!(err, WalletFoldError::WalletClosed));
+
+        let reopen_at = created_at + 10;
+        let reopen = WalletOpenEvent {
+            wallet_id,
+            realm_id,
+            ctx_id,
+            currency: "USD".into(),
+            created_at: reopen_at,
+        };
+        state.apply_open(&reopen).unwrap();
+
+        assert!(state.exists());
+        assert!(!state.is_closed());
+        assert_eq!(state.balance(), 0);
+        assert!(!state.is_frozen());
+        assert_eq!(state.daily_limit(), None);
+        assert_eq!(state.pending_daily_spent(), 0);
+        assert_eq!(state.last_limit_reset_ts(), reopen_at);
+
+        state
+            .apply_deposit(&WalletDepositEvent {
+                wallet_id,
+                amount: 25,
+                ts: reopen_at + 1,
+                reference: None,
+            })
+            .unwrap();
+        assert_eq!(state.balance(), 25);
     }
 
     #[test]
