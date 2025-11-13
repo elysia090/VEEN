@@ -12,8 +12,9 @@ pub mod label;
 mod length;
 pub mod profile;
 pub mod realm;
+pub mod wallet;
 
-pub use crate::hash::ht;
+pub use crate::hash::{h, ht};
 pub use crate::hub::{HubId, HUB_ID_LEN};
 pub use crate::identity::{
     stream_id_ctx, stream_id_handle_ns, stream_id_org, stream_id_principal, ContextId, DeviceId,
@@ -23,3 +24,8 @@ pub use crate::label::{Label, StreamId};
 pub use crate::length::LengthError;
 pub use crate::profile::{Profile, ProfileId};
 pub use crate::realm::{RealmId, REALM_ID_LEN};
+pub use crate::wallet::{
+    schema_wallet_adjust, schema_wallet_close, schema_wallet_deposit, schema_wallet_freeze,
+    schema_wallet_limit, schema_wallet_open, schema_wallet_transfer, schema_wallet_unfreeze,
+    schema_wallet_withdraw, stream_id_wallet, WalletError, WalletId, WALLET_ID_LEN,
+};
