@@ -1,7 +1,12 @@
 use std::{convert::TryFrom, fmt};
 
+use ed25519_dalek::{
+    ed25519::signature::Verifier, Signature as DalekSignature,
+    SignatureError as DalekSignatureError, VerifyingKey,
+};
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use thiserror::Error;
 
 use crate::{hash::h, label::Label, profile::ProfileId, LengthError};
 
@@ -749,6 +754,21 @@ impl From<MmrNode> for MmrRoot {
     }
 }
 
+/// Errors returned when verifying Ed25519 signatures embedded in VEEN wire
+/// objects.
+#[derive(Debug, Error)]
+pub enum SignatureVerifyError {
+    /// Provided public key bytes were not a valid Ed25519 key.
+    #[error("invalid Ed25519 public key: {0}")]
+    InvalidPublicKey(#[source] DalekSignatureError),
+    /// Provided signature bytes were not a valid Ed25519 signature.
+    #[error("invalid Ed25519 signature encoding: {0}")]
+    InvalidSignatureEncoding(#[source] DalekSignatureError),
+    /// Signature verification failed for the supplied message and key.
+    #[error("signature verification failed: {0}")]
+    VerificationFailed(#[source] DalekSignatureError),
+}
+
 /// Canonical Ed25519 signature stored in `MSG.sig`, `RECEIPT.hub_sig`, and checkpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Signature64([u8; SIGNATURE_LEN]);
@@ -771,6 +791,22 @@ impl Signature64 {
         let mut out = [0u8; SIGNATURE_LEN];
         out.copy_from_slice(bytes);
         Ok(Self::new(out))
+    }
+
+    /// Verifies the signature against the provided Ed25519 public key and
+    /// message bytes.
+    pub fn verify(
+        &self,
+        public_key: &[u8; HASH_LEN],
+        message: &[u8],
+    ) -> Result<(), SignatureVerifyError> {
+        let verifying_key =
+            VerifyingKey::from_bytes(public_key).map_err(SignatureVerifyError::InvalidPublicKey)?;
+        let signature = DalekSignature::try_from(self.as_bytes() as &[u8])
+            .map_err(SignatureVerifyError::InvalidSignatureEncoding)?;
+        verifying_key
+            .verify(message, &signature)
+            .map_err(SignatureVerifyError::VerificationFailed)
     }
 }
 
@@ -867,6 +903,7 @@ impl From<LeafHash> for MmrRoot {
 
 #[cfg(test)]
 mod tests {
+    use ed25519_dalek::{Signer, SigningKey};
     use sha2::Digest;
 
     use super::{
@@ -934,6 +971,32 @@ mod tests {
 
         let err = Signature64::from_slice(&sig.as_ref()[..SIGNATURE_LEN - 1]).expect_err("err");
         assert_eq!(err.expected(), SIGNATURE_LEN);
+    }
+
+    #[test]
+    fn signature_verify_accepts_valid_signature() {
+        let signing_key = SigningKey::from_bytes(&[0x11; 32]);
+        let message = b"verify-me";
+        let signature = signing_key.sign(message);
+        let sig = Signature64::from(signature.to_bytes());
+
+        assert!(sig
+            .verify(signing_key.verifying_key().as_bytes(), message)
+            .is_ok());
+    }
+
+    #[test]
+    fn signature_verify_rejects_modified_message() {
+        let signing_key = SigningKey::from_bytes(&[0x22; 32]);
+        let message = b"message";
+        let signature = signing_key.sign(message);
+        let sig = Signature64::from(signature.to_bytes());
+
+        let result = sig.verify(signing_key.verifying_key().as_bytes(), b"tampered");
+        assert!(matches!(
+            result,
+            Err(super::SignatureVerifyError::VerificationFailed(_))
+        ));
     }
 
     #[test]

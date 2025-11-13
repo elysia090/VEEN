@@ -58,11 +58,7 @@ pub use crate::wallet::{
     WalletWithdrawEvent, TRANSFER_ID_LEN, WALLET_ID_LEN,
 };
 pub use crate::wire::{
-    checkpoint::Checkpoint,
-    message::Msg,
-    mmr::Mmr,
-    payload::{AttachmentId, AttachmentRoot, PayloadHeader},
-    proof::{Direction, MmrPathNode, MmrProof},
-    receipt::Receipt,
-    types::{AuthRef, ClientId, CtHash, LeafHash, MmrNode, MmrRoot, Signature64, AEAD_NONCE_LEN},
+    AttachmentId, AttachmentRoot, AuthRef, Checkpoint, CheckpointVerifyError, ClientId, CtHash,
+    Direction, LeafHash, Mmr, MmrNode, MmrPathNode, MmrProof, MmrRoot, Msg, MsgVerifyError,
+    PayloadHeader, Receipt, ReceiptVerifyError, Signature64, SignatureVerifyError, AEAD_NONCE_LEN,
 };

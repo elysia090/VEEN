@@ -1,11 +1,12 @@
 use std::io;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
     hash::ht,
     label::Label,
-    wire::types::{MmrRoot, Signature64},
+    wire::types::{MmrRoot, Signature64, SignatureVerifyError, HASH_LEN},
 };
 
 /// Wire format version for `CHECKPOINT` objects.
@@ -27,6 +28,17 @@ pub struct Checkpoint {
 }
 
 type CborError = ciborium::ser::Error<io::Error>;
+
+/// Errors returned when validating signatures on CHECKPOINT objects.
+#[derive(Debug, Error)]
+pub enum CheckpointVerifyError {
+    /// Failed to serialize the signable view using deterministic CBOR.
+    #[error("failed to compute signing digest: {0}")]
+    Signing(#[from] CborError),
+    /// Signature verification failure (invalid key, encoding, or mismatch).
+    #[error(transparent)]
+    Signature(#[from] SignatureVerifyError),
+}
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
@@ -75,10 +87,23 @@ impl Checkpoint {
         let bytes = self.signing_bytes()?;
         Ok(ht("veen/sig", &bytes))
     }
+
+    /// Verifies `hub_sig` using the provided hub Ed25519 public key bytes.
+    pub fn verify_signature(
+        &self,
+        hub_public_key: &[u8; HASH_LEN],
+    ) -> Result<(), CheckpointVerifyError> {
+        let digest = self.signing_tagged_hash()?;
+        self.hub_sig
+            .verify(hub_public_key, digest.as_ref())
+            .map_err(CheckpointVerifyError::from)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use ed25519_dalek::{Signer, SigningKey};
+
     use super::*;
     use crate::hash::ht;
 
@@ -117,5 +142,58 @@ mod tests {
 
         let computed = checkpoint.signing_tagged_hash().unwrap();
         assert_eq!(computed.as_slice(), expected);
+    }
+
+    #[test]
+    fn verify_signature_accepts_valid_signature() {
+        let signing_key = SigningKey::from_bytes(&[0x55; 32]);
+        let hub_pk = signing_key.verifying_key();
+
+        let mut checkpoint = Checkpoint {
+            ver: CHECKPOINT_VERSION,
+            label_prev: Label::from_slice(&[0x11; 32]).unwrap(),
+            label_curr: Label::from_slice(&[0x22; 32]).unwrap(),
+            upto_seq: 42,
+            mmr_root: MmrRoot::new([0x33; 32]),
+            epoch: 77,
+            hub_sig: Signature64::new([0u8; 64]),
+            witness_sigs: None,
+        };
+
+        let digest = checkpoint.signing_tagged_hash().unwrap();
+        let signature = signing_key.sign(digest.as_ref());
+        checkpoint.hub_sig = Signature64::from(signature.to_bytes());
+
+        assert!(checkpoint.verify_signature(hub_pk.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn verify_signature_rejects_modified_signature() {
+        let signing_key = SigningKey::from_bytes(&[0x66; 32]);
+        let hub_pk = signing_key.verifying_key();
+
+        let mut checkpoint = Checkpoint {
+            ver: CHECKPOINT_VERSION,
+            label_prev: Label::from_slice(&[0x31; 32]).unwrap(),
+            label_curr: Label::from_slice(&[0x32; 32]).unwrap(),
+            upto_seq: 99,
+            mmr_root: MmrRoot::new([0x33; 32]),
+            epoch: 11,
+            hub_sig: Signature64::new([0u8; 64]),
+            witness_sigs: None,
+        };
+
+        let digest = checkpoint.signing_tagged_hash().unwrap();
+        let signature = signing_key.sign(digest.as_ref());
+        let mut bytes = signature.to_bytes();
+        bytes[2] ^= 0x01;
+        checkpoint.hub_sig = Signature64::from(bytes);
+
+        assert!(matches!(
+            checkpoint.verify_signature(hub_pk.as_bytes()),
+            Err(CheckpointVerifyError::Signature(
+                SignatureVerifyError::VerificationFailed(_)
+            ))
+        ));
     }
 }

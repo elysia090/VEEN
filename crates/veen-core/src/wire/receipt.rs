@@ -1,11 +1,12 @@
 use std::io;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{
     hash::ht,
     label::Label,
-    wire::types::{LeafHash, MmrRoot, Signature64},
+    wire::types::{LeafHash, MmrRoot, Signature64, SignatureVerifyError, HASH_LEN},
 };
 
 /// Wire format version for `RECEIPT` objects.
@@ -25,6 +26,17 @@ pub struct Receipt {
 }
 
 type CborError = ciborium::ser::Error<io::Error>;
+
+/// Errors produced when validating hub signatures on RECEIPT objects.
+#[derive(Debug, Error)]
+pub enum ReceiptVerifyError {
+    /// Failed to serialize the signable view using deterministic CBOR.
+    #[error("failed to compute signing digest: {0}")]
+    Signing(#[from] CborError),
+    /// Signature verification failure (invalid key, encoding, or mismatch).
+    #[error(transparent)]
+    Signature(#[from] SignatureVerifyError),
+}
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
@@ -70,10 +82,23 @@ impl Receipt {
         let bytes = self.signing_bytes()?;
         Ok(ht("veen/sig", &bytes))
     }
+
+    /// Verifies `hub_sig` using the provided hub Ed25519 public key bytes.
+    pub fn verify_signature(
+        &self,
+        hub_public_key: &[u8; HASH_LEN],
+    ) -> Result<(), ReceiptVerifyError> {
+        let digest = self.signing_tagged_hash()?;
+        self.hub_sig
+            .verify(hub_public_key, digest.as_ref())
+            .map_err(ReceiptVerifyError::from)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use ed25519_dalek::{Signer, SigningKey};
+
     use super::*;
     use crate::hash::ht;
 
@@ -110,5 +135,56 @@ mod tests {
 
         let computed = receipt.signing_tagged_hash().unwrap();
         assert_eq!(computed.as_slice(), expected);
+    }
+
+    #[test]
+    fn verify_signature_accepts_valid_signature() {
+        let signing_key = SigningKey::from_bytes(&[0x77; 32]);
+        let hub_pk = signing_key.verifying_key();
+
+        let mut receipt = Receipt {
+            ver: RECEIPT_VERSION,
+            label: Label::from_slice(&[0x11; 32]).unwrap(),
+            stream_seq: 12,
+            leaf_hash: LeafHash::new([0x22; 32]),
+            mmr_root: MmrRoot::new([0x33; 32]),
+            hub_ts: 1_700_000_000,
+            hub_sig: Signature64::new([0u8; 64]),
+        };
+
+        let digest = receipt.signing_tagged_hash().unwrap();
+        let signature = signing_key.sign(digest.as_ref());
+        receipt.hub_sig = Signature64::from(signature.to_bytes());
+
+        assert!(receipt.verify_signature(hub_pk.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn verify_signature_rejects_modified_signature() {
+        let signing_key = SigningKey::from_bytes(&[0x88; 32]);
+        let hub_pk = signing_key.verifying_key();
+
+        let mut receipt = Receipt {
+            ver: RECEIPT_VERSION,
+            label: Label::from_slice(&[0x21; 32]).unwrap(),
+            stream_seq: 2,
+            leaf_hash: LeafHash::new([0x22; 32]),
+            mmr_root: MmrRoot::new([0x23; 32]),
+            hub_ts: 1_700_001_000,
+            hub_sig: Signature64::new([0u8; 64]),
+        };
+
+        let digest = receipt.signing_tagged_hash().unwrap();
+        let signature = signing_key.sign(digest.as_ref());
+        let mut bytes = signature.to_bytes();
+        bytes[1] ^= 0xAA;
+        receipt.hub_sig = Signature64::from(bytes);
+
+        assert!(matches!(
+            receipt.verify_signature(hub_pk.as_bytes()),
+            Err(ReceiptVerifyError::Signature(
+                SignatureVerifyError::VerificationFailed(_)
+            ))
+        ));
     }
 }

@@ -2,12 +2,15 @@ use std::io;
 
 use serde::{Deserialize, Serialize};
 use serde_bytes::Bytes;
+use thiserror::Error;
 
 use crate::{
     hash::ht,
     label::Label,
     profile::ProfileId,
-    wire::types::{AuthRef, ClientId, CtHash, LeafHash, Signature64, AEAD_NONCE_LEN},
+    wire::types::{
+        AuthRef, ClientId, CtHash, LeafHash, Signature64, SignatureVerifyError, AEAD_NONCE_LEN,
+    },
 };
 
 /// Wire format version for `MSG` objects.
@@ -32,6 +35,17 @@ pub struct Msg {
 }
 
 type CborError = ciborium::ser::Error<io::Error>;
+
+/// Errors produced when verifying `MSG.sig` against the embedded client_id.
+#[derive(Debug, Error)]
+pub enum MsgVerifyError {
+    /// Failed to serialize the signable view using deterministic CBOR.
+    #[error("failed to compute signing digest: {0}")]
+    Signing(#[from] CborError),
+    /// Signature verification failure (invalid key, encoding, or mismatch).
+    #[error(transparent)]
+    Signature(#[from] SignatureVerifyError),
+}
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
@@ -151,11 +165,20 @@ impl Msg {
         let bytes = self.signing_bytes()?;
         Ok(ht("veen/sig", &bytes))
     }
+
+    /// Verifies `MSG.sig` using the embedded `client_id` and signing digest.
+    pub fn verify_signature(&self) -> Result<(), MsgVerifyError> {
+        let digest = self.signing_tagged_hash()?;
+        self.sig
+            .verify(self.client_id.as_bytes(), digest.as_ref())
+            .map_err(MsgVerifyError::from)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use ciborium::value::Value;
+    use ed25519_dalek::{Signer, SigningKey};
     use hex::FromHex;
 
     use super::*;
@@ -340,5 +363,62 @@ mod tests {
             .expect("ciphertext entry");
 
         assert!(matches!(ciphertext_value, Value::Bytes(_)));
+    }
+
+    #[test]
+    fn verify_signature_accepts_valid_signature() {
+        let signing_key = SigningKey::from_bytes(&[0x42; 32]);
+        let client_id = ClientId::from(*signing_key.verifying_key().as_bytes());
+
+        let mut msg = Msg {
+            ver: MSG_VERSION,
+            profile_id: ProfileId::from_slice(&[0x01; 32]).unwrap(),
+            label: Label::from_slice(&[0x02; 32]).unwrap(),
+            client_id,
+            client_seq: 5,
+            prev_ack: 3,
+            auth_ref: None,
+            ct_hash: CtHash::new([0xAA; 32]),
+            ciphertext: vec![0x10, 0x20],
+            sig: Signature64::new([0u8; 64]),
+        };
+
+        let digest = msg.signing_tagged_hash().unwrap();
+        let signature = signing_key.sign(digest.as_ref());
+        msg.sig = Signature64::from(signature.to_bytes());
+
+        assert!(msg.verify_signature().is_ok());
+    }
+
+    #[test]
+    fn verify_signature_rejects_invalid_signature() {
+        let signing_key = SigningKey::from_bytes(&[0x24; 32]);
+        let client_id = ClientId::from(*signing_key.verifying_key().as_bytes());
+
+        let mut msg = Msg {
+            ver: MSG_VERSION,
+            profile_id: ProfileId::from_slice(&[0x05; 32]).unwrap(),
+            label: Label::from_slice(&[0x06; 32]).unwrap(),
+            client_id,
+            client_seq: 8,
+            prev_ack: 7,
+            auth_ref: None,
+            ct_hash: CtHash::new([0xBB; 32]),
+            ciphertext: vec![0x30, 0x40],
+            sig: Signature64::new([0u8; 64]),
+        };
+
+        let digest = msg.signing_tagged_hash().unwrap();
+        let signature = signing_key.sign(digest.as_ref());
+        let mut bytes = signature.to_bytes();
+        bytes[0] ^= 0xFF;
+        msg.sig = Signature64::from(bytes);
+
+        assert!(matches!(
+            msg.verify_signature(),
+            Err(MsgVerifyError::Signature(
+                SignatureVerifyError::VerificationFailed(_)
+            ))
+        ));
     }
 }
