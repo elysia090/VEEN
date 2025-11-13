@@ -1,4 +1,4 @@
-use std::{convert::TryFrom, fmt};
+use std::{collections::HashMap, convert::TryFrom, fmt};
 
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -135,7 +135,7 @@ impl<'de> Deserialize<'de> for RevocationTarget {
 }
 
 /// Revocation kind values as defined by the specification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RevocationKind {
     /// Revocation of a `client_id`.
@@ -177,6 +177,101 @@ impl RevocationRecord {
     #[must_use]
     pub fn expires_at(&self) -> Option<u64> {
         self.ttl.and_then(|ttl| self.ts.checked_add(ttl))
+    }
+}
+
+type RevocationKey = (RevocationKind, RevocationTarget);
+
+/// In-memory materialization of revocation records keyed by `(kind, target)`.
+#[derive(Debug, Clone, Default)]
+pub struct RevocationView {
+    records: HashMap<RevocationKey, Vec<RevocationRecord>>,
+}
+
+impl RevocationView {
+    /// Creates an empty view.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Removes all tracked revocations.
+    pub fn clear(&mut self) {
+        self.records.clear();
+    }
+
+    /// Returns the number of distinct `(kind, target)` entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Returns `true` if the view has no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    /// Inserts a revocation record into the view.
+    pub fn insert(&mut self, record: RevocationRecord) {
+        let key = (record.kind, record.target);
+        self.records.entry(key).or_default().push(record);
+    }
+
+    /// Extends the view with multiple revocation records.
+    pub fn extend<I>(&mut self, records: I)
+    where
+        I: IntoIterator<Item = RevocationRecord>,
+    {
+        for record in records {
+            self.insert(record);
+        }
+    }
+
+    /// Removes revocation records that have expired by `time`.
+    pub fn purge_expired(&mut self, time: u64) {
+        self.records.retain(|_, entries| {
+            entries.retain(|record| record.is_active_at(time) || record.ts > time);
+            !entries.is_empty()
+        });
+    }
+
+    fn active_record_at(
+        &self,
+        kind: RevocationKind,
+        target: RevocationTarget,
+        time: u64,
+    ) -> Option<&RevocationRecord> {
+        self.records
+            .get(&(kind, target))
+            .and_then(|records| {
+                records
+                    .iter()
+                    .filter(|record| record.is_active_at(time))
+                    .max_by_key(|record| record.ts)
+            })
+    }
+
+    /// Returns `true` if the specified `(kind, target)` is revoked at `time`.
+    #[must_use]
+    pub fn is_revoked(
+        &self,
+        kind: RevocationKind,
+        target: RevocationTarget,
+        time: u64,
+    ) -> bool {
+        self.active_record_at(kind, target, time).is_some()
+    }
+
+    /// Returns the active revocation record if present at `time`.
+    #[must_use]
+    pub fn revoked_record(
+        &self,
+        kind: RevocationKind,
+        target: RevocationTarget,
+        time: u64,
+    ) -> Option<&RevocationRecord> {
+        self.active_record_at(kind, target, time)
     }
 }
 
@@ -245,5 +340,68 @@ mod tests {
         assert!(record.is_active_at(u64::MAX - 5));
         assert!(record.is_active_at(u64::MAX));
         assert_eq!(record.expires_at(), None);
+    }
+
+    #[test]
+    fn view_tracks_active_revocations() {
+        let target = RevocationTarget::new([0x44; REVOCATION_TARGET_LEN]);
+        let record = RevocationRecord {
+            kind: RevocationKind::AuthRef,
+            target,
+            reason: None,
+            ts: 5_000,
+            ttl: Some(100),
+        };
+
+        let mut view = RevocationView::new();
+        view.insert(record);
+
+        assert!(view.is_revoked(RevocationKind::AuthRef, target, 5_050));
+        assert!(!view.is_revoked(RevocationKind::AuthRef, target, 5_200));
+    }
+
+    #[test]
+    fn view_purges_expired_records() {
+        let target = RevocationTarget::new([0x55; REVOCATION_TARGET_LEN]);
+        let mut view = RevocationView::new();
+        view.insert(RevocationRecord {
+            kind: RevocationKind::ClientId,
+            target,
+            reason: None,
+            ts: 1_000,
+            ttl: Some(50),
+        });
+        view.insert(RevocationRecord {
+            kind: RevocationKind::ClientId,
+            target,
+            reason: None,
+            ts: 1_200,
+            ttl: Some(400),
+        });
+
+        view.purge_expired(1_300);
+
+        assert_eq!(view.len(), 1);
+        assert!(view.is_revoked(RevocationKind::ClientId, target, 1_225));
+        assert!(!view.is_revoked(RevocationKind::ClientId, target, 1_650));
+    }
+
+    #[test]
+    fn view_retains_future_records() {
+        let target = RevocationTarget::new([0x66; REVOCATION_TARGET_LEN]);
+        let mut view = RevocationView::new();
+        view.insert(RevocationRecord {
+            kind: RevocationKind::CapToken,
+            target,
+            reason: None,
+            ts: 10_000,
+            ttl: Some(100),
+        });
+
+        view.purge_expired(9_900);
+
+        assert_eq!(view.len(), 1);
+        assert!(!view.is_revoked(RevocationKind::CapToken, target, 9_950));
+        assert!(view.is_revoked(RevocationKind::CapToken, target, 10_050));
     }
 }
