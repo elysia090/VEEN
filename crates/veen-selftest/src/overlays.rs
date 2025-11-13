@@ -11,6 +11,7 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::process_harness;
 use veen_bridge::{run_bridge, BridgeConfig, EndpointConfig};
 use veen_hub::config::{HubRole, HubRuntimeConfig};
 use veen_hub::pipeline::{HubStreamState, SubmitRequest};
@@ -27,8 +28,18 @@ struct MetricsSnapshot {
 
 pub async fn run_overlays(subset: Option<&str>) -> Result<()> {
     match subset {
-        None => run_fed_auth().await?,
-        Some("fed-auth") => run_fed_auth().await?,
+        None => {
+            process_harness::run_overlay_suite()
+                .await
+                .context("running process federation harness")?;
+            run_fed_auth().await?
+        }
+        Some("fed-auth") => {
+            process_harness::run_overlay_suite()
+                .await
+                .context("running process federation harness")?;
+            run_fed_auth().await?
+        }
         Some(other) => bail!("unknown overlay subset {other}"),
     }
     Ok(())
