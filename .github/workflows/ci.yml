@@ -18,6 +18,12 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Prepare cache directories
+        run: |
+          mkdir -p "$HOME/.cargo/registry"
+          mkdir -p "$HOME/.cargo/git"
+          mkdir -p target
+
       - name: Cache cargo registry
         uses: actions/cache@v3
         with:
