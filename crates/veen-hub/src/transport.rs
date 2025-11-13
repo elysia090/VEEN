@@ -12,7 +12,8 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::pipeline::{
-    AnchorRequest, CapabilityRequest, HubPipeline, ObservabilityReport, SubmitRequest,
+    AnchorRequest, BridgeIngestRequest, CapabilityRequest, HubPipeline, ObservabilityReport,
+    SubmitRequest,
 };
 
 pub struct HubServerHandle {
@@ -33,6 +34,7 @@ impl HubServerHandle {
             .route("/resync", post(handle_resync))
             .route("/authorize", post(handle_authorize))
             .route("/anchor", post(handle_anchor))
+            .route("/bridge", post(handle_bridge))
             .route("/healthz", get(handle_health))
             .route("/metrics", get(handle_metrics))
             .with_state(pipeline);
@@ -134,6 +136,19 @@ async fn handle_anchor(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "anchor request failed");
+            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+        }
+    }
+}
+
+async fn handle_bridge(
+    State(pipeline): State<HubPipeline>,
+    Json(request): Json<BridgeIngestRequest>,
+) -> impl IntoResponse {
+    match pipeline.bridge_ingest(request).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "bridge ingest failed");
             (StatusCode::BAD_REQUEST, err.to_string()).into_response()
         }
     }

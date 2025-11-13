@@ -12,7 +12,7 @@ use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-use veen_hub::config::HubRuntimeConfig;
+use veen_hub::config::{HubRole, HubRuntimeConfig};
 use veen_hub::pipeline::{
     AnchorRequest, AttachmentUpload, CapabilityRequest, SubmitRequest, SubmitResponse,
 };
@@ -27,8 +27,13 @@ async fn goals_core_pipeline() -> Result<()> {
         .context("generating client identity")?;
 
     let listen_addr = next_listen_addr()?;
-    let config =
-        HubRuntimeConfig::from_sources(listen_addr, hub_dir.path().to_path_buf(), None).await?;
+    let config = HubRuntimeConfig::from_sources(
+        listen_addr,
+        hub_dir.path().to_path_buf(),
+        None,
+        HubRole::Primary,
+    )
+    .await?;
     let runtime = HubRuntime::start(config).await?;
 
     let client_id = read_client_id(&client_dir.join("identity_card.pub"))?;

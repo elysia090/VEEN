@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -19,6 +19,15 @@ enum Suite {
     Fuzz,
     /// Execute all suites.
     All,
+    /// Execute overlay integration scenarios.
+    Overlays(OverlaysArgs),
+}
+
+#[derive(Args)]
+struct OverlaysArgs {
+    /// Limit execution to a specific overlay subset.
+    #[arg(long)]
+    subset: Option<String>,
 }
 
 #[tokio::main]
@@ -31,6 +40,7 @@ async fn main() -> Result<()> {
         Suite::Props => veen_selftest::run_props(),
         Suite::Fuzz => veen_selftest::run_fuzz(),
         Suite::All => veen_selftest::run_all(),
+        Suite::Overlays(args) => veen_selftest::run_overlays(args.subset.as_deref()).await,
     }?;
 
     Ok(())

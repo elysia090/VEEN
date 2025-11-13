@@ -22,3 +22,9 @@ tracing-subscriber.workspace = true
 veen-core = { path = "../veen-core" }
 ed25519-dalek.workspace = true
 rand.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio-util.workspace = true
+veen-hub = { path = "../veen-hub" }
+veen-bridge = { path = "../veen-bridge" }

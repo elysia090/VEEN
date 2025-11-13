@@ -10,10 +10,17 @@ use tokio::fs;
 pub struct HubRuntimeConfig {
     pub listen: SocketAddr,
     pub data_dir: PathBuf,
+    pub role: HubRole,
     pub profile_id: Option<String>,
     pub anchors: AnchorConfig,
     pub observability: ObservabilityConfig,
     pub config_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HubRole {
+    Primary,
+    Replica,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -55,6 +62,7 @@ impl HubRuntimeConfig {
         listen: SocketAddr,
         data_dir: PathBuf,
         config_path: Option<PathBuf>,
+        role: HubRole,
     ) -> Result<Self> {
         let file_cfg = if let Some(path) = config_path.as_ref() {
             let contents = fs::read_to_string(path)
@@ -79,6 +87,7 @@ impl HubRuntimeConfig {
         Ok(Self {
             listen: resolved_listen,
             data_dir,
+            role,
             profile_id,
             anchors,
             observability,

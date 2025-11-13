@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use veen_core::wire::mmr::Mmr;
 use veen_core::wire::types::{LeafHash, MmrRoot};
 
-use crate::config::HubRuntimeConfig;
+use crate::config::{HubRole, HubRuntimeConfig};
 use crate::observability::HubObservability;
 use crate::storage::HubStorage;
 
@@ -24,6 +24,7 @@ pub struct HubPipeline {
     storage: HubStorage,
     observability: HubObservability,
     inner: Arc<Mutex<HubState>>,
+    role: HubRole,
 }
 
 struct HubState {
@@ -68,6 +69,7 @@ impl HubPipeline {
             storage: storage.clone(),
             observability,
             inner: Arc::new(Mutex::new(state)),
+            role: config.role,
         })
     }
 
@@ -76,6 +78,9 @@ impl HubPipeline {
     }
 
     pub async fn submit(&self, request: SubmitRequest) -> Result<SubmitResponse> {
+        if matches!(self.role, HubRole::Replica) {
+            bail!("replica hubs are read-only");
+        }
         let SubmitRequest {
             stream,
             client_id,
@@ -144,6 +149,105 @@ impl HubPipeline {
             seq,
             mmr_root: hex::encode(mmr_root.as_bytes()),
             stored_attachments,
+        })
+    }
+
+    pub async fn bridge_ingest(
+        &self,
+        request: BridgeIngestRequest,
+    ) -> Result<BridgeIngestResponse> {
+        if matches!(self.role, HubRole::Primary) {
+            bail!("bridge ingestion is only supported on replica hubs");
+        }
+
+        let BridgeIngestRequest {
+            message,
+            expected_mmr_root,
+        } = request;
+        let stream = message.stream.clone();
+
+        let mut guard = self.inner.lock().await;
+        let stream_runtime = guard.streams.entry(stream.clone()).or_insert_with(|| {
+            StreamRuntime::new(HubStreamState::default()).expect("empty stream state")
+        });
+
+        if let Some(existing) = stream_runtime
+            .state
+            .messages
+            .iter()
+            .find(|stored| stored.seq == message.seq)
+        {
+            if existing != &message {
+                bail!(
+                    "replica already has divergent message for {}#{}",
+                    stream,
+                    message.seq
+                );
+            }
+            let mmr_root = stream_runtime
+                .mmr
+                .root()
+                .map(|root| hex::encode(root.as_bytes()))
+                .unwrap_or_default();
+            if !expected_mmr_root.is_empty() && expected_mmr_root != mmr_root {
+                bail!("replica MMR root mismatch for {}#{}", stream, message.seq);
+            }
+            return Ok(BridgeIngestResponse {
+                stream,
+                seq: message.seq,
+                mmr_root,
+            });
+        }
+
+        let expected_seq = stream_runtime
+            .state
+            .messages
+            .last()
+            .map(|m| m.seq + 1)
+            .unwrap_or(1);
+
+        if message.seq != expected_seq {
+            bail!(
+                "bridge message out of order for {}: expected {}, got {}",
+                stream,
+                expected_seq,
+                message.seq
+            );
+        }
+
+        let leaf = leaf_hash_for(&message)?;
+        let (_, mmr_root) = stream_runtime.mmr.append(leaf);
+        let computed_root = hex::encode(mmr_root.as_bytes());
+        if !expected_mmr_root.is_empty() && expected_mmr_root != computed_root {
+            bail!(
+                "bridge mmr root mismatch for {}#{}: expected {}, computed {}",
+                stream,
+                message.seq,
+                expected_mmr_root,
+                computed_root
+            );
+        }
+
+        stream_runtime.state.messages.push(message.clone());
+
+        persist_stream_state(&self.storage, &stream, &stream_runtime.state).await?;
+        persist_message_bundle(&self.storage, &stream, message.seq, &message).await?;
+        append_receipt(
+            &self.storage,
+            &stream,
+            message.seq,
+            &leaf,
+            &mmr_root,
+            message.sent_at,
+        )
+        .await?;
+
+        self.observability.record_submit_ok();
+
+        Ok(BridgeIngestResponse {
+            stream,
+            seq: message.seq,
+            mmr_root: computed_root,
         })
     }
 
@@ -253,6 +357,19 @@ pub struct SubmitResponse {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct BridgeIngestRequest {
+    pub message: StoredMessage,
+    pub expected_mmr_root: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BridgeIngestResponse {
+    pub stream: String,
+    pub seq: u64,
+    pub mmr_root: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CapabilityRequest {
     pub token_id: String,
     pub subject: String,
@@ -268,12 +385,12 @@ pub struct AnchorRequest {
     pub backend: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct HubStreamState {
     pub messages: Vec<StoredMessage>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredMessage {
     pub stream: String,
     pub seq: u64,
@@ -289,7 +406,7 @@ pub struct StoredMessage {
     pub idem: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredAttachment {
     pub name: String,
     pub digest: String,

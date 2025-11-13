@@ -2770,7 +2770,7 @@ mod tests {
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio::time::sleep;
-    use veen_hub::config::HubRuntimeConfig;
+    use veen_hub::config::{HubRole, HubRuntimeConfig};
     use veen_hub::runtime::HubRuntime;
 
     #[tokio::test]
@@ -2781,8 +2781,13 @@ mod tests {
         let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let listen: SocketAddr = socket.local_addr()?;
         drop(socket);
-        let config =
-            HubRuntimeConfig::from_sources(listen, hub_dir.path().to_path_buf(), None).await?;
+        let config = HubRuntimeConfig::from_sources(
+            listen,
+            hub_dir.path().to_path_buf(),
+            None,
+            HubRole::Primary,
+        )
+        .await?;
         let runtime = HubRuntime::start(config).await?;
         let hub_url = format!("http://{}", listen);
 
