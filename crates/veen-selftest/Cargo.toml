@@ -14,3 +14,5 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 veen-core = { path = "../veen-core" }
+ed25519-dalek.workspace = true
+rand.workspace = true
