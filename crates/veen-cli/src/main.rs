@@ -15,6 +15,8 @@ use tokio::fs;
 use tracing_subscriber::EnvFilter;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
+use veen_core::wire::{checkpoint::CHECKPOINT_VERSION, Checkpoint};
+
 const CLIENT_KEY_VERSION: u8 = 1;
 const CLIENT_STATE_VERSION: u8 = 1;
 
@@ -659,8 +661,62 @@ async fn handle_hub_key(_args: HubKeyArgs) -> Result<()> {
     not_implemented("hub key")
 }
 
-async fn handle_hub_verify_rotation(_args: HubVerifyRotationArgs) -> Result<()> {
-    not_implemented("hub verify-rotation")
+async fn handle_hub_verify_rotation(args: HubVerifyRotationArgs) -> Result<()> {
+    let checkpoint: Checkpoint = read_cbor_file(&args.checkpoint).await?;
+
+    if !checkpoint.has_valid_version() {
+        bail!(
+            "checkpoint declares unsupported version {} (expected {})",
+            checkpoint.ver,
+            CHECKPOINT_VERSION
+        );
+    }
+
+    let digest = checkpoint
+        .signing_tagged_hash()
+        .context("computing checkpoint signing digest")?;
+
+    let new_hub_pk = parse_hex_key::<32>(&args.new_key).context("parsing new hub public key")?;
+    let old_hub_pk = parse_hex_key::<32>(&args.old_key).context("parsing old hub public key")?;
+
+    checkpoint
+        .verify_signature(&new_hub_pk)
+        .context("checkpoint hub_sig did not verify with the new hub key")?;
+
+    let witnesses = checkpoint
+        .witness_sigs
+        .as_ref()
+        .context("checkpoint does not contain witness signatures")?;
+
+    if witnesses.len() < 2 {
+        bail!(
+            "expected at least two witness signatures (old and new hub keys); found {}",
+            witnesses.len()
+        );
+    }
+
+    let mut old_verified = false;
+    let mut new_verified = false;
+    for witness in witnesses {
+        if witness.verify(&old_hub_pk, digest.as_ref()).is_ok() {
+            old_verified = true;
+        }
+        if witness.verify(&new_hub_pk, digest.as_ref()).is_ok() {
+            new_verified = true;
+        }
+    }
+
+    if !old_verified {
+        bail!("no witness signature validated with the supplied old hub key");
+    }
+    if !new_verified {
+        bail!("no witness signature validated with the supplied new hub key");
+    }
+
+    println!(
+        "checkpoint rotation verified: hub_sig (new key) and witness_sigs (old+new) are valid"
+    );
+    Ok(())
 }
 
 async fn handle_hub_health(_args: HubHealthArgs) -> Result<()> {
@@ -983,6 +1039,21 @@ fn not_implemented(command: &str) -> Result<()> {
     bail!(
         "`veen {command}` is a scaffold. Implement the workflow described in doc/CLI-GOAL.txt to make this command functional."
     );
+}
+
+fn parse_hex_key<const N: usize>(input: &str) -> Result<[u8; N]> {
+    let mut bytes = [0u8; N];
+    let data =
+        hex::decode(input.trim()).with_context(|| format!("decoding {N}-byte hex string"))?;
+    if data.len() != N {
+        bail!(
+            "expected {N} bytes ({} hex chars), got {} bytes",
+            N * 2,
+            data.len()
+        );
+    }
+    bytes.copy_from_slice(&data);
+    Ok(bytes)
 }
 
 async fn ensure_clean_directory(path: &Path) -> Result<()> {
