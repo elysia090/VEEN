@@ -1090,6 +1090,8 @@ async fn handle_hub_stop(args: HubStopArgs) -> Result<()> {
         );
     }
 
+    flush_hub_storage(&args.data_dir).await?;
+
     let stop_ts = current_unix_timestamp()?;
     state.record_stop(stop_ts);
     save_hub_state(&args.data_dir, &state).await?;
@@ -2136,6 +2138,34 @@ async fn ensure_data_dir_layout(data_dir: &Path) -> Result<()> {
         .await
         .with_context(|| format!("creating attachments dir under {}", data_dir.display()))?;
 
+    Ok(())
+}
+
+async fn flush_hub_storage(data_dir: &Path) -> Result<()> {
+    flush_file_if_exists(&data_dir.join(RECEIPTS_FILE)).await?;
+    flush_file_if_exists(&data_dir.join(PAYLOADS_FILE)).await?;
+    flush_file_if_exists(&data_dir.join(CHECKPOINTS_FILE)).await?;
+    flush_file_if_exists(&data_dir.join(STATE_DIR).join(ANCHOR_LOG_FILE)).await?;
+    Ok(())
+}
+
+async fn flush_file_if_exists(path: &Path) -> Result<()> {
+    if !fs::try_exists(path)
+        .await
+        .with_context(|| format!("checking {} before flush", path.display()))?
+    {
+        return Ok(());
+    }
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .await
+        .with_context(|| format!("opening {} for flush", path.display()))?;
+    file.sync_all()
+        .await
+        .with_context(|| format!("flushing {}", path.display()))?;
     Ok(())
 }
 
