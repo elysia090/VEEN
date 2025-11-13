@@ -1,5 +1,17 @@
 use sha2::{Digest, Sha256};
 
+/// Computes the plain SHA-256 digest `H(x)` used throughout the overlay
+/// specifications for schema identifiers.
+#[must_use]
+pub fn h(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(digest.as_slice());
+    out
+}
+
 /// Computes the domain separated hash `Ht(tag, data)` defined in the VEEN
 /// specification.
 ///
