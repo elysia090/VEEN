@@ -1,9 +1,12 @@
-use std::fmt;
-
 use ciborium::ser::into_writer;
 use hex::encode;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
+
+mod error;
+mod id;
+
+pub use self::error::ProfileError;
+pub use self::id::ProfileId;
 
 use crate::ht;
 
@@ -33,34 +36,6 @@ impl Default for Profile {
             pad_block: 0,
             mmr_hash: "sha256",
         }
-    }
-}
-
-/// Error returned when encoding a [`Profile`] fails.
-#[derive(Debug, Error)]
-pub enum ProfileError {
-    /// Serialisation or IO failure during CBOR encoding.
-    #[error("failed to encode profile to CBOR: {0}")]
-    Encoding(String),
-}
-
-/// Opaque newtype describing the profile identifier computed from a
-/// [`Profile`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProfileId(pub [u8; 32]);
-
-impl AsRef<[u8]> for ProfileId {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl fmt::Display for ProfileId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
     }
 }
 
