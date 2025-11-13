@@ -1,16 +1,47 @@
-use std::fmt;
+use std::{convert::TryFrom, fmt};
 
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::LengthError;
 
 /// Opaque newtype describing the profile identifier computed from a
 /// [`Profile`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProfileId(pub [u8; 32]);
 
+impl ProfileId {
+    /// Attempts to construct a [`ProfileId`] from an arbitrary byte slice,
+    /// enforcing the fixed size defined in the specification.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, LengthError> {
+        if bytes.len() != 32 {
+            return Err(LengthError::new(32, bytes.len()));
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(bytes);
+        Ok(Self(out))
+    }
+}
+
 impl AsRef<[u8]> for ProfileId {
     fn as_ref(&self) -> &[u8] {
         &self.0
+    }
+}
+
+impl TryFrom<&[u8]> for ProfileId {
+    type Error = LengthError;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        Self::from_slice(value)
+    }
+}
+
+impl TryFrom<Vec<u8>> for ProfileId {
+    type Error = LengthError;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::from_slice(&value)
     }
 }
 
@@ -45,12 +76,7 @@ impl<'de> Visitor<'de> for ProfileIdVisitor {
     where
         E: DeError,
     {
-        if v.len() != 32 {
-            return Err(E::invalid_length(v.len(), &self));
-        }
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(v);
-        Ok(ProfileId(bytes))
+        ProfileId::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
     }
 
     fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>

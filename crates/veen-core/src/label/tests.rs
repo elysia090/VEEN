@@ -63,3 +63,25 @@ fn label_serialization_enforces_length() {
     let result: Result<Label, _> = from_reader(truncated.as_slice());
     assert!(result.is_err(), "expected error for invalid label length");
 }
+
+#[test]
+fn stream_id_from_slice_enforces_exact_length() {
+    let bytes = [0x11; STREAM_ID_LEN];
+    let id = StreamId::from_slice(&bytes).expect("valid stream id");
+    assert_eq!(id.as_bytes(), &bytes);
+
+    let err = StreamId::from_slice(&bytes[..STREAM_ID_LEN - 1]).expect_err("length error");
+    assert_eq!(err.expected(), STREAM_ID_LEN);
+    assert_eq!(err.actual(), STREAM_ID_LEN - 1);
+}
+
+#[test]
+fn label_from_slice_enforces_exact_length() {
+    let bytes = [0x22; LABEL_LEN];
+    let label = Label::from_slice(&bytes).expect("valid label");
+    assert_eq!(label.as_bytes(), &bytes);
+
+    let err = Label::from_slice(&bytes[..LABEL_LEN - 2]).expect_err("length error");
+    assert_eq!(err.expected(), LABEL_LEN);
+    assert_eq!(err.actual(), LABEL_LEN - 2);
+}
