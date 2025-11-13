@@ -12,4 +12,6 @@ pub use mmr::Mmr;
 pub use payload::{AttachmentId, AttachmentRoot, PayloadHeader};
 pub use proof::{Direction, MmrPathNode, MmrProof};
 pub use receipt::Receipt;
-pub use types::{AuthRef, ClientId, CtHash, LeafHash, MmrNode, MmrRoot, Signature64};
+pub use types::{
+    AuthRef, ClientId, CtHash, LeafHash, MmrNode, MmrRoot, Signature64, AEAD_NONCE_LEN,
+};

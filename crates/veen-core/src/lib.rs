@@ -64,5 +64,5 @@ pub use crate::wire::{
     payload::{AttachmentId, AttachmentRoot, PayloadHeader},
     proof::{Direction, MmrPathNode, MmrProof},
     receipt::Receipt,
-    types::{AuthRef, ClientId, CtHash, LeafHash, MmrNode, MmrRoot, Signature64},
+    types::{AuthRef, ClientId, CtHash, LeafHash, MmrNode, MmrRoot, Signature64, AEAD_NONCE_LEN},
 };

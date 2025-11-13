@@ -7,7 +7,7 @@ use crate::{
     hash::ht,
     label::Label,
     profile::ProfileId,
-    wire::types::{AuthRef, ClientId, CtHash, LeafHash, Signature64},
+    wire::types::{AuthRef, ClientId, CtHash, LeafHash, Signature64, AEAD_NONCE_LEN},
 };
 
 /// Wire format version for `MSG` objects.
@@ -65,6 +65,41 @@ impl<'a> From<&'a Msg> for MsgSignable<'a> {
 }
 
 impl Msg {
+    /// Computes the truncated hash used for AEAD nonces.
+    fn truncate_nonce_bytes(digest: [u8; 32]) -> [u8; AEAD_NONCE_LEN] {
+        let mut nonce = [0u8; AEAD_NONCE_LEN];
+        nonce.copy_from_slice(&digest[..AEAD_NONCE_LEN]);
+        nonce
+    }
+
+    /// Derives the AEAD nonce `Trunc_24(Ht("veen/nonce", …))` defined by the specification.
+    #[must_use]
+    pub fn derive_body_nonce(
+        label: &Label,
+        prev_ack: u64,
+        client_id: &ClientId,
+        client_seq: u64,
+    ) -> [u8; AEAD_NONCE_LEN] {
+        let mut data = Vec::with_capacity(
+            label.as_ref().len()
+                + std::mem::size_of::<u64>()
+                + client_id.as_ref().len()
+                + std::mem::size_of::<u64>(),
+        );
+        data.extend_from_slice(label.as_ref());
+        data.extend_from_slice(&prev_ack.to_be_bytes());
+        data.extend_from_slice(client_id.as_ref());
+        data.extend_from_slice(&client_seq.to_be_bytes());
+
+        Self::truncate_nonce_bytes(ht("veen/nonce", &data))
+    }
+
+    /// Returns the AEAD nonce derived from the message fields.
+    #[must_use]
+    pub fn body_nonce(&self) -> [u8; AEAD_NONCE_LEN] {
+        Self::derive_body_nonce(&self.label, self.prev_ack, &self.client_id, self.client_seq)
+    }
+
     /// Returns `true` if the message declares the canonical wire version.
     #[must_use]
     pub fn has_valid_version(&self) -> bool {
@@ -240,6 +275,38 @@ mod tests {
 
         let computed = msg.signing_tagged_hash().unwrap();
         assert_eq!(computed.as_slice(), expected);
+    }
+
+    #[test]
+    fn body_nonce_matches_spec_formula() {
+        let msg = Msg {
+            ver: MSG_VERSION,
+            profile_id: ProfileId::from_slice(&[0x01; 32]).unwrap(),
+            label: Label::from_slice(&[0x02; 32]).unwrap(),
+            client_id: ClientId::new([0x03; 32]),
+            client_seq: 9,
+            prev_ack: 4,
+            auth_ref: None,
+            ct_hash: CtHash::new([0x04; 32]),
+            ciphertext: vec![0xAA; 8],
+            sig: Signature64::new([0x05; 64]),
+        };
+
+        let mut data = Vec::new();
+        data.extend_from_slice(msg.label.as_ref());
+        data.extend_from_slice(&msg.prev_ack.to_be_bytes());
+        data.extend_from_slice(msg.client_id.as_ref());
+        data.extend_from_slice(&msg.client_seq.to_be_bytes());
+        let digest = ht("veen/nonce", &data);
+
+        let mut expected = [0u8; AEAD_NONCE_LEN];
+        expected.copy_from_slice(&digest[..AEAD_NONCE_LEN]);
+
+        assert_eq!(msg.body_nonce(), expected);
+        assert_eq!(
+            Msg::derive_body_nonce(&msg.label, msg.prev_ack, &msg.client_id, msg.client_seq),
+            expected
+        );
     }
 
     #[test]
