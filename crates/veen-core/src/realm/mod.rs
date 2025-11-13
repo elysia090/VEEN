@@ -13,6 +13,14 @@ pub const REALM_ID_LEN: usize = 32;
 pub struct RealmId([u8; REALM_ID_LEN]);
 
 impl RealmId {
+    /// Derives the realm identifier from a human readable name as defined in
+    /// the identity specification, i.e. `realm_id = Ht("id/realm",
+    /// ascii(realm_name))`.
+    #[must_use]
+    pub fn derive(realm_name: impl AsRef<str>) -> Self {
+        Self::from(ht("id/realm", realm_name.as_ref().as_bytes()))
+    }
+
     /// Creates a new [`RealmId`] from the provided byte array.
     #[must_use]
     pub const fn new(bytes: [u8; REALM_ID_LEN]) -> Self {
