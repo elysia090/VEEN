@@ -3,7 +3,7 @@ set shell := ["bash", "-cu"]
 alias d := default
 
 [private]
-setup-tools := "rustup component add clippy rustfmt"
+ensure-toolchain := "rustup component add clippy rustfmt"
 
 help:
     @just --list
@@ -11,8 +11,14 @@ help:
 fmt:
     cargo fmt --all
 
+fmt-check:
+    cargo fmt --all --check
+
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
+
+doc:
+    cargo doc --workspace --no-deps
 
 test:
     cargo test --workspace
@@ -20,7 +26,10 @@ test:
 check:
     cargo check --workspace --all-targets
 
+tools:
+    {{ensure-toolchain}}
+
 ci:
-    just fmt
+    just fmt-check
     just lint
     just test

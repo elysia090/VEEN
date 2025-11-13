@@ -9,9 +9,19 @@ edition = "2021"
 authors = ["VEEN Contributors <dev@example.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://example.com/veen"
+rust-version = "1.74"
 
 [workspace.metadata]
 description = "Modern Rust workspace for the VEEN reference implementation."
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+unimplemented = "deny"
 
 [workspace.dependencies]
 anyhow = "1"

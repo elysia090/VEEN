@@ -12,6 +12,4 @@ serde.workspace = true
 sha2.workspace = true
 ciborium.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
 hex.workspace = true
