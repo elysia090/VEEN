@@ -714,7 +714,6 @@ impl<'de> Deserialize<'de> for GroupId {
     }
 }
 
-#[must_use]
 pub fn stream_id_principal(principal_pk: impl AsRef<[u8]>) -> Result<StreamId, LengthError> {
     let principal_pk = principal_pk.as_ref();
     ensure_ed25519_public_key_len(principal_pk)?;
