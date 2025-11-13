@@ -138,7 +138,7 @@ impl AuthorityView {
                 records
                     .iter()
                     .filter(|record| record.is_active_at(time))
-                    .min_by(|a, b| record_precedence(*a, *b))
+                    .min_by(|a, b| record_precedence(a, b))
             })
     }
 
