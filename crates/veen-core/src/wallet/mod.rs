@@ -676,6 +676,35 @@ impl Default for WalletState {
 }
 
 impl WalletState {
+    /// Applies an event while performing WALBR0 parent-based deduplication when
+    /// a bridge index is provided.
+    ///
+    /// Returns `true` when the event mutated state and `false` if it was skipped
+    /// because the associated `parent_id` had already been observed.
+    pub fn apply_with_bridge(
+        &mut self,
+        event: &WalletEvent,
+        parent_id: Option<LeafHash>,
+        bridge_index: Option<&mut WalletBridgeIndex>,
+    ) -> Result<bool, WalletFoldError> {
+        match bridge_index {
+            Some(index) => {
+                if let Some(ref parent) = parent_id {
+                    if index.has_seen(parent) {
+                        return Ok(false);
+                    }
+                }
+                event.apply_to(self)?;
+                index.observe(parent_id);
+                Ok(true)
+            }
+            None => {
+                event.apply_to(self)?;
+                Ok(true)
+            }
+        }
+    }
+
     /// Creates an empty wallet state.
     #[must_use]
     pub fn new() -> Self {
@@ -1096,6 +1125,88 @@ mod tests {
 
         index.clear();
         assert!(index.is_empty());
+    }
+
+    #[test]
+    fn wallet_state_skips_duplicate_bridged_events() {
+        let (mut state, wallet_id, _, _, created_at) =
+            open_wallet_state("realm-bridge", 0x21, "USD");
+        let deposit = WalletDepositEvent {
+            wallet_id,
+            amount: 100,
+            ts: created_at + 10,
+            reference: None,
+        };
+        let event = WalletEvent::Deposit(deposit);
+        let parent_id = LeafHash::new([0xAB; 32]);
+        let mut index = WalletBridgeIndex::new();
+
+        let applied = state
+            .apply_with_bridge(&event, Some(parent_id), Some(&mut index))
+            .expect("apply deposit");
+        assert!(applied);
+        assert_eq!(state.balance(), 100);
+
+        let applied = state
+            .apply_with_bridge(&event, Some(parent_id), Some(&mut index))
+            .expect("dedupe");
+        assert!(!applied, "duplicate bridged event should be ignored");
+        assert_eq!(state.balance(), 100);
+        assert!(index.has_seen(&parent_id));
+    }
+
+    #[test]
+    fn wallet_state_bridge_index_not_marked_on_error() {
+        let (mut state, wallet_id, _, _, created_at) =
+            open_wallet_state("realm-bridge-error", 0x22, "USD");
+        let wrong_wallet = WalletId::new([0x44; WALLET_ID_LEN]);
+        let bad_event = WalletEvent::Deposit(WalletDepositEvent {
+            wallet_id: wrong_wallet,
+            amount: 50,
+            ts: created_at + 5,
+            reference: None,
+        });
+        let parent_id = LeafHash::new([0xCD; 32]);
+        let mut index = WalletBridgeIndex::new();
+
+        let err = state
+            .apply_with_bridge(&bad_event, Some(parent_id), Some(&mut index))
+            .expect_err("wallet id mismatch");
+        assert!(matches!(err, WalletFoldError::WalletIdMismatch { .. }));
+        assert!(!index.has_seen(&parent_id));
+
+        let good_event = WalletEvent::Deposit(WalletDepositEvent {
+            wallet_id,
+            amount: 50,
+            ts: created_at + 6,
+            reference: None,
+        });
+        let applied = state
+            .apply_with_bridge(&good_event, Some(parent_id), Some(&mut index))
+            .expect("apply after fix");
+        assert!(applied);
+        assert_eq!(state.balance(), 50);
+        assert!(index.has_seen(&parent_id));
+    }
+
+    #[test]
+    fn wallet_state_local_events_ignore_bridge_index() {
+        let (mut state, wallet_id, _, _, created_at) =
+            open_wallet_state("realm-local", 0x23, "USD");
+        let deposit_event = WalletEvent::Deposit(WalletDepositEvent {
+            wallet_id,
+            amount: 75,
+            ts: created_at + 3,
+            reference: None,
+        });
+        let mut index = WalletBridgeIndex::new();
+
+        let applied = state
+            .apply_with_bridge(&deposit_event, None, Some(&mut index))
+            .expect("local deposit");
+        assert!(applied);
+        assert_eq!(state.balance(), 75);
+        assert_eq!(index.len(), 0, "local events must not mutate index");
     }
 
     fn open_wallet_state(
