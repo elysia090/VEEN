@@ -1,0 +1,624 @@
+VEEN Wallet Layer (WAL) v0.0.1 (tightened)
+Account-Based Transfer Overlay with Bridging
+Overlay on VEEN Core v0.0.1 and VEEN ID v0.0.1
+Plain ASCII, no wire-format changes
+	0.	Scope and dependencies
+
+This document defines the VEEN Wallet Layer (WAL) v0.0.1 as an account-based transfer overlay on top of:
+	•	VEEN Core v0.0.1: MSG, RECEIPT, CHECKPOINT, cap_token, MMR, labels, invariants.
+	•	VEEN Identity Layer (ID) v0.0.1: principals, devices, realms, context IDs (ctx_id), organizations (org_id), delegation.
+
+WAL adds:
+	•	wallet identifiers scoped by realm, owner, and currency
+	•	deposit, withdraw, transfer, adjust, limit, freeze, unfreeze events
+	•	deterministic balance folding per wallet
+	•	bridging rules for cross-hub replication
+
+WAL does not:
+	•	change VEEN MSG, RECEIPT, CHECKPOINT, cap_token, or any VEEN invariant
+	•	define external settlement, FX, or pricing semantics
+	•	define fraud detection policies
+
+All WAL semantics are carried as encrypted VEEN payloads. Hubs remain blind to WAL contents.
+	1.	Notation and basic rules
+
+Ht(tag,x) = H(ascii(tag) || 0x00 || x) where H is SHA-256, as in VEEN Core.
+
+CBOR rules for WAL payload bodies:
+	•	map keys as ASCII text
+	•	exact key set and key order as defined per schema
+	•	minimal-length unsigned integers (major type 0)
+	•	signed integers (for delta) use minimal-length negative or positive encoding
+	•	definite-length byte strings and arrays only
+	•	no floats
+	•	no CBOR tags
+	•	unknown keys MUST cause rejection
+
+Amounts:
+	•	amount fields are uint representing the smallest currency unit (for example cents).
+	•	WAL v0.0.1 does not define decimal or fractional representation beyond integers.
+
+Event ordering for folding:
+	•	primary order is VEEN stream_seq on the wallet stream
+	•	if multiple labels per stream are used, implementations MUST fold according to the hub-defined logical order for that stream_id and MUST treat that order as total
+	•	tie-breaking beyond stream_seq MUST be stable and deterministic (for example leaf_hash lexical order) but SHOULD not occur if invariants are respected
+
+	2.	Identity and wallet identifiers
+
+2.1 Owner identity
+
+WAL assumes owners are represented by VEEN ID-layer context identities within a realm:
+	•	ctx_id: bstr(32) as in ID v0.0.1
+	•	realm_id: bstr(32) as in ID v0.0.1
+
+A wallet belongs logically to (realm_id, ctx_id).
+
+2.2 Currency
+
+currency_code: ASCII string, for example:
+	•	“USD”, “JPY”, “EUR”
+	•	“POINTS1”, “MILES”, “CREDITS”
+
+WAL does not define or restrict the registry of valid currency_code values. Deployments MUST define:
+	•	allowed codes
+	•	external settlement semantics (for example, mapping to bank accounts or tokens)
+
+2.3 Wallet identifier
+
+For given (realm_id, ctx_id, currency_code), WAL defines:
+
+wallet_id = Ht(“wallet/id”, realm_id || ctx_id || ascii(currency_code))
+
+Properties:
+	•	wallet_id is bstr(32)
+	•	deterministic and stable for the lifetime of (realm_id, ctx_id, currency_code)
+	•	unique per (realm_id, ctx_id, currency_code) within a deployment
+
+	3.	Streams and schemas
+
+3.1 Wallet stream
+
+Each wallet_id SHOULD have a unique VEEN stream:
+
+stream_id_wallet = Ht(“wallet/stream”, wallet_id)
+
+All events that mutate or constrain that wallet MUST be sent on stream_id_wallet, except for system-wide indices or reports, which MAY be sent elsewhere but do not affect wallet folding.
+
+Deployments MAY choose alternative stream layouts (such as multiple wallets per stream) but then MUST preserve deterministic folding for each wallet_id.
+
+3.2 Schemas
+
+Schema identifiers:
+	•	schema_wallet_open     = H(“wallet.open.v1”)
+	•	schema_wallet_close    = H(“wallet.close.v1”)
+	•	schema_wallet_deposit  = H(“wallet.deposit.v1”)
+	•	schema_wallet_withdraw = H(“wallet.withdraw.v1”)
+	•	schema_wallet_transfer = H(“wallet.transfer.v1”)
+	•	schema_wallet_adjust   = H(“wallet.adjust.v1”)
+	•	schema_wallet_limit    = H(“wallet.limit.v1”)
+	•	schema_wallet_freeze   = H(“wallet.freeze.v1”)
+	•	schema_wallet_unfreeze = H(“wallet.unfreeze.v1”)
+
+All schemas are carried via payload_hdr.schema and are AEAD-protected.
+	4.	Wallet state model
+
+For each wallet_id, WAL defines the following logical state snapshot:
+	•	exists: bool
+	•	closed: bool
+	•	balance: uint (MUST be >= 0 at all times)
+	•	frozen: bool
+	•	daily_limit: uint? (optional, per-day outgoing limit)
+	•	pending_daily_spent: uint (outgoing amount in the current limit window)
+	•	last_limit_reset_ts: uint (unix time seconds; 0 means unset)
+
+Implementations MAY maintain additional derived state (such as total_in, total_out, last_activity_ts) without affecting WAL correctness.
+	5.	Events
+
+5.1 Wallet open
+
+Schema: wallet.open.v1
+Stream: stream_id_wallet
+
+Body:
+
+{
+wallet_id: bstr(32),
+realm_id: bstr(32),
+ctx_id: bstr(32),
+currency: text,
+created_at: uint
+}
+
+Constraints:
+	•	wallet_id MUST equal Ht(“wallet/id”, realm_id || ctx_id || ascii(currency)).
+	•	created_at is unix time seconds.
+
+Folding:
+	•	If exists is false:
+	•	exists = true
+	•	closed = false
+	•	balance = 0
+	•	frozen = false
+	•	daily_limit = null
+	•	pending_daily_spent = 0
+	•	last_limit_reset_ts = created_at
+	•	If exists is true:
+	•	implementations MAY treat this as a no-op or as a soft metadata refresh
+	•	WAL v0.0.1 does not define conflict resolution for divergent open events; producers SHOULD ensure that each wallet_id has at most one open event with consistent fields.
+
+5.2 Wallet close
+
+Schema: wallet.close.v1
+Stream: stream_id_wallet
+
+Body:
+
+{
+wallet_id: bstr(32),
+ts: uint
+}
+
+Folding:
+	•	If exists is false, event is ignored for state.
+	•	If exists is true, closed is set to true.
+	•	WAL v0.0.1 does not require balance = 0 at close. Deployments SHOULD enforce balance constraints at the producer level (for example, require that a closure only occurs when balance is 0).
+
+5.3 Deposit
+
+Schema: wallet.deposit.v1
+Stream: stream_id_wallet
+
+Body:
+
+{
+wallet_id: bstr(32),
+amount: uint,
+ts: uint,
+ref: bstr?       // optional external reference
+}
+
+Folding:
+	•	Precondition: exists == true and closed == false. If not, producers MUST NOT emit deposits.
+	•	On folding:
+balance = balance + amount
+
+ref is an opaque external reference (for example bank transaction ID). WAL does not interpret it.
+
+WAL does not specify who is authorized to emit deposit events. This is governed by cap_token and application policy.
+
+5.4 Withdraw
+
+Schema: wallet.withdraw.v1
+Stream: stream_id_wallet
+
+Body:
+
+{
+wallet_id: bstr(32),
+amount: uint,
+ts: uint,
+ref: bstr?
+}
+
+Folding:
+	•	Precondition: exists == true, closed == false, frozen == false.
+	•	Limit handling:
+If daily_limit is not null:
+	•	If needs_reset(last_limit_reset_ts, ts) is true:
+	•	pending_daily_spent = 0
+	•	last_limit_reset_ts = ts
+	•	If pending_daily_spent + amount > daily_limit:
+	•	producers MUST NOT emit such an event as “accepted”
+	•	verifiers MUST treat this as a policy violation
+	•	Overdraft prevention:
+	•	If balance < amount:
+	•	producers MUST NOT emit such an event as “accepted”
+	•	verifiers MUST treat this as a policy violation
+	•	On accepted event, folding:
+balance = balance - amount
+if daily_limit is not null:
+pending_daily_spent = pending_daily_spent + amount
+
+5.5 Transfer
+
+WAL standardizes a symmetric, two-sided transfer using one authoritative event and one derived credit. To keep per-wallet folding local and O(1), WAL chooses Option B (explicit credit) as normative.
+
+Schema: wallet.transfer.v1
+Stream: stream_id_wallet (source wallet)
+
+Body:
+
+{
+wallet_id: bstr(32),            // source wallet id
+to_wallet_id: bstr(32),
+amount: uint,
+ts: uint,
+transfer_id: bstr(32),
+metadata: map?                  // optional
+}
+
+transfer_id MUST be globally unique within the WAL deployment. A recommended canonical value:
+
+transfer_id = Ht(“wallet/xfer”, msg_id)
+
+where msg_id is the VEEN leaf_hash of this MSG.
+
+Source wallet folding:
+	•	Precondition: same as withdraw:
+	•	exists == true
+	•	closed == false
+	•	frozen == false
+	•	Limit handling exactly as in withdraw.
+	•	Overdraft prevention exactly as in withdraw.
+	•	On accepted event:
+balance = balance - amount
+if daily_limit not null:
+pending_daily_spent = pending_daily_spent + amount
+
+Destination wallet credit:
+
+Destination wallets MUST treat a transfer from another wallet as an incoming credit. WAL defines a derived credit event that MUST be equivalent to a deposit under a specific reference.
+
+For destination wallet_id_dest:
+	•	Either:
+	•	the same MSG is mirrored into the destination wallet stream via application logic, or
+	•	the destination state machine consumes wallet.transfer.v1 events via an index
+
+In both cases, destination folding:
+	•	For a wallet.transfer.v1 event where to_wallet_id == wallet_id_dest:
+balance = balance + amount
+
+The destination balance MUST NOT apply daily_limit or pending_daily_spent changes for incoming transfers.
+
+Duplicate transfer_id:
+	•	Implementations MUST treat multiple occurrences of the same transfer_id as the same logical transfer when folding balances, to avoid double credit or double debit.
+	•	A simple rule:
+	•	maintain a per-wallet set of seen transfer_id for source-side debits and destination-side credits (in memory or as a derived index)
+	•	if transfer_id already processed for that wallet and direction, ignore additional copies for balance folding
+
+5.6 Adjust
+
+Schema: wallet.adjust.v1
+Stream: stream_id_wallet
+
+Body:
+
+{
+wallet_id: bstr(32),
+delta: int,      // CBOR signed integer
+ts: uint,
+reason: text,
+ref: bstr?
+}
+
+Semantics:
+	•	adjust is an administrative correction operation.
+	•	Applications MUST treat adjust as high-privilege and SHOULD restrict it to institutional principals (org_pk) via cap_token.
+
+Folding:
+	•	Let new_balance = balance + delta.
+	•	If new_balance < 0:
+	•	producers MUST NOT emit such an event as accepted
+	•	verifiers MUST treat as policy violation
+	•	Else:
+balance = new_balance
+
+Adjust does not affect pending_daily_spent nor last_limit_reset_ts. If deployments want to reset limits after adjustments, they MUST emit a separate wallet.limit.v1 event.
+
+5.7 Limit
+
+Schema: wallet.limit.v1
+Stream: stream_id_wallet
+
+Body:
+
+{
+wallet_id: bstr(32),
+daily_limit: uint?,   // null clears the limit
+ts: uint
+}
+
+Folding:
+	•	If daily_limit is null:
+daily_limit = null
+	•	Else:
+daily_limit = provided value
+
+If last_limit_reset_ts == 0, implementations MAY set last_limit_reset_ts = ts on first limit definition.
+
+needs_reset(last_limit_reset_ts, ts_now) MUST be defined consistently per deployment. A simple canonical choice:
+	•	define day = floor(ts / 86400)
+	•	needs_reset returns true when day(ts_now) != day(last_limit_reset_ts)
+
+5.8 Freeze
+
+Schema: wallet.freeze.v1
+Stream: stream_id_wallet
+
+Body:
+
+{
+wallet_id: bstr(32),
+ts: uint,
+reason: text?
+}
+
+Folding:
+	•	frozen = true
+
+5.9 Unfreeze
+
+Schema: wallet.unfreeze.v1
+Stream: stream_id_wallet
+
+Body:
+
+{
+wallet_id: bstr(32),
+ts: uint,
+reason: text?
+}
+
+Folding:
+	•	frozen = false
+
+	6.	Reference folding algorithm
+
+For each wallet_id, implementations MUST derive state by folding all WAL events in stream order. The following pseudocode is normative:
+
+state0:
+exists = false
+closed = false
+balance = 0
+frozen = false
+daily_limit = null
+pending_daily_spent = 0
+last_limit_reset_ts = 0
+
+for each event e in stream order:
+match e.schema:
+
+wallet.open.v1:
+  if not exists:
+    exists = true
+    closed = false
+    balance = 0
+    frozen = false
+    daily_limit = null
+    pending_daily_spent = 0
+    last_limit_reset_ts = e.created_at
+
+wallet.close.v1:
+  if exists:
+    closed = true
+
+wallet.limit.v1:
+  if e.daily_limit is null:
+    daily_limit = null
+  else:
+    daily_limit = e.daily_limit
+    if last_limit_reset_ts == 0:
+      last_limit_reset_ts = e.ts
+
+wallet.freeze.v1:
+  if exists:
+    frozen = true
+
+wallet.unfreeze.v1:
+  if exists:
+    frozen = false
+
+wallet.deposit.v1:
+  if exists and not closed:
+    balance += e.amount
+
+wallet.withdraw.v1:
+  if exists and not closed and not frozen:
+    if daily_limit not null:
+      if needs_reset(last_limit_reset_ts, e.ts):
+        pending_daily_spent = 0
+        last_limit_reset_ts = e.ts
+      pending_daily_spent += e.amount
+    balance -= e.amount
+
+wallet.transfer.v1:
+  if exists and not closed:
+    if e.wallet_id == wallet_id:
+      if not frozen:
+        if daily_limit not null:
+          if needs_reset(last_limit_reset_ts, e.ts):
+            pending_daily_spent = 0
+            last_limit_reset_ts = e.ts
+          pending_daily_spent += e.amount
+        balance -= e.amount
+    else if e.to_wallet_id == wallet_id:
+      balance += e.amount
+
+wallet.adjust.v1:
+  if exists and not closed:
+    balance = balance + e.delta
+
+Implementations MUST additionally enforce that balance never becomes negative at runtime. The above algorithm assumes upstream validation has ensured this.
+	7.	Double-spend and idempotency
+
+VEEN Core guarantees:
+	•	uniqueness of (client_id, client_seq) per label
+	•	strict increment of client_seq per client_id per label
+	•	MMR-committed, append-only RECEIPTs
+
+WAL builds on this with:
+	•	per-wallet overdraft checks (balance >= amount before debit)
+	•	per-wallet daily_limit checks
+	•	globally unique transfer_id for transfers
+
+Applications SHOULD:
+	•	treat a second attempt at the same withdraw or transfer (for example due to retries) as a duplicate if:
+	•	it reuses the same transfer_id or ref, or
+	•	it has the same msg_id
+	•	reject or ignore duplicates when recomputing balances
+	•	rely on VEEN invariants to ensure accepted MSG are not duplicated by the hub
+
+No blockchain-style consensus is required; VEEN ordering plus local invariants are sufficient.
+	8.	Authorization via cap_token
+
+WAL depends on VEEN cap_token for admission control.
+
+Typical patterns:
+	•	End-user wallets:
+	•	issuer_pk = principal_pk of user
+	•	subject_pk = device_pk of user device
+	•	allow.stream_ids includes the wallet streams for that user
+	•	ttl is relatively short
+	•	rate is tuned for human usage
+	•	Institutional wallets (for example issuer, settlement):
+	•	issuer_pk = org_pk
+	•	subject_pk = service key
+	•	allow.stream_ids includes system wallets and indexes
+	•	ttl may be longer
+	•	rate may be higher
+
+For safety, deployments SHOULD:
+	•	never grant deposit, adjust, freeze, unfreeze, or limit capabilities directly to end-user devices for institutional wallets
+	•	require that these operations are emitted by institution-controlled services with separate keys
+	•	implement additional business rules outside WAL for KYC and risk checks
+
+	9.	Multisignature and approvals (informative)
+
+Multisignature policies can be layered on WAL without protocol modifications:
+	•	A transfer is proposed as an application-level object.
+	•	Approvers sign a hash of core fields:
+approval_hash = Ht(“wallet/approval”, wallet_id || to_wallet_id || u64be(amount) || ts || transfer_id)
+	•	Signatures are collected as an array of Ed25519 signatures in metadata or a separate overlay schema.
+	•	Once policy is satisfied (for example m-of-n), a single wallet.transfer.v1 event is emitted with MSG.sig by a designated execution key.
+
+Hub and WAL folding logic remain unchanged. All multisig semantics live at the application level, and are fully auditable within the VEEN log.
+	10.	Attachments and metadata
+
+WAL events MAY include:
+	•	metadata: CBOR map (for example narrative, category, tags, external references)
+	•	att_root: reference to VEEN attachments if large payloads (such as invoices) are attached
+
+Attach semantics:
+	•	WAL folding (balance, limits, freeze) MUST not depend on metadata or attachments.
+	•	Validation of attachments (for example verifying a Merkle tree) is optional and application-specific.
+
+	11.	Bridging (WALBR0)
+
+11.1 Scope
+
+WALBR0 defines bridging rules for replicating wallet events between hubs. Bridging is implemented as an application using VEEN ANCHOR and BRIDGE overlays. No WAL payloads or schemas change.
+
+11.2 Authoritative hub and replicas
+
+Deployments SHOULD choose an authoritative hub (or small set) per wallet_id or per realm. Authoritative hubs:
+	•	accept wallet-mutating events (open, deposit, withdraw, transfer, adjust, limit, freeze, unfreeze)
+	•	commit them to their MMR and issue RECEIPTs
+
+Replica hubs:
+	•	receive bridged copies of these events
+	•	fold state for read or local analytics
+	•	SHOULD NOT originate new wallet-mutating events for the same wallet_id unless explicitly configured for multi-primary behavior
+
+11.3 Bridging procedure
+
+A bridge component:
+	•	subscribes on hub A to relevant wallet streams (via stream with with_proof=1)
+	•	for each MSG m_A and RECEIPT_A:
+	•	verifies RECEIPT_A and mmr_proof if present
+	•	constructs a new MSG m_B with:
+	•	payload_hdr.schema = payload_hdr.schema from m_A
+	•	payload body = payload body from m_A (byte-for-byte)
+	•	payload_hdr.parent_id = msg_id of m_A
+	•	client_id and label chosen per hub B policy
+	•	MSG.sig created by bridge’s client key
+	•	submits m_B to hub B and obtains RECEIPT_B
+
+Wallet state on hub B is computed by folding WAL events from both locally-originated and bridged MSG.
+
+11.4 Bridged idempotency
+
+To avoid counting the same transfer or adjustment twice across hubs, implementations MUST:
+	•	treat parent_id as the canonical identity of bridged events
+	•	maintain a per-hub or per-deployment index of seen parent_id for WAL schemas
+	•	ignore duplicates of the same parent_id when folding wallet balances
+
+If both hubs might originate WAL events for the same wallet_id, deployments MUST define additional conflict-resolution mechanisms. WALBR0 assumes single-authority per wallet_id for simplicity.
+
+11.5 Cross-currency or cross-realm bridging
+
+WALBR0 does not alter wallet_id or currency_code during bridging. If different hubs are used for different jurisdictions or currencies:
+	•	a bridge MAY translate wallet_id and currency_code to a different representation, but then the resulting events are outside WAL v0.0.1 canonical semantics
+	•	such transformations MUST be documented and are deployment-specific
+
+	12.	Audit and compliance
+
+WAL on VEEN yields:
+	•	full, append-only logs for all wallet operations (receipts.cborseq and payloads.cborseq)
+	•	cryptographically committed and signed MMR roots
+	•	optional external anchoring of roots for time-stamping
+
+An auditor can:
+	•	re-fold all wallets from raw WAL events
+	•	verify that every balance is consistent with the event log
+	•	prove that specific events existed at or before specific checkpoints or external anchors
+
+WAL v0.0.1 deliberately keeps all monetary semantics in a single, verifiable log. No hidden side channels or out-of-band balance changes are assumed.
+	13.	Error reporting
+
+Transport-level errors use VEEN error codes (E.SIG, E.SIZE, E.SEQ, E.CAP, E.AUTH, E.RATE, E.PROFILE, E.DUP, E.TIME).
+
+Application-level WAL errors SHOULD be returned as structured payloads (for example over an RPC overlay):
+
+Examples:
+	•	WAL.INSUFFICIENT_FUNDS
+	•	WAL.FROZEN
+	•	WAL.CLOSED
+	•	WAL.DAILY_LIMIT_EXCEEDED
+	•	WAL.INVALID_CURRENCY
+	•	WAL.UNAUTHORIZED_OPERATION
+
+WAL does not standardize these codes. Deployments SHOULD:
+	•	define a stable set of error codes
+	•	ensure these are logged via WAL or auxiliary streams for auditability
+
+	14.	Conformance levels
+
+An implementation MAY claim the following conformance sets:
+	•	“WAL v0.0.1 Core”:
+	•	implements wallet_id derivation
+	•	supports wallet.open.v1, wallet.deposit.v1, wallet.withdraw.v1, wallet.transfer.v1
+	•	folds balances correctly for single-hub deployments
+	•	“WAL v0.0.1 Limits”:
+	•	“Core” plus wallet.limit.v1 and daily limit folding
+	•	“WAL v0.0.1 Control”:
+	•	“Limits” plus wallet.freeze.v1, wallet.unfreeze.v1, wallet.adjust.v1
+	•	“WAL v0.0.1 Bridge”:
+	•	“Control” plus WALBR0 bridging with parent_id based deduplication
+
+	15.	Security considerations
+
+WAL inherits VEEN security properties:
+	•	E2E confidentiality via HPKE + AEAD
+	•	sender authenticity via Ed25519 MSG.sig
+	•	hub-origin authenticity via hub_sig on RECEIPTs and CHECKPOINTs
+	•	append-only, publicly verifiable logs via MMR and optional anchoring
+
+WAL-specific considerations:
+	•	balance must never go negative; this is enforced by application logic on top of WAL semantics
+	•	adjust and deposit SHOULD be tightly restricted by cap_token and policy
+	•	large or high-risk transactions SHOULD be subject to additional review (for example multisig, approvals schema)
+	•	caps on daily_limit SHOULD be used to bound damage from key compromise
+
+Key rotation and revocation MUST follow VEEN ID and cap_token practices, with particular care for:
+	•	devices that can emit wallet-mutating events
+	•	institutional service keys that can perform adjust, deposit, freeze, unfreeze
+
+	16.	Summary
+
+WAL v0.0.1 defines a compact, deterministic, account-based wallet overlay for VEEN:
+	•	each wallet is bound to (realm_id, ctx_id, currency_code) via wallet_id
+	•	balances are computed by folding a stable set of event types
+	•	all semantics are encoded as end-to-end encrypted messages, not hub-visible state
+	•	bridging replicates events across hubs without any change in payload
+	•	auditability, non-repudiation, and portability are inherited from VEEN
+
