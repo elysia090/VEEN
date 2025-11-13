@@ -1,7 +1,7 @@
-use std::{collections::HashSet, convert::TryFrom, fmt};
+use std::{collections::HashSet, convert::TryFrom, fmt, io::Cursor};
 
-use ciborium::value::Value;
-use serde::de::{Error as DeError, Visitor};
+use ciborium::{de::from_reader, value::Value};
+use serde::de::{DeserializeOwned, Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_bytes::ByteBuf;
 use thiserror::Error;
@@ -425,6 +425,102 @@ pub struct WalletUnfreezeEvent {
     pub ts: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+fn decode_event<T>(body: &[u8]) -> Result<T, WalletEventDecodeError>
+where
+    T: DeserializeOwned,
+{
+    from_reader(Cursor::new(body)).map_err(|source| WalletEventDecodeError::Decode { source })
+}
+
+/// Errors returned when decoding WAL events from CBOR bodies.
+#[derive(Debug, Error)]
+pub enum WalletEventDecodeError {
+    /// The provided schema identifier does not correspond to a known WAL event.
+    #[error("unknown wallet schema {schema:?}")]
+    UnknownSchema { schema: [u8; 32] },
+    /// Deserialization of the CBOR event body failed.
+    #[error("failed to decode wallet event: {source}")]
+    Decode {
+        #[from]
+        source: ciborium::de::Error<std::io::Error>,
+    },
+}
+
+/// Enumeration over the WAL event types supported by this module.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WalletEvent {
+    Open(WalletOpenEvent),
+    Close(WalletCloseEvent),
+    Deposit(WalletDepositEvent),
+    Withdraw(WalletWithdrawEvent),
+    Transfer(WalletTransferEvent),
+    Adjust(WalletAdjustEvent),
+    Limit(WalletLimitEvent),
+    Freeze(WalletFreezeEvent),
+    Unfreeze(WalletUnfreezeEvent),
+}
+
+impl WalletEvent {
+    /// Attempts to decode a WAL event from the provided schema identifier and CBOR body.
+    pub fn from_schema_and_body(
+        schema: [u8; 32],
+        body: &[u8],
+    ) -> Result<Self, WalletEventDecodeError> {
+        if schema == schema_wallet_open() {
+            Ok(Self::Open(decode_event(body)?))
+        } else if schema == schema_wallet_close() {
+            Ok(Self::Close(decode_event(body)?))
+        } else if schema == schema_wallet_deposit() {
+            Ok(Self::Deposit(decode_event(body)?))
+        } else if schema == schema_wallet_withdraw() {
+            Ok(Self::Withdraw(decode_event(body)?))
+        } else if schema == schema_wallet_transfer() {
+            Ok(Self::Transfer(decode_event(body)?))
+        } else if schema == schema_wallet_adjust() {
+            Ok(Self::Adjust(decode_event(body)?))
+        } else if schema == schema_wallet_limit() {
+            Ok(Self::Limit(decode_event(body)?))
+        } else if schema == schema_wallet_freeze() {
+            Ok(Self::Freeze(decode_event(body)?))
+        } else if schema == schema_wallet_unfreeze() {
+            Ok(Self::Unfreeze(decode_event(body)?))
+        } else {
+            Err(WalletEventDecodeError::UnknownSchema { schema })
+        }
+    }
+
+    /// Returns the schema identifier associated with this event variant.
+    #[must_use]
+    pub fn schema_id(&self) -> [u8; 32] {
+        match self {
+            Self::Open(_) => schema_wallet_open(),
+            Self::Close(_) => schema_wallet_close(),
+            Self::Deposit(_) => schema_wallet_deposit(),
+            Self::Withdraw(_) => schema_wallet_withdraw(),
+            Self::Transfer(_) => schema_wallet_transfer(),
+            Self::Adjust(_) => schema_wallet_adjust(),
+            Self::Limit(_) => schema_wallet_limit(),
+            Self::Freeze(_) => schema_wallet_freeze(),
+            Self::Unfreeze(_) => schema_wallet_unfreeze(),
+        }
+    }
+
+    /// Applies the event to a [`WalletState`] using the folding rules defined by the specification.
+    pub fn apply_to(&self, state: &mut WalletState) -> Result<(), WalletFoldError> {
+        match self {
+            Self::Open(event) => state.apply_open(event),
+            Self::Close(event) => state.apply_close(event),
+            Self::Deposit(event) => state.apply_deposit(event),
+            Self::Withdraw(event) => state.apply_withdraw(event),
+            Self::Transfer(event) => state.apply_transfer(event),
+            Self::Adjust(event) => state.apply_adjust(event),
+            Self::Limit(event) => state.apply_limit(event),
+            Self::Freeze(event) => state.apply_freeze(event),
+            Self::Unfreeze(event) => state.apply_unfreeze(event),
+        }
+    }
 }
 
 /// Errors returned when applying WAL events to a [`WalletState`].
@@ -1318,6 +1414,72 @@ mod tests {
         into_writer(&value, &mut buf).expect("serialize");
         let result: Result<WalletTransferEvent, _> = from_reader(buf.as_slice());
         assert!(result.is_err(), "metadata must be map");
+    }
+
+    #[test]
+    fn wallet_event_decodes_and_applies() {
+        use ciborium::ser::into_writer;
+
+        let realm = RealmId::derive("realm-wallet-event");
+        let principal_pk = sample_key(0xA0);
+        let ctx = ContextId::derive(principal_pk, realm).expect("ctx id");
+        let wallet_id = WalletId::derive(realm, ctx, "USD").expect("wallet id");
+        let created_at = 1_700_100_000u64;
+
+        let open = WalletOpenEvent {
+            wallet_id,
+            realm_id: realm,
+            ctx_id: ctx,
+            currency: "USD".into(),
+            created_at,
+        };
+        let mut buf = Vec::new();
+        into_writer(&open, &mut buf).expect("encode open");
+
+        let event =
+            WalletEvent::from_schema_and_body(schema_wallet_open(), &buf).expect("decode open");
+        assert!(matches!(event, WalletEvent::Open(_)));
+
+        let mut state = WalletState::new();
+        event.apply_to(&mut state).expect("apply open");
+        assert!(state.exists());
+
+        let deposit = WalletDepositEvent {
+            wallet_id,
+            amount: 250,
+            ts: created_at + 1,
+            reference: None,
+        };
+        buf.clear();
+        into_writer(&deposit, &mut buf).expect("encode deposit");
+
+        let event = WalletEvent::from_schema_and_body(schema_wallet_deposit(), &buf)
+            .expect("decode deposit");
+        assert!(matches!(event, WalletEvent::Deposit(_)));
+        event.apply_to(&mut state).expect("apply deposit");
+        assert_eq!(state.balance(), 250);
+
+        let withdraw = WalletWithdrawEvent {
+            wallet_id,
+            amount: 100,
+            ts: created_at + 2,
+            reference: None,
+        };
+        buf.clear();
+        into_writer(&withdraw, &mut buf).expect("encode withdraw");
+
+        let event = WalletEvent::from_schema_and_body(schema_wallet_withdraw(), &buf)
+            .expect("decode withdraw");
+        assert!(matches!(event, WalletEvent::Withdraw(_)));
+        event.apply_to(&mut state).expect("apply withdraw");
+        assert_eq!(state.balance(), 150);
+    }
+
+    #[test]
+    fn wallet_event_unknown_schema_rejected() {
+        let err = WalletEvent::from_schema_and_body([0xAA; 32], &[]) // invalid schema
+            .expect_err("unknown schema");
+        assert!(matches!(err, WalletEventDecodeError::UnknownSchema { .. }));
     }
 
     #[test]
