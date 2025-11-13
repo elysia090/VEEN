@@ -1,4 +1,5 @@
 use super::{HubId, HUB_ID_LEN};
+use crate::ht;
 
 #[test]
 fn hub_id_derives_from_public_key() {
@@ -7,7 +8,7 @@ fn hub_id_derives_from_public_key() {
         *byte = index as u8;
     }
 
-    let hub_id = HubId::derive(public_key);
+    let hub_id = HubId::derive(public_key).expect("derive hub id");
     let expected = [
         0xea, 0x9b, 0x65, 0x36, 0x91, 0x53, 0x41, 0x54, 0x67, 0xc6, 0x68, 0x5b, 0x12, 0xa1, 0xb5,
         0x68, 0xcd, 0x74, 0x4c, 0x37, 0xb8, 0xea, 0x56, 0xa5, 0x2f, 0xaa, 0x00, 0xa9, 0x18, 0x0b,
@@ -25,4 +26,16 @@ fn hub_id_from_slice_enforces_length() {
     let err = HubId::from_slice(&bytes[..HUB_ID_LEN - 1]).expect_err("length error");
     assert_eq!(err.expected(), HUB_ID_LEN);
     assert_eq!(err.actual(), HUB_ID_LEN - 1);
+}
+
+#[test]
+fn hub_id_derive_enforces_public_key_length() {
+    let mut public_key = vec![0xAA; HUB_ID_LEN + 1];
+    let err = HubId::derive(&public_key).expect_err("length error");
+    assert_eq!(err.expected(), HUB_ID_LEN);
+    assert_eq!(err.actual(), HUB_ID_LEN + 1);
+
+    public_key.pop();
+    let id = HubId::derive(&public_key).expect("derive hub id");
+    assert_eq!(id.as_bytes(), &ht("veen/hub-id", &public_key));
 }
