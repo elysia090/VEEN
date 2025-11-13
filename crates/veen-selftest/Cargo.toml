@@ -28,3 +28,5 @@ tempfile.workspace = true
 tokio-util.workspace = true
 veen-hub = { path = "../veen-hub" }
 veen-bridge = { path = "../veen-bridge" }
+sha2.workspace = true
+hex.workspace = true

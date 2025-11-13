@@ -3,6 +3,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use tokio::runtime::Runtime;
 
 use veen_core::meta::SchemaRegistry;
 use veen_core::wire::message::MSG_VERSION;
@@ -15,6 +16,7 @@ use veen_core::{
 };
 
 mod overlays;
+mod process_harness;
 
 pub use overlays::run_overlays;
 
@@ -174,6 +176,11 @@ pub fn run_core() -> Result<()> {
     data.receipt
         .verify_signature(&data.hub_public)
         .context("verifying hub receipt signature")?;
+
+    let runtime = Runtime::new().context("creating tokio runtime for process harness")?;
+    runtime
+        .block_on(process_harness::run_core_suite())
+        .context("running process-level core integration suite")?;
 
     tracing::info!(
         label = %data.msg.label,
