@@ -1372,19 +1372,23 @@ async fn handle_retention_show(_args: RetentionShowArgs) -> Result<()> {
 }
 
 async fn handle_selftest_core() -> Result<()> {
-    not_implemented("selftest core")
+    println!("running VEEN core self-tests...");
+    veen_selftest::run_core()
 }
 
 async fn handle_selftest_props() -> Result<()> {
-    not_implemented("selftest props")
+    println!("running VEEN property self-tests...");
+    veen_selftest::run_props()
 }
 
 async fn handle_selftest_fuzz() -> Result<()> {
-    not_implemented("selftest fuzz")
+    println!("running VEEN fuzz self-tests...");
+    veen_selftest::run_fuzz()
 }
 
 async fn handle_selftest_all() -> Result<()> {
-    not_implemented("selftest all")
+    println!("running full VEEN self-test suite...");
+    veen_selftest::run_all()
 }
 
 fn not_implemented(command: &str) -> Result<()> {
