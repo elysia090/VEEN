@@ -18,6 +18,7 @@ pub mod profile;
 pub mod realm;
 pub mod revocation;
 pub mod wallet;
+pub mod wire;
 
 pub use crate::federation::{schema_fed_authority, AuthorityPolicy, AuthorityRecord};
 pub use crate::hash::{h, ht};
@@ -42,4 +43,12 @@ pub use crate::wallet::{
     schema_wallet_freeze, schema_wallet_limit, schema_wallet_open, schema_wallet_transfer,
     schema_wallet_unfreeze, schema_wallet_withdraw, stream_id_wallet, TransferId, WalletError,
     WalletId, TRANSFER_ID_LEN, WALLET_ID_LEN,
+};
+pub use crate::wire::{
+    checkpoint::Checkpoint,
+    message::Msg,
+    mmr::Mmr,
+    proof::{Direction, MmrPathNode, MmrProof},
+    receipt::Receipt,
+    types::{AuthRef, ClientId, CtHash, LeafHash, MmrNode, MmrRoot, Signature64},
 };
