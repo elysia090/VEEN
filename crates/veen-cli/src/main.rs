@@ -814,7 +814,7 @@ impl ClientStateFile {
     fn ensure_label_state(&mut self, label: &str) -> &mut ClientLabelState {
         self.labels
             .entry(label.to_string())
-            .or_insert_with(ClientLabelState::default)
+            .or_default()
     }
 }
 
