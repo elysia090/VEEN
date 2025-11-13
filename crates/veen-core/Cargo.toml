@@ -1,0 +1,17 @@
+[package]
+name = "veen-core"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core primitives and utilities for the VEEN protocol."
+
+[dependencies]
+serde.workspace = true
+sha2.workspace = true
+ciborium.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
