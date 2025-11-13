@@ -6,11 +6,15 @@
 //! enforcing consistent hashing and encoding behaviour across binaries.
 
 mod hash;
+pub mod hub;
 pub mod label;
 mod length;
 pub mod profile;
+pub mod realm;
 
 pub use crate::hash::ht;
+pub use crate::hub::{HubId, HUB_ID_LEN};
 pub use crate::label::{Label, StreamId};
 pub use crate::length::LengthError;
 pub use crate::profile::{Profile, ProfileId};
+pub use crate::realm::{RealmId, REALM_ID_LEN};
