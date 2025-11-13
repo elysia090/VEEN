@@ -1,0 +1,574 @@
+Title
+Extended Operation Profiles for VEEN v0.0.1 Core
+	0.	Scope
+
+This document defines nine higher level operation profiles on top of the VEEN v0.0.1 core. Each profile is expressed as one or more payload schemas and behavioral rules. No change is made to the VEEN wire format defined by the MSG, RECEIPT, CHECKPOINT, and mmr_proof objects. All profiles use the existing fields profile_id, label, client_id, client_seq, prev_ack, auth_ref, ct_hash, ciphertext, and sig.
+
+All structures below are CBOR maps with deterministic encoding as required by VEEN v0.0.1. The keys listed are text keys unless otherwise specified. Ordering of keys in CBOR maps follows the order in each definition.
+	1.	Common Conventions
+
+1.1 Operation identifiers
+
+operation_id: bstr(32) is defined as Ht(“veen/operation-id”, msg_id) where msg_id is the MSG leaf_hash. Application level references between messages MAY use operation_id instead of raw msg_id.
+
+parent_operation_id: bstr(32)? is an optional reference in payload bodies that points to another operation_id to express dependence or causality.
+
+1.2 Account identifiers and amounts
+
+account_id: bstr(32) is an opaque identifier for an account, wallet, or logical state holder. It MUST be derived or mapped deterministically from application level identity but its internal structure is not constrained by this document.
+
+amount: uint or int is a non negative or signed integer amount in the smallest currency or unit for the application. currency_code: text MAY be used to distinguish units (for example “JPY”, “USD”, “credits”, “points”) but VEEN does not interpret this field.
+
+1.3 Capability linkage
+
+When a profile requires authorization, MSG.auth_ref MUST reference a capability token that includes all required rights for the operation. Some profiles also allow cap_ref in payload_hdr to point to the specific capability used inside the encrypted header.
+
+1.4 Schema identifiers
+
+payload_hdr.schema MUST be a 32 byte hash value. For each profile a symbolic name is given and the concrete schema identifier is defined as
+
+schema_id = H(“veen/schema:” || ascii_name)
+
+where ascii_name is an ASCII string such as “paid.operation.v1”. Implementation MAY precompute these constants.
+	2.	Paid Operation
+
+2.1 Purpose
+
+Paid Operation couples an application operation and its payment into a single atomic event committed to the stream log. Either both the business operation and the wallet update are accepted and logged, or neither is accepted.
+
+2.2 Schema
+
+payload_hdr.schema = H(“veen/schema:paid.operation.v1”)
+
+Encrypted payload body:
+
+{
+“operation_type”: text,
+“operation_args”: any,
+“payer_account”: bstr(32),
+“payee_account”: bstr(32),
+“amount”: uint,
+“currency_code”: text,
+“operation_reference”: bstr(32)?,
+“parent_operation_id”: bstr(32)?,
+“ttl_seconds”: uint?,
+“metadata”: any?
+}
+
+operation_type: application specific name of the business operation (for example “translate”, “store_file”, “api_call”).
+
+operation_args: CBOR subtree with arguments for the business operation.
+
+payer_account and payee_account: logical accounts affected by the payment.
+
+amount and currency_code: payment amount. If currency_code is absent the deployment MUST define a single default unit.
+
+operation_reference: optional external reference such as invoice id or order id.
+
+parent_operation_id: optional link to an earlier operation that this paid operation responds to.
+
+ttl_seconds: optional maximum time that the hub SHOULD accept the operation after msg creation time.
+
+metadata: optional application specific structure.
+
+2.3 Ledger behavior
+
+The hub does not maintain balances. A wallet service, which is an application reading from the stream, MUST implement the following:
+	•	Interpret each Paid Operation as a transfer of amount from payer_account to payee_account.
+	•	Apply these transfers in stream order (stream_seq ascending).
+	•	Reject any Paid Operation that would cause a negative balance if the domain forbids negative balances.
+
+To provide atomicity from the client perspective:
+	•	The client submits a Paid Operation MSG.
+	•	If the MSG is accepted and a RECEIPT is returned, the combined event (operation and payment) is considered committed.
+	•	If E.CAP, E.AUTH, E.RATE, E.SEQ, or other error is returned, the client MUST treat the whole Paid Operation as not executed.
+
+2.4 Capability requirements
+
+The capability token referenced by auth_ref SHOULD include:
+	•	write permission to the relevant label or stream_id,
+	•	permission to debit payer_account up to some total amount and rate,
+	•	optional permission to credit payee_account.
+
+The exact representation is application specific but MUST be deterministically interpretable by the wallet and authorization components.
+
+2.5 Invariants
+
+In addition to VEEN core invariants, implementations SHOULD enforce:
+
+P1. A Paid Operation is only processed by the wallet service once per (label, stream_seq).
+
+P2. If any application level side effect (such as remote procedure call) is performed for this operation_type, it MUST either be completely idempotent or keyed by operation_id so that replays do not create extra effects.
+	3.	Access Grant
+
+3.1 Purpose
+
+Access Grant turns access control changes into explicit, logged operations rather than implicit database mutations.
+
+3.2 Schema
+
+There are two payload schemas: access.grant.v1 and access.revoke.v1.
+
+Grant payload:
+
+payload_hdr.schema = H(“veen/schema:access.grant.v1”)
+
+body:
+
+{
+“subject_identity”: bstr(32),
+“subject_label”: text?,
+“allowed_stream_ids”: [ bstr(32) ],
+“expiry_time”: uint,
+“maximum_rate_per_second”: uint?,
+“maximum_burst”: uint?,
+“maximum_amount”: uint?,
+“currency_code”: text?,
+“reason”: text?,
+“parent_operation_id”: bstr(32)?
+}
+
+Revoke payload:
+
+payload_hdr.schema = H(“veen/schema:access.revoke.v1”)
+
+body:
+
+{
+“subject_identity”: bstr(32),
+“target_capability_reference”: bstr(32)?,
+“reason”: text?,
+“parent_operation_id”: bstr(32)?
+}
+
+subject_identity: public key or account identifier that will receive or lose permissions.
+
+subject_label: human readable label for logging and display.
+
+allowed_stream_ids: set of stream identifiers to which the subject may write.
+
+expiry_time: Unix time when this access grant becomes invalid.
+
+maximum_rate_per_second and maximum_burst: admission limits for messages.
+
+maximum_amount and currency_code: optional bound for paid operations.
+
+target_capability_reference: auth_ref of the capability that is being revoked. If absent, all capabilities for subject_identity in this domain MAY be revoked.
+
+3.3 Capability token mapping
+
+On receiving an Access Grant message the hub side admission subsystem SHOULD derive a capability token that:
+	•	sets issuer_pk to the granting identity,
+	•	sets subject_pk or subject identity to subject_identity,
+	•	sets allow.stream_ids, allow.ttl, and allow.rate from the payload fields.
+
+auth_ref for this capability MUST be Ht(“veen/cap”, CBOR(cap_token)) as in VEEN core.
+
+Access Revoke MUST delete the corresponding admission record for target_capability_reference or all records related to subject_identity as configured.
+
+3.4 Invariants
+
+A1. The issuer of the Access Grant or Access Revoke MUST have a capability that authorizes modifying permissions. This constraint is domain specific but SHOULD be enforced by hub policy.
+
+A2. Admission decisions MUST be derived entirely from current sets of Access Grant and Access Revoke messages plus any bootstrapped capabilities.
+	4.	Delegated Execution
+
+4.1 Purpose
+
+Delegated Execution encodes that an action was performed by an agent using authority delegated through one or more steps.
+
+4.2 Schema
+
+payload_hdr.schema = H(“veen/schema:delegated.execution.v1”)
+
+body:
+
+{
+“principal_identity”: bstr(32),
+“agent_identity”: bstr(32),
+“delegation_chain”: [ bstr(32) ],
+“operation_schema”: bstr(32),
+“operation_body”: any,
+“parent_operation_id”: bstr(32)?,
+“metadata”: any?
+}
+
+principal_identity: identity of the original authority holder.
+
+agent_identity: identity that actually originated this MSG (usually the same as client_id but may be a stable account id).
+
+delegation_chain: ordered list of capability references (auth_ref or cap_ref values) that form the delegation path from principal to agent.
+
+operation_schema: schema id of the embedded application operation.
+
+operation_body: payload body of the embedded operation (for example a remote procedure call or a wallet update) encoded as CBOR.
+
+4.3 Processing model
+
+A Delegated Execution consumer MUST:
+	•	Verify all capability signatures for each capability reference in delegation_chain.
+	•	Verify that the subject in the first capability matches principal_identity.
+	•	Verify that the subject in the last capability matches agent_identity or client_id.
+	•	Verify that each capability in the chain allows delegation to the next subject.
+	•	Process operation_body as if it were a direct operation, with the effective authority of principal_identity.
+
+The hub MAY optionally enforce these checks at admission time for higher assurance domains.
+
+4.4 Invariants
+
+D1. delegation_chain MUST be non empty.
+
+D2. If any capability in delegation_chain fails validation, the operation MUST NOT be applied.
+
+D3. Logs MUST retain the full delegation_chain so that later analysis can reconstruct responsibility.
+	5.	Multi Party Agreement
+
+5.1 Purpose
+
+Multi Party Agreement records contracts or policy agreements involving multiple parties, with explicit agreement messages from each party.
+
+5.2 Schema
+
+Agreement definition:
+
+payload_hdr.schema = H(“veen/schema:agreement.definition.v1”)
+
+body:
+
+{
+“agreement_id”: bstr(32),
+“version”: uint,
+“terms_hash”: bstr(32),
+“terms_attachment_root”: bstr(32)?,
+“parties”: [ bstr(32) ],
+“effective_time”: uint?,
+“expiry_time”: uint?,
+“metadata”: any?
+}
+
+Agreement confirmation:
+
+payload_hdr.schema = H(“veen/schema:agreement.confirmation.v1”)
+
+body:
+
+{
+“agreement_id”: bstr(32),
+“version”: uint,
+“party_identity”: bstr(32),
+“decision”: text,
+“decision_time”: uint?,
+“parent_operation_id”: bstr(32)?,
+“metadata”: any?
+}
+
+5.3 Semantics
+
+agreement_id: stable identifier for the agreement.
+
+version: version number, monotonically increasing for the same agreement_id.
+
+terms_hash: hash of the canonical agreement text or binary.
+
+terms_attachment_root: Merkle root of the full terms when stored as attachments.
+
+parties: list of identities expected to confirm.
+
+decision: text such as “accept”, “reject”, “withdraw”.
+
+A deployment defines a policy such as:
+	•	an agreement (agreement_id, version) is active when all parties have decision “accept” for that pair;
+	•	a new version supersedes an older version when a majority or all parties confirm.
+
+Consumers can derive which version was active at any stream_seq or time by scanning Agreement Definition and Agreement Confirmation messages.
+
+5.4 Invariants
+
+M1. For a given (agreement_id, version, party_identity) there MUST be at most one latest Confirmation with decision “accept” or “reject”. Earlier conflicting decisions MUST be treated as superseded by later stream order.
+
+M2. Agreement Definition messages SHOULD be rare and stable; confirmation messages are the primary dynamic events.
+	6.	Data Publication
+
+6.1 Purpose
+
+Data Publication binds a content item or bundle to a point in the log.
+
+6.2 Schema
+
+payload_hdr.schema = H(“veen/schema:data.publication.v1”)
+
+body:
+
+{
+“publication_id”: bstr(32),
+“publisher_identity”: bstr(32),
+“content_root”: bstr(32),
+“content_class”: text,
+“version”: text,
+“labels”: [ text ]?,
+“source_uri”: text?,
+“metadata”: any?
+}
+
+publication_id: stable identifier for the logical object (for example model name, dataset name).
+
+publisher_identity: identity that publishes the content.
+
+content_root: Merkle root over either inline attachments or external content hashes. The Merkle construction MUST be defined per deployment. A simple tree using Ht(“veen/content-node”, left||right) and Ht(“veen/content-root”, concat(peaks)) is RECOMMENDED.
+
+content_class: functional class, for example “model”, “dataset”, “configuration”, “binary”.
+
+version: semantically meaningful version identifier such as “v1.2.0” or “2025-11-13T12:00Z”.
+
+labels, source_uri, metadata: optional search and descriptive fields.
+
+6.3 Semantics
+
+To verify that an artifact matches a publication:
+	•	Recompute content_root from the candidate data or its hashes.
+	•	Fetch the Data Publication message and check that content_root matches.
+	•	Verify the RECEIPT and optional anchor.
+
+6.4 Invariants
+
+P1. For a given publication_id and version there MUST be at most one Data Publication message in the domain.
+
+P2. Consumers MAY choose a survivorship rule for multiple versions (for example pick highest version or latest in stream order).
+	7.	State Snapshot
+
+7.1 Purpose
+
+State Snapshot defines how to derive a consistent state from a stream of operations at a given point.
+
+7.2 Snapshot checkpoint schema
+
+payload_hdr.schema = H(“veen/schema:state.checkpoint.v1”)
+
+body:
+
+{
+“state_id”: bstr(32),
+“upto_stream_seq”: uint,
+“mmr_root”: bstr(32),
+“state_hash”: bstr(32),
+“state_class”: text,
+“metadata”: any?
+}
+
+state_id: identifier for the logical state, for example an account_id or configuration key.
+
+upto_stream_seq: inclusive stream sequence number up to which operations are considered.
+
+mmr_root: root value from CHECKPOINT or RECEIPT at upto_stream_seq.
+
+state_hash: hash of the fully folded state after applying all relevant operations up to upto_stream_seq.
+
+state_class: description such as “wallet.ledger”, “counter.map”, “configuration.map”.
+
+7.3 Folding rules
+
+Each application MUST define a deterministic folding function for its state_class.
+
+Examples:
+	•	For a wallet ledger, fold by summing credit and debit operations for each account_id.
+	•	For a grow only counter map, fold by summing deltas per key.
+	•	For a last writer wins map, fold by taking the value with the highest timestamp, with stream_seq as tie breaker.
+
+The folding function MUST be pure and MUST produce the same state_hash for any correct implementation reading the same log prefix.
+
+7.4 Verification procedure
+
+To verify a State Snapshot:
+	•	Fetch all RECEIPT and MSG pairs for the label up to upto_stream_seq.
+	•	Filter messages relevant to state_id.
+	•	Apply the state_class folding function in stream order.
+	•	Compute Ht(“veen/state-” || state_class, serialized_state) and check equality with state_hash.
+	•	Verify that the mmr_root matches the root recorded in the checkpoint or receipt at upto_stream_seq.
+
+7.5 Invariants
+
+S1. For a given state_id and upto_stream_seq there SHOULD be at most one checkpoint. If multiple checkpoints exist, consumers MAY prefer the latest one in stream order.
+
+S2. A consumer MUST treat any snapshot with mismatched mmr_root or state_hash as invalid.
+	8.	Recovery Procedure
+
+8.1 Purpose
+
+Recovery Procedure structures identity and wallet recovery as multi stage, logged actions.
+
+8.2 Schemas
+
+Recovery request:
+
+payload_hdr.schema = H(“veen/schema:recovery.request.v1”)
+
+body:
+
+{
+“target_identity”: bstr(32),
+“requested_new_identity”: bstr(32),
+“reason”: text?,
+“request_time”: uint?,
+“metadata”: any?
+}
+
+Recovery approval:
+
+payload_hdr.schema = H(“veen/schema:recovery.approval.v1”)
+
+body:
+
+{
+“target_identity”: bstr(32),
+“requested_new_identity”: bstr(32),
+“approver_identity”: bstr(32),
+“policy_group_id”: bstr(32)?,
+“decision”: text,
+“decision_time”: uint?,
+“parent_operation_id”: bstr(32)?,
+“metadata”: any?
+}
+
+Recovery execution:
+
+payload_hdr.schema = H(“veen/schema:recovery.execution.v1”)
+
+body:
+
+{
+“target_identity”: bstr(32),
+“new_identity”: bstr(32),
+“applied_time”: uint?,
+“approval_references”: [ bstr(32) ],
+“metadata”: any?
+}
+
+8.3 Policy
+
+A domain defines recovery policies such as:
+	•	For each target_identity there is a set of guardian identities.
+	•	A threshold number of approvals with decision “approve” and matching requested_new_identity is required.
+	•	Approvals must be later than the request and earlier than the execution.
+
+A wallet or identity service reads the log and:
+	•	Tracks open Recovery Request messages.
+	•	Aggregates approvals by target_identity and requested_new_identity.
+	•	When a Recovery Execution appears with sufficient valid approvals, remaps the identity in its local state from target_identity to new_identity.
+
+8.4 Invariants
+
+R1. Recovery Execution MUST reference only approvals that exist in the log before its own stream_seq.
+
+R2. If any referenced approval has decision other than “approve” or has mismatched target_identity or requested_new_identity, the execution MUST be rejected.
+
+R3. A domain MAY enforce that only certain identities (for example administrators) can send Recovery Execution messages.
+	9.	Query Audit Log
+
+9.1 Purpose
+
+Query Audit Log makes read operations on sensitive resources visible as first class events.
+
+9.2 Schema
+
+payload_hdr.schema = H(“veen/schema:query.audit.v1”)
+
+body:
+
+{
+“requester_identity”: bstr(32),
+“resource_identifier”: text,
+“resource_class”: text,
+“query_parameters”: any?,
+“purpose_code”: text?,
+“result_digest”: bstr(32)?,
+“request_time”: uint?,
+“metadata”: any?
+}
+
+resource_identifier: logical path or identifier for the resource (for example “patient:1234:lab-results”).
+
+resource_class: high level class such as “personal-data”, “financial-record”, “system-log”.
+
+query_parameters: filters, projection, or other parameters.
+
+purpose_code: short code expressing why the query was made (for example “treatment”, “billing”, “debug”).
+
+result_digest: optional hash of the returned data or a canonical digest. If present, it MUST be derived in a deterministic documented way.
+
+9.3 Processing
+
+A data access service SHOULD:
+	•	Before or after serving a query, emit a Query Audit message with the appropriate fields.
+	•	Use the same label structure consistently so that auditors can subscribe to all query logs for a domain.
+
+Auditors can then reconstruct who accessed what and when by scanning the stream.
+
+9.4 Invariants
+
+Q1. For heavily regulated resources the domain MAY require that every successful data access produces a corresponding Query Audit message; absence of such a message is treated as a policy violation.
+	10.	Federation Synchronization
+
+10.1 Purpose
+
+Federation Synchronization defines how messages and their proofs are mirrored across hubs.
+
+10.2 Mirror payload
+
+payload_hdr.schema = H(“veen/schema:federation.mirror.v1”)
+
+body:
+
+{
+“source_hub_identifier”: text,
+“source_label”: bstr(32),
+“source_stream_seq”: uint,
+“source_leaf_hash”: bstr(32),
+“source_receipt_root”: bstr(32),
+“target_label”: bstr(32),
+“mirror_time”: uint?,
+“metadata”: any?
+}
+
+source_hub_identifier: textual identifier or address of the origin hub.
+
+source_label, source_stream_seq, source_leaf_hash, source_receipt_root: values from the source RECEIPT.
+
+target_label: label under which the mirrored messages are stored in the target hub.
+
+mirror_time: time when mirroring occurred.
+
+10.3 Mirroring process
+
+A mirror component runs the following loop:
+	•	Subscribe to stream(with_proof=1) on the source hub for a set of labels.
+	•	For each source (RECEIPT, MSG, mmr_proof):
+	•	Validate hub_sig, invariants, and mmr_proof.
+	•	Construct a mirror MSG whose payload is federation.mirror.v1 and whose parent_id in payload_hdr references the original msg_id.
+	•	Submit the mirror MSG to the target hub under target_label.
+	•	The target hub treats the mirrored MSG as a normal message and includes it in its own MMR and receipts.
+
+10.4 Consistency checks
+
+A consumer that wants to check synchronization between two hubs:
+	•	Reads federation.mirror.v1 messages from the target hub.
+	•	For each such message, fetches the referenced RECEIPT from the source hub using source_hub_identifier and source_label.
+	•	Verifies that source_receipt_root, source_leaf_hash, and source_stream_seq match the source RECEIPT.
+	•	Optionally verifies anchors on both sides.
+
+10.5 Invariants
+
+F1. A mirror MUST NOT send a federation.mirror.v1 message for a source message it has not fully validated.
+
+F2. For a given source (source_hub_identifier, source_label, source_stream_seq) there SHOULD be at most one mirror record for a given target_label.
+	11.	Integration Summary
+
+All nine operation families share the following properties:
+	•	They are defined only by payload_hdr.schema and encrypted payload fields.
+	•	They reuse VEEN core invariants and data structures including MSG, RECEIPT, CHECKPOINT, MMR, and capability tokens.
+	•	They can be implemented incrementally: a deployment MAY support only a subset and still remain fully compatible at the transport level.
+
+A reference implementation SHOULD:
+	•	Provide type safe structures and encoders for each schema.
+	•	Provide validators for each profile that enforce the listed invariants.
+	•	Provide client side helpers to construct these payloads, link them to capabilities, and submit them through the existing CLI and APIs.
+
