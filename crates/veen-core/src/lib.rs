@@ -52,6 +52,7 @@ pub use crate::wire::{
     checkpoint::Checkpoint,
     message::Msg,
     mmr::Mmr,
+    payload::{AttachmentId, AttachmentRoot, PayloadHeader},
     proof::{Direction, MmrPathNode, MmrProof},
     receipt::Receipt,
     types::{AuthRef, ClientId, CtHash, LeafHash, MmrNode, MmrRoot, Signature64},
