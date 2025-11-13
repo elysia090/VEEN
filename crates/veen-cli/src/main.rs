@@ -7,6 +7,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use serde_json::json;
@@ -536,25 +537,34 @@ struct ClientPublicBundle {
     dh_public: ByteBuf,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct ClientStateFile {
     version: u8,
     profile_id: Option<String>,
     hubs: Vec<ClientStateHubPin>,
     labels: BTreeMap<String, ClientLabelState>,
+    #[serde(default)]
+    rotation_history: Vec<ClientRotationRecord>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct ClientStateHubPin {
     hub: String,
     profile_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct ClientLabelState {
     last_stream_seq: u64,
     last_mmr_root: String,
     prev_ack: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ClientRotationRecord {
+    rotated_at: u64,
+    previous_client_id: String,
+    previous_dh_public: String,
 }
 
 #[tokio::main]
@@ -710,6 +720,7 @@ async fn handle_keygen(args: KeygenArgs) -> Result<()> {
         profile_id: None,
         hubs: Vec::new(),
         labels: BTreeMap::new(),
+        rotation_history: Vec::new(),
     };
 
     write_cbor_file(&keystore_path, &secret_bundle)
@@ -741,12 +752,121 @@ async fn handle_keygen(args: KeygenArgs) -> Result<()> {
     Ok(())
 }
 
-async fn handle_id_show(_args: IdShowArgs) -> Result<()> {
-    not_implemented("id show")
+async fn handle_id_show(args: IdShowArgs) -> Result<()> {
+    let client_dir = args.client;
+    let identity_path = client_dir.join("identity_card.pub");
+    let state_path = client_dir.join("state.json");
+
+    let identity: ClientPublicBundle = read_cbor_file(&identity_path).await?;
+    let state: ClientStateFile = read_json_file(&state_path).await?;
+
+    let client_id_hex = hex::encode(identity.client_id.as_ref());
+    let id_sign_hex = client_id_hex.clone();
+    let id_dh_hex = hex::encode(identity.dh_public.as_ref());
+
+    println!("client_id: {client_id_hex}");
+    println!("id_sign_public: {id_sign_hex}");
+    println!("id_dh_public: {id_dh_hex}");
+
+    match state.profile_id {
+        Some(profile) => println!("profile_id: {profile}"),
+        None => println!("profile_id: (not pinned)"),
+    }
+
+    if state.labels.is_empty() {
+        println!("labels: (none)");
+    } else {
+        println!("labels:");
+        for (label, info) in state.labels.iter() {
+            println!(
+                "  {label}: last_stream_seq={}, last_mmr_root={}, prev_ack={}",
+                info.last_stream_seq, info.last_mmr_root, info.prev_ack
+            );
+        }
+    }
+
+    if state.rotation_history.is_empty() {
+        println!("rotation_history: (none)");
+    } else {
+        println!("rotation_history:");
+        for record in state.rotation_history.iter() {
+            println!(
+                "  rotated_at={}: previous_client_id={}, previous_dh_public={}",
+                record.rotated_at, record.previous_client_id, record.previous_dh_public
+            );
+        }
+    }
+
+    Ok(())
 }
 
-async fn handle_id_rotate(_args: IdRotateArgs) -> Result<()> {
-    not_implemented("id rotate")
+async fn handle_id_rotate(args: IdRotateArgs) -> Result<()> {
+    let client_dir = args.client;
+    let keystore_path = client_dir.join("keystore.enc");
+    let identity_path = client_dir.join("identity_card.pub");
+    let state_path = client_dir.join("state.json");
+
+    let mut secret_bundle: ClientSecretBundle = read_cbor_file(&keystore_path).await?;
+    let mut state: ClientStateFile = read_json_file(&state_path).await?;
+
+    let previous_client_id = secret_bundle.client_id.clone();
+    let previous_dh_public = secret_bundle.dh_public.clone();
+
+    let mut rng = OsRng;
+    let signing_key = SigningKey::generate(&mut rng);
+    let verifying_key = signing_key.verifying_key();
+    let dh_secret = StaticSecret::random_from_rng(rng);
+    let dh_public = X25519PublicKey::from(&dh_secret);
+
+    let rotated_at = current_unix_timestamp()?;
+
+    let new_client_id = ByteBuf::from(verifying_key.to_bytes().to_vec());
+    let new_dh_public = ByteBuf::from(dh_public.to_bytes().to_vec());
+    let new_signing_key = ByteBuf::from(signing_key.to_bytes().to_vec());
+    let new_dh_secret = ByteBuf::from(dh_secret.to_bytes().to_vec());
+
+    secret_bundle.created_at = rotated_at;
+    secret_bundle.client_id = new_client_id.clone();
+    secret_bundle.dh_public = new_dh_public.clone();
+    secret_bundle.signing_key = new_signing_key;
+    secret_bundle.dh_secret = new_dh_secret;
+
+    write_cbor_file(&keystore_path, &secret_bundle)
+        .await
+        .with_context(|| {
+            format!(
+                "writing rotated private keys to {}",
+                keystore_path.display()
+            )
+        })?;
+    restrict_private_permissions(&keystore_path).await?;
+
+    let public_bundle = ClientPublicBundle {
+        version: secret_bundle.version,
+        created_at: rotated_at,
+        client_id: new_client_id.clone(),
+        dh_public: new_dh_public.clone(),
+    };
+
+    write_cbor_file(&identity_path, &public_bundle)
+        .await
+        .with_context(|| format!("writing rotated identity to {}", identity_path.display()))?;
+
+    state.rotation_history.push(ClientRotationRecord {
+        rotated_at,
+        previous_client_id: hex::encode(previous_client_id.as_ref()),
+        previous_dh_public: hex::encode(previous_dh_public.as_ref()),
+    });
+
+    write_json_file(&state_path, &json!(state))
+        .await
+        .with_context(|| format!("updating client state in {}", state_path.display()))?;
+
+    let new_client_id_hex = hex::encode(new_client_id.as_ref());
+    tracing::info!(client_id = %new_client_id_hex, "rotated VEEN client identity");
+    println!("rotated client identity. new client_id: {new_client_id_hex}");
+
+    Ok(())
 }
 
 async fn handle_send(_args: SendArgs) -> Result<()> {
@@ -935,6 +1055,30 @@ where
         .await
         .with_context(|| format!("persisting {}", path.display()))?;
     Ok(())
+}
+
+async fn read_cbor_file<T>(path: &Path) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let data = fs::read(path)
+        .await
+        .with_context(|| format!("reading {}", path.display()))?;
+    let value = ciborium::de::from_reader(data.as_slice())
+        .map_err(|err| anyhow!("failed to decode CBOR from {}: {err}", path.display()))?;
+    Ok(value)
+}
+
+async fn read_json_file<T>(path: &Path) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let data = fs::read(path)
+        .await
+        .with_context(|| format!("reading {}", path.display()))?;
+    let value = serde_json::from_slice(&data)
+        .with_context(|| format!("parsing JSON from {}", path.display()))?;
+    Ok(value)
 }
 
 async fn restrict_private_permissions(path: &Path) -> Result<()> {
