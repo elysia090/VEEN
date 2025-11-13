@@ -1,0 +1,362 @@
+VEEN v0.1.0-FH — Federated and Hardened Profile
+Overlay on VEEN v0.0.1 Core (wire-compatible, no changes to sections 5–8)
+	0.	Status and scope
+
+This document defines the VEEN v0.1.0-FH (“Federated + Hardened”) profile as a set of additive, wire-compatible extensions to the VEEN v0.0.1 core specification.
+
+The goals are:
+	•	explicit authority model for labels and hubs
+	•	clear single-primary discipline per label
+	•	stronger key and capability lifecycle
+	•	explicit revocation
+	•	structured hardening under adversarial load
+	•	minimal discovery and schema metadata
+
+No field is added to MSG, RECEIPT, CHECKPOINT, mmr_proof, or cap_token. All additions are overlays carried inside existing payloads or operational constraints applied by compliant implementations.
+
+Normative requirements are written using RFC 2119 terms (MUST, SHOULD, MAY).
+	1.	Dependencies and terminology
+
+This profile depends on:
+	•	VEEN v0.0.1 Core and OP0
+	•	KEX0 for basic key distribution
+	•	RESYNC0 for resynchronization
+	•	ANCHOR0 for optional anchoring
+
+Terms:
+	•	“wire format” means the CBOR encoding of MSG, RECEIPT, CHECKPOINT, mmr_proof, cap_token as defined in sections 5–8 of v0.0.1.
+	•	“overlay schema” is a payload_hdr.schema value and body that do not alter wire objects.
+	•	“realm_id” and “stream_id” are as in v0.0.1 and any ID-layer overlays.
+
+	2.	FED1 — Federated hubs and hub_id
+
+2.1 hub_id derivation
+
+Each hub has a long-term Ed25519 key pair (hub_sk, hub_pk) as in v0.0.1. FED1 defines:
+
+hub_id = Ht(“veen/hub-id”, hub_pk)
+
+where Ht is the tagged hash function from v0.0.1.
+
+Properties:
+	•	hub_id is bstr(32).
+	•	hub_id is stable for the lifetime of hub_pk.
+	•	hub_id is never added to wire objects; it is derived from hub_pk whenever needed.
+
+2.2 Federation domain
+
+A federation domain is an administrative set of hubs that accept VEEN traffic for a shared set of realms and stream_ids.
+
+This profile does not prescribe a discovery mechanism for federation domains; deployments MAY use static configuration, out-of-band distribution, or VEEN streams.
+
+2.3 Authority record schema
+
+Schema identifier:
+
+schema_fed_authority = H(“veen.fed.authority.v1”)
+
+Body (CBOR map, fixed key order):
+
+{
+realm_id: bstr(32),
+stream_id: bstr(32),
+primary_hub: bstr(32),        // hub_id
+replica_hubs: [ bstr(32) ],   // hub_id[]
+policy: text,                 // “single-primary” | “multi-primary”
+ts: uint,
+ttl: uint
+}
+
+Semantics:
+	•	For each (realm_id, stream_id), at any point in time, at most one authority record is considered active.
+	•	An authority record is active for the time interval [ts, ts+ttl).
+	•	primary_hub is the hub_id of the authoritative writer for this (realm_id, stream_id).
+	•	replica_hubs are hub_id values of hubs that are allowed to mirror via ANCHOR0 and bridging, but not to accept new MSG as primary under “single-primary” policy.
+	•	policy:
+	•	“single-primary”: only primary_hub MAY accept MSG whose label corresponds to (realm_id, stream_id) according to AUTH1.
+	•	“multi-primary”: multiple hubs MAY accept MSG for this label; conflict resolution is left to the application.
+
+Authority records are carried on an administrative stream per realm:
+
+stream_id_admin(realm_id) = Ht(“veen/admin”, realm_id)
+
+All authority records for realm_id MUST be published on this stream.
+
+2.4 Authority evaluation
+
+At commit time for a MSG under label L, a hub that implements FED1 MUST:
+	•	derive stream_id for L as in the deployment’s mapping (for example stream_id is known to the application and bound to label via Ht(“veen/label”, routing_key || stream_id || u64be(E))).
+	•	use (realm_id, stream_id) to look up the current active authority record, if any.
+	•	if no record exists, apply local default (for example single-primary or allow-any).
+	•	if a record exists and policy == “single-primary” and hub_id != primary_hub:
+	•	the hub MUST refuse to accept the MSG (E.AUTH or E.CAP), and SHOULD include a detail field indicating “not primary for label”.
+
+Replica hubs MAY still accept bridged MSG from primary_hub as standard MSG, but such acceptance MUST be considered “mirroring” and not primary authority.
+	3.	AUTH1 — Label authority model
+
+AUTH1 formalizes the per-label authority assumptions.
+
+3.1 Label authority view
+
+For each label, a hub maintains an internal view:
+
+label_authority = {
+realm_id: bstr(32)?,
+stream_id: bstr(32),
+primary_hub: bstr(32)?,
+policy: text   // “single-primary” | “multi-primary” | “unspecified”
+}
+
+This view is derived from:
+	•	authority records in schema_fed_authority where realm_id and stream_id map to the label
+	•	local configuration, if no authority record exists
+
+If no authority record exists, policy SHOULD be treated as “unspecified”. A deployment MAY treat “unspecified” as “single-primary” or “multi-primary”, but MUST document the choice.
+
+3.2 Admission rule
+
+For a hub claiming AUTH1 compliance:
+	•	If policy == “single-primary” and label_authority.primary_hub is defined:
+	•	The hub MUST NOT accept new MSG for this label unless hub_id == primary_hub.
+	•	Attempted submissions from clients SHOULD yield E.AUTH or E.CAP.
+	•	If policy == “multi-primary”:
+	•	The hub MAY accept MSG for this label.
+	•	The hub SHOULD log that this label is multi-primary and MAY require additional app-level conflict handling.
+
+If no policy is known, the hub MAY accept MSG but SHOULD emit operational warnings.
+
+3.3 Equivocation detection
+
+The existing report_equivocation endpoint takes two RECEIPTs with identical (label, stream_seq) and differing leaf_hash or mmr_root.
+
+Under AUTH1:
+	•	A hub MUST treat any locally proven equivocation on a label where policy == “single-primary” as a critical error, because under single-primary assumptions only one hub should be issuing RECEIPTs for that label.
+	•	Federation tooling SHOULD propagate such equivocation evidence to an administrative stream and optionally external anchors for audit.
+
+	4.	KEX1 — Key and capability lifecycle tightening
+
+KEX1 refines client key and capability lifetime expectations.
+
+4.1 Client key lifetime
+
+Deployments MUST define:
+	•	max_client_id_lifetime_sec (RECOMMENDED <= 86400)
+	•	max_msgs_per_client_id_per_label (RECOMMENDED <= 2^16)
+
+A client that claims KEX1 compliance MUST:
+	•	rotate client_id (Ed25519 public key in MSG.client_id) before either bound is exceeded.
+
+A hub that claims KEX1 compliance SHOULD:
+	•	reject MSG from client_id that has:
+	•	age > max_client_id_lifetime_sec, or
+	•	produced more than max_msgs_per_client_id_per_label MSG under a given label,
+
+unless explicitly configured otherwise.
+
+Rejected MSG MUST cause E.CAP or E.AUTH.
+
+4.2 Capability hard expiry
+
+cap_token.allow.ttl is interpreted as a strict upper bound on validity.
+
+Define:
+	•	issued_at: uint inside cap_token or implied by the first time the token is seen; deployments MUST define how issued_at is obtained.
+
+KEX1 requirement:
+	•	authorize MUST treat cap_token as invalid if current_time > issued_at + ttl, even if stored admission records are still present.
+	•	hubs MUST NOT accept MSG referencing auth_ref derived from expired cap_token.
+
+Clients SHOULD proactively refresh capabilities before expiry.
+
+4.3 Revocation overlay
+
+Schema identifier:
+
+schema_revocation = H(“veen.revocation.v1”)
+
+Body:
+
+{
+kind: text,              // “client-id” | “auth-ref” | “cap-token”
+target: bstr(32),
+reason: text?,
+ts: uint,
+ttl: uint?
+}
+
+Semantics:
+	•	kind:
+	•	“client-id”: target is some client_id (Ed25519 pubkey).
+	•	“auth-ref”: target is auth_ref as defined in v0.0.1.
+	•	“cap-token”: target is H(CBOR(cap_token)).
+	•	ts is the revocation time in Unix seconds.
+	•	ttl, if present, defines a revocation window [ts, ts+ttl). Without ttl, revocation is open-ended.
+
+Hubs implementing KEX1 MUST:
+	•	maintain a revocation view derived from revocation events on an administrative stream.
+	•	at admission time for submit:
+	•	if client_id is revoked at current_time, reject with E.CAP or E.AUTH.
+	•	if auth_ref is revoked at current_time, reject with E.CAP or E.AUTH.
+	•	if cap-token hash is revoked at current_time, treat auth_ref derived from it as invalid.
+
+Revocations themselves are historical facts and MUST NOT be “deleted” from the log. TTL only defines when they cease to apply operationally.
+	5.	SH1 — Extended hardening under load
+
+SH1 structures the existing SH0 recommendations into an explicit pipeline and adds optional proof-of-work.
+
+5.1 Admission stages
+
+A hub implementing SH1 SHOULD process submit requests through four logical stages:
+
+Stage 0: Stateless prefilter
+	•	Check message size and basic transport-level properties.
+	•	Apply IP/subnet allow/deny lists if configured.
+	•	Optionally validate a proof-of-work cookie or stateless token.
+
+Stage 1: Structural checks
+	•	Decode CBOR(MSG); on failure, E.SIZE.
+	•	Enforce MAX_MSG_BYTES, MAX_HDR_BYTES.
+	•	Validate presence and size of fixed fields: ver, profile_id, label, client_id, ct_hash, sig.
+
+Stage 2: Cryptographic checks
+	•	Verify MSG.sig.
+	•	If auth_ref present and admission is configured:
+	•	look up admission record
+	•	verify cap_token signature chain if not cached
+
+Stage 3: Commit
+	•	Apply invariants I1..I12.
+	•	Append leaf_hash to MMR.
+	•	Sign RECEIPT.
+	•	Persist receipts and checkpoints.
+
+Under heavy load, hubs MAY:
+	•	drop requests at Stage 0 or 1 aggressively.
+	•	limit the number of concurrent Stage 2 and Stage 3 operations separately.
+
+5.2 Proof-of-work cookie (optional)
+
+Schema identifier for cookie:
+
+schema_pow_cookie = H(“veen.pow.cookie.v1”)
+
+Body:
+
+{
+challenge: bstr,
+nonce: uint64,
+difficulty: uint8
+}
+
+A cookie is valid if:
+	•	Ht(“veen/pow”, challenge || u64be(nonce)) has at least difficulty leading zero bits in its bit representation.
+
+Usage:
+	•	Hubs MAY require presence of a valid pow_cookie (sent in an out-of-band header or in a separate RPC overlay) before performing Stage 2 under specific conditions (for example suspected DoS attack).
+	•	Clients MAY reuse cookies for multiple submissions until invalidated or expired by policy.
+
+Pow cookies do not appear in MSG and do not affect wire format.
+
+5.3 Dynamic padding guidelines
+
+pad_block in profile is static per profile_id, but deployments MAY select different profile_id values per label class.
+
+Recommended mapping:
+	•	pad_block = 256 or 1024 for labels classified as “user”, “wallet”, or other interactive streams.
+	•	pad_block = 0 for “log”, “metric”, or other bulk streams where length-hiding is not required.
+
+Classifications can be managed via label classification overlays (section 6).
+	6.	Label classification overlay
+
+To drive operational policy without hub visibility into payloads, this profile defines a classification schema.
+
+Schema identifier:
+
+schema_label_class = H(“veen.label.class.v1”)
+
+Body:
+
+{
+label: bstr(32),
+class: text,          // for example “user” | “wallet” | “log” | “admin”
+sensitivity: text?,   // for example “low” | “medium” | “high”
+retention_hint: uint? // seconds, advisory
+}
+
+Semantics:
+	•	Hubs MAY use class and sensitivity to choose:
+	•	padding profile_id
+	•	rate limiting policy
+	•	logging level
+	•	retention defaults
+	•	retention_hint is advisory; COMP0 retention policies remain normative.
+
+Label classification is carried on administrative streams and does not affect MSG encoding.
+	7.	META0 — Schema registry and discovery
+
+META0 provides a simple registry for schemas in use on a VEEN fabric.
+
+7.1 Schema descriptor
+
+Schema identifier:
+
+schema_meta_schema = H(“veen.meta.schema.v1”)
+
+Body:
+
+{
+schema_id: bstr(32),
+name: text,
+version: text,        // for example “v1”, “v0.0.1”
+doc_url: text?,
+owner: bstr(32)?,     // org_pk or principal_pk
+ts: uint
+}
+
+Rules:
+	•	schema_id MUST equal the 32-byte hash used in payload_hdr.schema.
+	•	name is a human-readable identifier such as “rpc.v1” or “wallet.transfer.v1”.
+	•	version is application-defined.
+	•	owner, if present, identifies the organization or principal that owns the schema.
+	•	ts is the registration time.
+
+Schema descriptors SHOULD be published on a dedicated metadata stream per realm or per deployment:
+
+stream_id_schema_meta = Ht(“veen/meta-schema”, realm_id)
+
+7.2 Usage
+
+Implementations MAY:
+	•	scan schema meta streams to discover schemas in use
+	•	map schema_id to documentation and ownership for tooling and management
+	•	anchor schema meta events via ANCHOR0 for long-term audit
+
+META0 is informative for protocols themselves; it does not affect wire behavior.
+	8.	Profile claims
+
+An implementation MAY advertise the following combinations:
+	•	“VEEN v0.1.0 Core”:
+	•	v0.0.1 Core + OP0 + KEX0 + RESYNC0
+	•	no FED1/AUTH1/KEX1/SH1/META0 requirements
+	•	“VEEN v0.1.0 Federated”:
+	•	“Core” plus FED1 + AUTH1
+	•	single-primary enforcement for labels with authority records
+	•	“VEEN v0.1.0 Hardened”:
+	•	“Federated” plus KEX1 + SH1
+	•	bounded client_id lifetime and message count
+	•	strict capability expiry
+	•	revocation overlay
+	•	structured multi-stage admission and optional PoW
+	•	“VEEN v0.1.0 Federated + Hardened + Meta”:
+	•	“Hardened” plus META0 and label classification overlays
+
+These profile strings are not encoded on the wire and are intended for documentation, configuration, and interop testing.
+	9.	Security considerations
+
+The v0.1.0-FH profile strengthens v0.0.1 without modifying the cryptographic primitives or wire format:
+	•	By enforcing single-primary authority per label, it reduces the risk of accidental multi-primary conflicts.
+	•	By bounding client key and capability lifetimes and introducing revocations, it restricts the impact of key compromise.
+	•	By formalizing admission stages and optional PoW, it reduces the cost of attack on hubs.
+	•	By classifying labels, it guides padding and retention choices without exposing payloads.
+
+All security properties listed in v0.0.1 section 14 remain valid. This profile reduces the operational attack surface and clarifies behavior in federated, multi-hub deployments.
