@@ -307,8 +307,8 @@ impl SchemaRegistry {
                 });
             }
             Entry::Occupied(mut slot) => {
-                let replace =
-                    (descriptor.ts, stream_seq) >= (slot.get().descriptor.ts, slot.get().stream_seq);
+                let replace = (descriptor.ts, stream_seq)
+                    >= (slot.get().descriptor.ts, slot.get().stream_seq);
                 if replace {
                     slot.insert(RegistryEntry {
                         descriptor,
@@ -322,9 +322,7 @@ impl SchemaRegistry {
     /// Returns the descriptor for the provided schema identifier, if present.
     #[must_use]
     pub fn get(&self, schema_id: &SchemaId) -> Option<&SchemaDescriptor> {
-        self.entries
-            .get(schema_id)
-            .map(|entry| &entry.descriptor)
+        self.entries.get(schema_id).map(|entry| &entry.descriptor)
     }
 
     /// Returns an iterator over stored schema descriptors.
@@ -444,7 +442,10 @@ mod tests {
         };
         registry.upsert(first.clone(), 5);
 
-        let second = SchemaDescriptor { version: "v1.1".into(), ..first.clone() };
+        let second = SchemaDescriptor {
+            version: "v1.1".into(),
+            ..first.clone()
+        };
         registry.upsert(second.clone(), 4);
         assert_eq!(registry.get(&schema_id), Some(&first));
 
