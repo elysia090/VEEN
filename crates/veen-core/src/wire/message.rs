@@ -1,6 +1,10 @@
+use std::io;
+
 use serde::{Deserialize, Serialize};
+use serde_bytes::Bytes;
 
 use crate::{
+    hash::ht,
     label::Label,
     profile::ProfileId,
     wire::types::{AuthRef, ClientId, CtHash, LeafHash, Signature64},
@@ -22,8 +26,42 @@ pub struct Msg {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_ref: Option<AuthRef>,
     pub ct_hash: CtHash,
+    #[serde(with = "serde_bytes")]
     pub ciphertext: Vec<u8>,
     pub sig: Signature64,
+}
+
+type CborError = ciborium::ser::Error<io::Error>;
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct MsgSignable<'a> {
+    ver: u64,
+    profile_id: &'a ProfileId,
+    label: &'a Label,
+    client_id: &'a ClientId,
+    client_seq: u64,
+    prev_ack: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_ref: Option<&'a AuthRef>,
+    ct_hash: &'a CtHash,
+    ciphertext: &'a Bytes,
+}
+
+impl<'a> From<&'a Msg> for MsgSignable<'a> {
+    fn from(value: &'a Msg) -> Self {
+        Self {
+            ver: value.ver,
+            profile_id: &value.profile_id,
+            label: &value.label,
+            client_id: &value.client_id,
+            client_seq: value.client_seq,
+            prev_ack: value.prev_ack,
+            auth_ref: value.auth_ref.as_ref(),
+            ct_hash: &value.ct_hash,
+            ciphertext: Bytes::new(&value.ciphertext),
+        }
+    }
 }
 
 impl Msg {
@@ -62,10 +100,27 @@ impl Msg {
     pub fn msg_id(&self) -> LeafHash {
         self.leaf_hash()
     }
+
+    /// Serializes the message without the signature field using the canonical
+    /// deterministic CBOR ordering required by spec-1.
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, CborError> {
+        let mut buf = Vec::new();
+        let view = MsgSignable::from(self);
+        ciborium::ser::into_writer(&view, &mut buf)?;
+        Ok(buf)
+    }
+
+    /// Computes the domain separated hash `Ht("veen/sig", …)` used for
+    /// Ed25519 signatures over `MSG` objects.
+    pub fn signing_tagged_hash(&self) -> Result<[u8; 32], CborError> {
+        let bytes = self.signing_bytes()?;
+        Ok(ht("veen/sig", &bytes))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use ciborium::value::Value;
     use hex::FromHex;
 
     use super::*;
@@ -161,5 +216,62 @@ mod tests {
 
         assert_eq!(msg.leaf_hash(), expected);
         assert_eq!(msg.msg_id(), expected);
+    }
+
+    #[test]
+    fn signing_tagged_hash_matches_manual_encoding() {
+        let msg = Msg {
+            ver: MSG_VERSION,
+            profile_id: ProfileId::from_slice(&[0x01; 32]).unwrap(),
+            label: Label::from_slice(&[0x02; 32]).unwrap(),
+            client_id: ClientId::new([0x03; 32]),
+            client_seq: 9,
+            prev_ack: 8,
+            auth_ref: Some(AuthRef::from_slice(&[0x04; 32]).unwrap()),
+            ct_hash: CtHash::new([0x05; 32]),
+            ciphertext: vec![0xAA, 0xBB, 0xCC],
+            sig: Signature64::new([0x06; 64]),
+        };
+
+        let view = MsgSignable::from(&msg);
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&view, &mut buf).unwrap();
+        let expected = ht("veen/sig", &buf);
+
+        let computed = msg.signing_tagged_hash().unwrap();
+        assert_eq!(computed.as_slice(), expected);
+    }
+
+    #[test]
+    fn ciphertext_serializes_as_cbor_bstr() {
+        let msg = Msg {
+            ver: MSG_VERSION,
+            profile_id: ProfileId::from_slice(&[0x10; 32]).unwrap(),
+            label: Label::from_slice(&[0x11; 32]).unwrap(),
+            client_id: ClientId::new([0x12; 32]),
+            client_seq: 1,
+            prev_ack: 0,
+            auth_ref: None,
+            ct_hash: CtHash::new([0x13; 32]),
+            ciphertext: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            sig: Signature64::new([0x14; 64]),
+        };
+
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&msg, &mut buf).unwrap();
+        let value: Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+
+        let map = match value {
+            Value::Map(entries) => entries,
+            _ => panic!("expected map"),
+        };
+
+        let ciphertext_value = map
+            .into_iter()
+            .find(|(key, _)| matches!(key, Value::Text(text) if text == "ciphertext"))
+            .map(|(_, value)| value)
+            .expect("ciphertext entry");
+
+        assert!(matches!(ciphertext_value, Value::Bytes(_)));
     }
 }
