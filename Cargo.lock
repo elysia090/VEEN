@@ -1715,6 +1715,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "veen-core",
+ "veen-selftest",
  "x25519-dalek",
 ]
 
@@ -1748,9 +1749,11 @@ name = "veen-selftest"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ciborium",
  "clap",
  "ed25519-dalek",
  "rand",
+ "serde",
  "tokio",
  "tracing",
  "tracing-subscriber",

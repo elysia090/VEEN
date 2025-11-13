@@ -7,9 +7,15 @@ license.workspace = true
 repository.workspace = true
 description = "Self-test harness scaffold for the VEEN reference implementation."
 
+[lib]
+name = "veen_selftest"
+path = "src/lib.rs"
+
 [dependencies]
 anyhow.workspace = true
+ciborium.workspace = true
 clap.workspace = true
+serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
