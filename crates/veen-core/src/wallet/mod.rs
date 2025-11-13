@@ -825,6 +825,18 @@ impl WalletState {
     pub fn apply_transfer(&mut self, event: &WalletTransferEvent) -> Result<(), WalletFoldError> {
         let wallet_id = self.wallet_id.ok_or(WalletFoldError::WalletIdUnknown)?;
 
+        if event.wallet_id == wallet_id && event.to_wallet_id == wallet_id {
+            if self.seen_debit_transfers.contains(&event.transfer_id)
+                && self.seen_credit_transfers.contains(&event.transfer_id)
+            {
+                return Ok(());
+            }
+            self.ensure_active()?;
+            self.seen_debit_transfers.insert(event.transfer_id);
+            self.seen_credit_transfers.insert(event.transfer_id);
+            return Ok(());
+        }
+
         if event.wallet_id == wallet_id {
             if self.seen_debit_transfers.contains(&event.transfer_id) {
                 return Ok(());
@@ -1460,6 +1472,38 @@ mod tests {
         dest.apply_transfer(&transfer).unwrap();
         assert_eq!(source.balance(), 180);
         assert_eq!(dest.balance(), 120);
+    }
+
+    #[test]
+    fn wallet_state_self_transfer_is_noop_and_idempotent() {
+        let (mut state, wallet_id, _, _, created_at) =
+            open_wallet_state("realm-self-transfer", 0x51, "USD");
+        state
+            .apply_deposit(&WalletDepositEvent {
+                wallet_id,
+                amount: 200,
+                ts: created_at + 1,
+                reference: None,
+            })
+            .unwrap();
+
+        let transfer_id = TransferId::derive([0x34; TRANSFER_ID_LEN]).expect("transfer id");
+        let transfer = WalletTransferEvent {
+            wallet_id,
+            to_wallet_id: wallet_id,
+            amount: 150,
+            ts: created_at + 2,
+            transfer_id,
+            metadata: None,
+        };
+
+        state.apply_transfer(&transfer).unwrap();
+        assert_eq!(state.balance(), 200);
+        assert_eq!(state.pending_daily_spent(), 0);
+
+        state.apply_transfer(&transfer).unwrap();
+        assert_eq!(state.balance(), 200);
+        assert_eq!(state.pending_daily_spent(), 0);
     }
 
     #[test]
