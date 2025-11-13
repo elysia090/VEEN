@@ -564,6 +564,17 @@ struct HubRuntimeState {
     metrics: HubMetricsSnapshot,
 }
 
+struct HubStartContext<'a> {
+    data_dir: &'a Path,
+    listen: SocketAddr,
+    profile_id: String,
+    hub_id: String,
+    log_level: Option<String>,
+    now: u64,
+    pid: u32,
+    foreground: bool,
+}
+
 impl Default for HubRuntimeState {
     fn default() -> Self {
         Self {
@@ -594,17 +605,17 @@ impl HubRuntimeState {
         }
     }
 
-    fn record_start(
-        &mut self,
-        data_dir: &Path,
-        listen: SocketAddr,
-        profile_id: String,
-        hub_id: String,
-        log_level: Option<String>,
-        now: u64,
-        pid: u32,
-        foreground: bool,
-    ) -> Result<()> {
+    fn record_start(&mut self, ctx: HubStartContext<'_>) -> Result<()> {
+        let HubStartContext {
+            data_dir,
+            listen,
+            profile_id,
+            hub_id,
+            log_level,
+            now,
+            pid,
+            foreground,
+        } = ctx;
         if self.running {
             bail!("hub in {} is already marked as running", data_dir.display());
         }
@@ -648,25 +659,13 @@ impl HubRuntimeState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct HubMetricsSnapshot {
     submit_ok_total: u64,
     submit_err_total: BTreeMap<String, u64>,
     verify_latency_ms: HistogramSnapshot,
     commit_latency_ms: HistogramSnapshot,
     end_to_end_latency_ms: HistogramSnapshot,
-}
-
-impl Default for HubMetricsSnapshot {
-    fn default() -> Self {
-        Self {
-            submit_ok_total: 0,
-            submit_err_total: BTreeMap::new(),
-            verify_latency_ms: HistogramSnapshot::default(),
-            commit_latency_ms: HistogramSnapshot::default(),
-            end_to_end_latency_ms: HistogramSnapshot::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -865,16 +864,16 @@ async fn handle_hub_start(args: HubStartArgs) -> Result<()> {
     let mut state = load_hub_state(&args.data_dir).await?;
     let now = current_unix_timestamp()?;
     state
-        .record_start(
-            &args.data_dir,
-            args.listen,
-            profile_id.clone(),
-            key_info.hub_id_hex.clone(),
-            log_level.clone(),
+        .record_start(HubStartContext {
+            data_dir: &args.data_dir,
+            listen: args.listen,
+            profile_id: profile_id.clone(),
+            hub_id: key_info.hub_id_hex.clone(),
+            log_level: log_level.clone(),
             now,
-            process::id(),
-            args.foreground,
-        )
+            pid: process::id(),
+            foreground: args.foreground,
+        })
         .with_context(|| format!("updating hub state in {}", args.data_dir.display()))?;
 
     save_hub_state(&args.data_dir, &state).await?;
@@ -1546,7 +1545,7 @@ async fn read_hub_key_material(data_dir: &Path) -> Result<HubKeyInfo> {
         .as_ref()
         .try_into()
         .map_err(|_| anyhow!("hub public key must be 32 bytes"))?;
-    let hub_id = HubId::derive(&pk).context("deriving hub identifier from public key")?;
+    let hub_id = HubId::derive(pk).context("deriving hub identifier from public key")?;
 
     Ok(HubKeyInfo {
         hub_id_hex: hex::encode(hub_id.as_ref()),
