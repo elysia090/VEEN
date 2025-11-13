@@ -65,8 +65,7 @@ impl ClientUsage {
     /// Returns `true` if the client lifetime bound has been met or exceeded.
     #[must_use]
     pub fn lifetime_exceeded(&self, now: u64, config: ClientUsageConfig) -> bool {
-        now
-            .checked_sub(self.created_at)
+        now.checked_sub(self.created_at)
             .is_some_and(|elapsed| elapsed >= config.max_client_id_lifetime_sec)
     }
 
