@@ -127,6 +127,8 @@ impl<'de> Deserialize<'de> for ClientId {
     }
 }
 
+crate::hexutil::impl_fixed_hex_from_str!(ClientId, HASH_LEN);
+
 /// Admission reference carried on the wire to bind to a capability token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AuthRef([u8; HASH_LEN]);
@@ -236,6 +238,8 @@ impl<'de> Deserialize<'de> for AuthRef {
         deserializer.deserialize_bytes(AuthRefVisitor)
     }
 }
+
+crate::hexutil::impl_fixed_hex_from_str!(AuthRef, HASH_LEN);
 
 /// Canonical SHA-256 hash of the ciphertext payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -352,6 +356,8 @@ impl<'de> Deserialize<'de> for CtHash {
         deserializer.deserialize_bytes(CtHashVisitor)
     }
 }
+
+crate::hexutil::impl_fixed_hex_from_str!(CtHash, HASH_LEN);
 
 /// Leaf hash committed into the MMR for each message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -495,6 +501,8 @@ impl<'de> Deserialize<'de> for LeafHash {
     }
 }
 
+crate::hexutil::impl_fixed_hex_from_str!(LeafHash, HASH_LEN);
+
 /// Intermediate MMR node or peak hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MmrNode([u8; HASH_LEN]);
@@ -612,6 +620,8 @@ impl<'de> Deserialize<'de> for MmrNode {
         deserializer.deserialize_bytes(MmrNodeVisitor)
     }
 }
+
+crate::hexutil::impl_fixed_hex_from_str!(MmrNode, HASH_LEN);
 
 impl From<LeafHash> for MmrNode {
     fn from(value: LeafHash) -> Self {
@@ -747,6 +757,8 @@ impl<'de> Deserialize<'de> for MmrRoot {
         deserializer.deserialize_bytes(MmrRootVisitor)
     }
 }
+
+crate::hexutil::impl_fixed_hex_from_str!(MmrRoot, HASH_LEN);
 
 impl From<MmrNode> for MmrRoot {
     fn from(value: MmrNode) -> Self {
@@ -895,6 +907,8 @@ impl<'de> Deserialize<'de> for Signature64 {
     }
 }
 
+crate::hexutil::impl_fixed_hex_from_str!(Signature64, SIGNATURE_LEN);
+
 impl From<LeafHash> for MmrRoot {
     fn from(value: LeafHash) -> Self {
         Self::new(*value.as_bytes())
@@ -910,6 +924,33 @@ mod tests {
         AuthRef, ClientId, CtHash, LeafHash, MmrNode, MmrRoot, Signature64, AEAD_NONCE_LEN,
         HASH_LEN, SIGNATURE_LEN,
     };
+
+    #[test]
+    fn identifiers_round_trip_via_strings() {
+        let client_hex = hex::encode([0x01; HASH_LEN]);
+        let auth_hex = hex::encode([0x02; HASH_LEN]);
+        let ct_hex = hex::encode([0x03; HASH_LEN]);
+        let leaf_hex = hex::encode([0x04; HASH_LEN]);
+        let node_hex = hex::encode([0x05; HASH_LEN]);
+        let root_hex = hex::encode([0x06; HASH_LEN]);
+        let sig_hex = hex::encode([0x07; SIGNATURE_LEN]);
+
+        let client = client_hex.parse::<ClientId>().expect("client id");
+        let auth = auth_hex.parse::<AuthRef>().expect("auth ref");
+        let ct = ct_hex.parse::<CtHash>().expect("ct hash");
+        let leaf = leaf_hex.parse::<LeafHash>().expect("leaf hash");
+        let node = node_hex.parse::<MmrNode>().expect("mmr node");
+        let root = root_hex.parse::<MmrRoot>().expect("mmr root");
+        let sig = sig_hex.parse::<Signature64>().expect("signature");
+
+        assert_eq!(client.to_string(), client_hex);
+        assert_eq!(auth.to_string(), auth_hex);
+        assert_eq!(ct.to_string(), ct_hex);
+        assert_eq!(leaf.to_string(), leaf_hex);
+        assert_eq!(node.to_string(), node_hex);
+        assert_eq!(root.to_string(), root_hex);
+        assert_eq!(sig.to_string(), sig_hex);
+    }
 
     #[test]
     fn fixed_length_round_trips() {

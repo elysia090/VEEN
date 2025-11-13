@@ -1,6 +1,16 @@
 use crate::ht;
+use hex::encode;
 
 use super::{RealmId, REALM_ID_LEN};
+
+#[test]
+fn realm_id_parses_from_hex_string() {
+    let bytes = [0x44; REALM_ID_LEN];
+    let hex = encode(bytes);
+    let parsed = hex.parse::<RealmId>().expect("parse realm id");
+    assert_eq!(parsed.as_bytes(), &bytes);
+    assert_eq!(parsed.to_string(), hex);
+}
 
 #[test]
 fn realm_id_from_slice_enforces_length() {

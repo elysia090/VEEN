@@ -8,6 +8,7 @@
 
 pub mod federation;
 mod hash;
+mod hexutil;
 pub mod hub;
 pub mod identity;
 pub mod kex;
@@ -27,6 +28,7 @@ pub use crate::federation::{
     LabelPolicy,
 };
 pub use crate::hash::{h, ht};
+pub use crate::hexutil::ParseHexError;
 pub use crate::hub::{HubId, HUB_ID_LEN};
 pub use crate::identity::{
     schema_external_link, schema_handle_map, stream_id_ctx, stream_id_handle_ns, stream_id_org,

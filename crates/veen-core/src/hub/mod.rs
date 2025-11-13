@@ -133,5 +133,7 @@ impl<'de> Deserialize<'de> for HubId {
     }
 }
 
+crate::hexutil::impl_fixed_hex_from_str!(HubId, HUB_ID_LEN);
+
 #[cfg(test)]
 mod tests;

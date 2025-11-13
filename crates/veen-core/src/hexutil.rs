@@ -1,0 +1,110 @@
+use std::error::Error;
+use std::fmt;
+
+use hex::FromHexError;
+
+/// Error raised when parsing a fixed-length hexadecimal string into bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseHexError {
+    /// The input did not contain the expected number of hexadecimal characters.
+    InvalidLength { expected: usize, actual: usize },
+    /// The input contained a non-hexadecimal character.
+    InvalidCharacter { index: usize, character: char },
+}
+
+impl fmt::Display for ParseHexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidLength { expected, actual } => {
+                write!(f, "expected {expected} hex characters, found {actual}")
+            }
+            Self::InvalidCharacter { index, character } => {
+                write!(f, "invalid hex character '{character}' at index {index}")
+            }
+        }
+    }
+}
+
+impl Error for ParseHexError {}
+
+/// Decodes a fixed-length hexadecimal string into a byte array of size `N`.
+///
+/// Returns a [`ParseHexError`] when the string is the wrong length or contains
+/// non-hexadecimal characters.
+pub(crate) fn decode_hex_array<const N: usize>(input: &str) -> Result<[u8; N], ParseHexError> {
+    let expected = N * 2;
+    if input.len() != expected {
+        return Err(ParseHexError::InvalidLength {
+            expected,
+            actual: input.len(),
+        });
+    }
+
+    let mut buf = [0u8; N];
+    hex::decode_to_slice(input, &mut buf).map_err(|err| match err {
+        FromHexError::InvalidHexCharacter { c, index } => ParseHexError::InvalidCharacter {
+            index,
+            character: c,
+        },
+        FromHexError::OddLength | FromHexError::InvalidStringLength => {
+            ParseHexError::InvalidLength {
+                expected,
+                actual: input.len(),
+            }
+        }
+    })?;
+
+    Ok(buf)
+}
+
+macro_rules! impl_fixed_hex_from_str {
+    ($name:ty, $len:expr) => {
+        impl ::core::str::FromStr for $name {
+            type Err = $crate::hexutil::ParseHexError;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                $crate::hexutil::decode_hex_array::<$len>(s).map(Self::from)
+            }
+        }
+    };
+}
+
+pub(crate) use impl_fixed_hex_from_str;
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_hex_array, ParseHexError};
+
+    #[test]
+    fn decode_hex_array_rejects_invalid_length() {
+        let err = decode_hex_array::<32>("0011").expect_err("length error");
+        assert!(matches!(
+            err,
+            ParseHexError::InvalidLength {
+                expected: 64,
+                actual: 4
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_hex_array_rejects_invalid_character() {
+        let err = decode_hex_array::<2>("zzzz").expect_err("invalid character");
+        assert!(matches!(
+            err,
+            ParseHexError::InvalidCharacter {
+                index: 0,
+                character: 'z'
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_hex_array_decodes_lower_and_uppercase() {
+        let lower = decode_hex_array::<2>("0a0b").expect("lowercase hex");
+        assert_eq!(lower, [0x0a, 0x0b]);
+
+        let upper = decode_hex_array::<2>("0A0B").expect("uppercase hex");
+        assert_eq!(upper, [0x0a, 0x0b]);
+    }
+}

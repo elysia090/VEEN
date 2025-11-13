@@ -75,6 +75,16 @@ mod tests {
     }
 
     #[test]
+    fn profile_id_round_trips_via_string() {
+        let profile = Profile::default();
+        let id = profile.id().expect("profile id");
+        let encoded = id.encode_hex::<String>();
+        let parsed = encoded.parse::<ProfileId>().expect("parse profile id");
+        assert_eq!(parsed, id);
+        assert_eq!(parsed.to_string(), encoded);
+    }
+
+    #[test]
     fn profile_id_serializes_as_cbor_bstr() {
         let profile = Profile::default();
         let id = profile.id().expect("profile id");

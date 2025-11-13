@@ -205,6 +205,8 @@ impl<'de> Deserialize<'de> for TransferId {
     }
 }
 
+crate::hexutil::impl_fixed_hex_from_str!(TransferId, TRANSFER_ID_LEN);
+
 impl From<[u8; WALLET_ID_LEN]> for WalletId {
     fn from(value: [u8; WALLET_ID_LEN]) -> Self {
         Self::new(value)
@@ -289,6 +291,8 @@ impl<'de> Deserialize<'de> for WalletId {
         deserializer.deserialize_bytes(WalletIdVisitor)
     }
 }
+
+crate::hexutil::impl_fixed_hex_from_str!(WalletId, WALLET_ID_LEN);
 
 /// Error returned when wallet-specific derivations violate the specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -1264,6 +1268,15 @@ mod tests {
     }
 
     #[test]
+    fn wallet_id_round_trips_via_string() {
+        let bytes = [0xAA; WALLET_ID_LEN];
+        let hex = hex::encode(bytes);
+        let parsed = hex.parse::<WalletId>().expect("parse wallet id");
+        assert_eq!(parsed.as_bytes(), &bytes);
+        assert_eq!(parsed.to_string(), hex);
+    }
+
+    #[test]
     fn stream_id_wallet_matches_spec_formula() {
         let realm = RealmId::derive("realm-x");
         let ctx = ContextId::new([0x22; WALLET_ID_LEN]);
@@ -1298,6 +1311,15 @@ mod tests {
         let err = TransferId::from_slice(&bytes[..TRANSFER_ID_LEN - 1]).expect_err("length error");
         assert_eq!(err.expected(), TRANSFER_ID_LEN);
         assert_eq!(err.actual(), TRANSFER_ID_LEN - 1);
+    }
+
+    #[test]
+    fn transfer_id_round_trips_via_string() {
+        let bytes = [0x77; TRANSFER_ID_LEN];
+        let hex = hex::encode(bytes);
+        let parsed = hex.parse::<TransferId>().expect("parse transfer id");
+        assert_eq!(parsed.as_bytes(), &bytes);
+        assert_eq!(parsed.to_string(), hex);
     }
 
     #[test]
