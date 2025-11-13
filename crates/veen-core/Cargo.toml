@@ -13,3 +13,4 @@ sha2.workspace = true
 ciborium.workspace = true
 thiserror.workspace = true
 hex.workspace = true
+serde_bytes.workspace = true

@@ -30,3 +30,4 @@ hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "1"
+serde_bytes = "0.11"
