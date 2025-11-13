@@ -20,6 +20,15 @@ lint:
 doc:
     cargo doc --workspace --no-deps
 
+hub-run args="-- --help":
+    cargo run -p veen-hub -- {{args}}
+
+cli args="-- help":
+    cargo run -p veen-cli -- {{args}}
+
+selftest suite="core":
+    cargo run -p veen-selftest -- {{suite}}
+
 test:
     cargo test --workspace
 

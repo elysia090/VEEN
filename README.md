@@ -12,6 +12,12 @@ specifications in [`doc/spec-1.txt`](doc/spec-1.txt) and
   versions.
 - [`crates/veen-core`](crates/veen-core) exposes reusable primitives for
   computing protocol hashes and identifiers.
+- [`crates/veen-hub`](crates/veen-hub) scaffolds the hub runtime described in
+  [`doc/GOALS.txt`](doc/GOALS.txt).
+- [`crates/veen-cli`](crates/veen-cli) provides the command-line surface for
+  exercising hub APIs.
+- [`crates/veen-selftest`](crates/veen-selftest) is a placeholder integration
+  harness that will eventually orchestrate the end-to-end acceptance suites.
 - [`doc/spec-1.txt`](doc/spec-1.txt) contains the normative description of the
   v0.0.1 wire format.
 - [`doc/spec-2.txt`](doc/spec-2.txt) specifies the v0.0.1+ operational overlays.
@@ -43,10 +49,18 @@ just fmt-check
 # Generate documentation
 just doc
 
-# Run a single check
-just test
+# Launch the hub scaffold (currently emits a not-implemented error)
+just hub-run -- --listen 127.0.0.1:8080 --data-dir /tmp/veen-hub
+
+# Explore the CLI surface (commands currently terminate with scaffold errors)
+just cli -- keygen --out /tmp/veen-client
+
+# Exercise the self-test harness scaffolding
+just selftest core
 ```
 
-The default crate demonstrates how to derive the canonical `profile_id` hash
-from the specification and serves as a foundation for additional protocol
-modules.
+> **Status:** the new binaries are scaffolds. They compile, parse CLI flags,
+> and log intent, but they deliberately return `not yet implemented` errors so
+> that missing protocol logic is never mistaken for production-ready code.  The
+> flows described in [`doc/GOALS.txt`](doc/GOALS.txt) remain the authoritative
+> roadmap for filling in the implementations.
