@@ -1309,15 +1309,15 @@ async fn handle_verify_state(_args: VerifyStateArgs) -> Result<()> {
 async fn handle_explain_error(args: ExplainErrorArgs) -> Result<()> {
     let code = args.code.trim().to_ascii_uppercase();
     let description = match code.as_str() {
-        "E.SIG" => "signature verification failed",
-        "E.SIZE" => "message exceeded configured bounds",
-        "E.SEQ" => "sequence violation for client_id/client_seq",
-        "E.CAP" => "capability token invalid or expired",
-        "E.AUTH" => "authorization required or denied",
+        "E.SIG" => "signature failure (including hub_sig or MSG.sig)",
+        "E.SIZE" => "bounds violation (including MAX_* limits)",
+        "E.SEQ" => "sequence invariant violation (including I6, I8, I9, I12)",
+        "E.CAP" => "capability failure (including invalid sig_chain, expired ttl)",
+        "E.AUTH" => "missing or invalid authorization record",
         "E.RATE" => "rate limit exceeded",
-        "E.PROFILE" => "profile mismatch or unsupported profile",
-        "E.DUP" => "duplicate message detected",
-        "E.TIME" => "message outside acceptable time window",
+        "E.PROFILE" => "unsupported profile_id",
+        "E.DUP" => "duplicate leaf or message",
+        "E.TIME" => "epoch or time-related failure",
         other => {
             bail!("unknown VEEN error code `{other}`");
         }
