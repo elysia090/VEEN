@@ -10,6 +10,7 @@ pub mod federation;
 mod hash;
 pub mod hub;
 pub mod identity;
+pub mod kex;
 pub mod label;
 pub mod label_class;
 mod length;
@@ -31,6 +32,10 @@ pub use crate::identity::{
     schema_external_link, schema_handle_map, stream_id_ctx, stream_id_handle_ns, stream_id_org,
     stream_id_principal, ContextId, DeviceId, ExternalLinkDirectory, ExternalLinkRecord, GroupId,
     HandleNamespace, HandleRecord, HandleTarget, HandleTargetType, OrgId, PrincipalId, ScopedOrgId,
+};
+pub use crate::kex::{
+    cap_token_expiry, cap_token_is_valid, cap_token_is_valid_opt, ClientObservationIndex,
+    ClientUsage, ClientUsageConfig, ClientUsageError, ObservationDecision, ObservationError,
 };
 pub use crate::label::{Label, StreamId};
 pub use crate::label_class::{schema_label_class, LabelClassRecord};
