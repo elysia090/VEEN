@@ -22,9 +22,12 @@ impl HubId {
 
     /// Returns the canonical hub identifier derived from the Ed25519 public
     /// key as defined in the specification.
-    #[must_use]
-    pub fn derive(public_key: impl AsRef<[u8]>) -> Self {
-        Self(ht("veen/hub-id", public_key.as_ref()))
+    pub fn derive(public_key: impl AsRef<[u8]>) -> Result<Self, LengthError> {
+        let public_key = public_key.as_ref();
+        if public_key.len() != HUB_ID_LEN {
+            return Err(LengthError::new(HUB_ID_LEN, public_key.len()));
+        }
+        Ok(Self(ht("veen/hub-id", public_key)))
     }
 
     /// Borrows the identifier bytes.
