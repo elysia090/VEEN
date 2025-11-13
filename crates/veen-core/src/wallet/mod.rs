@@ -11,6 +11,7 @@ use crate::{
     identity::ContextId,
     label::StreamId,
     realm::RealmId,
+    wire::types::LeafHash,
     LengthError,
 };
 
@@ -584,6 +585,55 @@ impl From<WalletError> for WalletFoldError {
     }
 }
 
+/// Tracks bridged WAL events to provide parent-based deduplication as recommended by WALBR0.
+#[derive(Debug, Clone, Default)]
+pub struct WalletBridgeIndex {
+    seen_parent_ids: HashSet<LeafHash>,
+}
+
+impl WalletBridgeIndex {
+    /// Creates an empty bridge index.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Removes all tracked parent identifiers.
+    pub fn clear(&mut self) {
+        self.seen_parent_ids.clear();
+    }
+
+    /// Returns the number of tracked parent identifiers.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.seen_parent_ids.len()
+    }
+
+    /// Returns `true` if no parent identifiers have been observed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.seen_parent_ids.is_empty()
+    }
+
+    /// Returns `true` if the provided parent identifier has already been observed.
+    #[must_use]
+    pub fn has_seen(&self, parent_id: &LeafHash) -> bool {
+        self.seen_parent_ids.contains(parent_id)
+    }
+
+    /// Records the provided parent identifier and returns `true` if the caller should
+    /// process the associated event.
+    ///
+    /// When `parent_id` is `None`, the caller should treat the event as locally
+    /// originated and always process it.
+    pub fn observe(&mut self, parent_id: Option<LeafHash>) -> bool {
+        match parent_id {
+            Some(id) => self.seen_parent_ids.insert(id),
+            None => true,
+        }
+    }
+}
+
 /// Canonical helper implementing the day-based reset check described in the specification.
 #[must_use]
 pub fn needs_daily_limit_reset(last_reset_ts: u64, now: u64) -> bool {
@@ -1014,12 +1064,38 @@ pub fn schema_wallet_unfreeze() -> [u8; 32] {
 mod tests {
     use super::*;
 
+    use crate::wire::types::LeafHash;
+
     fn sample_key(prefix: u8) -> [u8; WALLET_ID_LEN] {
         let mut out = [0u8; WALLET_ID_LEN];
         for (index, byte) in out.iter_mut().enumerate() {
             *byte = prefix.wrapping_add(index as u8);
         }
         out
+    }
+
+    #[test]
+    fn wallet_bridge_index_tracks_parent_ids() {
+        let parent_a = LeafHash::new([0x11; 32]);
+        let parent_b = LeafHash::new([0x22; 32]);
+
+        let mut index = WalletBridgeIndex::new();
+        assert!(index.observe(Some(parent_a)));
+        assert!(
+            !index.observe(Some(parent_a)),
+            "duplicate parent should be ignored"
+        );
+        assert!(index.observe(Some(parent_b)));
+        assert_eq!(index.len(), 2);
+        assert!(index.has_seen(&parent_a));
+        assert!(
+            index.observe(None),
+            "locally originated events always apply"
+        );
+        assert_eq!(index.len(), 2, "local events do not mutate state");
+
+        index.clear();
+        assert!(index.is_empty());
     }
 
     fn open_wallet_state(
