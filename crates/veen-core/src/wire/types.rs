@@ -9,6 +9,8 @@ use crate::{hash::h, label::Label, profile::ProfileId, LengthError};
 pub const HASH_LEN: usize = 32;
 /// Length in bytes of Ed25519 signatures used by VEEN wire objects.
 pub const SIGNATURE_LEN: usize = 64;
+/// Length in bytes of AEAD nonces derived from the specification hashes.
+pub const AEAD_NONCE_LEN: usize = 24;
 
 /// Raw Ed25519 public key carried as `client_id` on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -387,6 +389,19 @@ impl LeafHash {
         data.extend_from_slice(client_id.as_ref());
         data.extend_from_slice(&client_seq.to_be_bytes());
         Self(crate::hash::ht("veen/leaf", &data))
+    }
+
+    /// Computes the attachment nonce `Trunc_24(Ht("veen/att-nonce", msg_id || u64be(i)))`.
+    #[must_use]
+    pub fn attachment_nonce(&self, index: u64) -> [u8; AEAD_NONCE_LEN] {
+        let mut data = Vec::with_capacity(self.as_ref().len() + std::mem::size_of::<u64>());
+        data.extend_from_slice(self.as_ref());
+        data.extend_from_slice(&index.to_be_bytes());
+        let digest = crate::hash::ht("veen/att-nonce", &data);
+
+        let mut nonce = [0u8; AEAD_NONCE_LEN];
+        nonce.copy_from_slice(&digest[..AEAD_NONCE_LEN]);
+        nonce
     }
 }
 
@@ -855,7 +870,8 @@ mod tests {
     use sha2::Digest;
 
     use super::{
-        AuthRef, ClientId, CtHash, LeafHash, MmrNode, MmrRoot, Signature64, HASH_LEN, SIGNATURE_LEN,
+        AuthRef, ClientId, CtHash, LeafHash, MmrNode, MmrRoot, Signature64, AEAD_NONCE_LEN,
+        HASH_LEN, SIGNATURE_LEN,
     };
 
     #[test]
@@ -918,5 +934,21 @@ mod tests {
 
         let err = Signature64::from_slice(&sig.as_ref()[..SIGNATURE_LEN - 1]).expect_err("err");
         assert_eq!(err.expected(), SIGNATURE_LEN);
+    }
+
+    #[test]
+    fn attachment_nonce_matches_spec_formula() {
+        let leaf = LeafHash::new([0xAB; HASH_LEN]);
+        let index = 3u64;
+        let nonce = leaf.attachment_nonce(index);
+
+        let mut data = Vec::new();
+        data.extend_from_slice(leaf.as_ref());
+        data.extend_from_slice(&index.to_be_bytes());
+        let digest = crate::hash::ht("veen/att-nonce", &data);
+
+        let mut expected = [0u8; AEAD_NONCE_LEN];
+        expected.copy_from_slice(&digest[..AEAD_NONCE_LEN]);
+        assert_eq!(nonce, expected);
     }
 }
