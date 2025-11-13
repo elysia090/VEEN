@@ -217,6 +217,10 @@ pub fn cap_token_expiry(issued_at: u64, ttl: u64) -> Option<u64> {
 /// Returns `true` if a capability token with `issued_at` and `ttl` is valid at `now`.
 #[must_use]
 pub fn cap_token_is_valid(now: u64, issued_at: u64, ttl: u64) -> bool {
+    if now < issued_at {
+        return false;
+    }
+
     match cap_token_expiry(issued_at, ttl) {
         Some(expiry) => now < expiry,
         None => true,
@@ -226,6 +230,10 @@ pub fn cap_token_is_valid(now: u64, issued_at: u64, ttl: u64) -> bool {
 /// Returns `true` if a capability token with optional `ttl` is valid at `now`.
 #[must_use]
 pub fn cap_token_is_valid_opt(now: u64, issued_at: u64, ttl: Option<u64>) -> bool {
+    if now < issued_at {
+        return false;
+    }
+
     match ttl {
         Some(ttl) => cap_token_is_valid(now, issued_at, ttl),
         None => true,
@@ -338,6 +346,7 @@ mod tests {
         let ttl = 600;
         let expiry = cap_token_expiry(issued_at, ttl).expect("expiry");
         assert_eq!(expiry, 1_600);
+        assert!(!cap_token_is_valid(999, issued_at, ttl));
         assert!(!cap_token_is_valid(1_600, issued_at, ttl));
         assert!(!cap_token_is_valid(1_601, issued_at, ttl));
     }
@@ -353,6 +362,7 @@ mod tests {
     #[test]
     fn cap_token_optional_ttl() {
         assert!(cap_token_is_valid_opt(1_000, 500, None));
+        assert!(!cap_token_is_valid_opt(499, 500, None));
         assert!(!cap_token_is_valid_opt(2_000, 500, Some(1_000)));
     }
 }
