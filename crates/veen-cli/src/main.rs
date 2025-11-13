@@ -2764,6 +2764,8 @@ enum HubReference {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
+    use std::collections::BTreeMap;
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
     use std::time::Duration;
     use tempfile::tempdir;
@@ -2831,6 +2833,33 @@ mod tests {
         assert_eq!(seq, 1);
 
         runtime.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_json_file_creates_parent_directories() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("nested").join("dir").join("config.json");
+        let payload = json!({ "hello": "world" });
+
+        write_json_file(&path, &payload).await?;
+        let roundtrip: Value = read_json_file(&path).await?;
+
+        assert_eq!(roundtrip, payload);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_cbor_file_creates_parent_directories() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("nested").join("dir").join("payload.cbor");
+        let mut payload = BTreeMap::new();
+        payload.insert(String::from("value"), 42u32);
+
+        write_cbor_file(&path, &payload).await?;
+        let roundtrip: BTreeMap<String, u32> = read_cbor_file(&path).await?;
+
+        assert_eq!(roundtrip, payload);
         Ok(())
     }
 }
@@ -3207,6 +3236,11 @@ async fn write_cbor_file<T>(path: &Path, value: &T) -> Result<()>
 where
     T: Serialize,
 {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
     let mut buffer = Vec::new();
     ciborium::ser::into_writer(value, &mut buffer)
         .map_err(|err| anyhow!("failed to encode CBOR for {}: {err}", path.display()))?;
@@ -3220,6 +3254,11 @@ async fn write_json_file<T>(path: &Path, value: &T) -> Result<()>
 where
     T: Serialize,
 {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
     let data = serde_json::to_vec_pretty(value)
         .with_context(|| format!("serialising JSON for {}", path.display()))?;
     fs::write(path, data)
