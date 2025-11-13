@@ -3,7 +3,8 @@
 This repository hosts the experimental Rust workspace for the Verifiable End-to-End
 Network (VEEN) reference implementation.  The goal of the workspace is to provide a
 modern, batteries-included development environment that mirrors the protocol
-specification in [`doc/spec.txt`](doc/spec.txt).
+specifications in [`doc/spec-1.txt`](doc/spec-1.txt) and
+[`doc/spec-2.txt`](doc/spec-2.txt).
 
 ## Workspace layout
 
@@ -11,8 +12,9 @@ specification in [`doc/spec.txt`](doc/spec.txt).
   versions.
 - [`crates/veen-core`](crates/veen-core) exposes reusable primitives for
   computing protocol hashes and identifiers.
-- [`doc/spec.txt`](doc/spec.txt) contains the normative description of the v0.0.1
-  wire format.
+- [`doc/spec-1.txt`](doc/spec-1.txt) contains the normative description of the
+  v0.0.1 wire format.
+- [`doc/spec-2.txt`](doc/spec-2.txt) specifies the v0.0.1+ operational overlays.
 
 ## Developer guide
 
