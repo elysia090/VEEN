@@ -25,7 +25,8 @@ pub use crate::length::LengthError;
 pub use crate::profile::{Profile, ProfileId};
 pub use crate::realm::{RealmId, REALM_ID_LEN};
 pub use crate::wallet::{
-    schema_wallet_adjust, schema_wallet_close, schema_wallet_deposit, schema_wallet_freeze,
-    schema_wallet_limit, schema_wallet_open, schema_wallet_transfer, schema_wallet_unfreeze,
-    schema_wallet_withdraw, stream_id_wallet, WalletError, WalletId, WALLET_ID_LEN,
+    approval_hash, schema_wallet_adjust, schema_wallet_close, schema_wallet_deposit,
+    schema_wallet_freeze, schema_wallet_limit, schema_wallet_open, schema_wallet_transfer,
+    schema_wallet_unfreeze, schema_wallet_withdraw, stream_id_wallet, TransferId, WalletError,
+    WalletId, TRANSFER_ID_LEN, WALLET_ID_LEN,
 };
