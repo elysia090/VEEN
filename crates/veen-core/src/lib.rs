@@ -5,15 +5,21 @@
 //! make it straightforward to experiment with protocol implementations while
 //! enforcing consistent hashing and encoding behaviour across binaries.
 
+pub mod federation;
 mod hash;
 pub mod hub;
 pub mod identity;
 pub mod label;
+pub mod label_class;
 mod length;
+pub mod meta;
+pub mod pow;
 pub mod profile;
 pub mod realm;
+pub mod revocation;
 pub mod wallet;
 
+pub use crate::federation::{schema_fed_authority, AuthorityPolicy, AuthorityRecord};
 pub use crate::hash::{h, ht};
 pub use crate::hub::{HubId, HUB_ID_LEN};
 pub use crate::identity::{
@@ -21,9 +27,16 @@ pub use crate::identity::{
     GroupId, OrgId, PrincipalId, ScopedOrgId,
 };
 pub use crate::label::{Label, StreamId};
+pub use crate::label_class::{schema_label_class, LabelClassRecord};
 pub use crate::length::LengthError;
+pub use crate::meta::{schema_meta_schema, SchemaDescriptor, SchemaId, SchemaOwner, SCHEMA_ID_LEN};
+pub use crate::pow::{schema_pow_cookie, PowCookie};
 pub use crate::profile::{Profile, ProfileId};
 pub use crate::realm::{RealmId, REALM_ID_LEN};
+pub use crate::revocation::{
+    cap_token_hash, schema_revocation, RevocationKind, RevocationRecord, RevocationTarget,
+    REVOCATION_TARGET_LEN,
+};
 pub use crate::wallet::{
     approval_hash, schema_wallet_adjust, schema_wallet_close, schema_wallet_deposit,
     schema_wallet_freeze, schema_wallet_limit, schema_wallet_open, schema_wallet_transfer,
