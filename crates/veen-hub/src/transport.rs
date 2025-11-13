@@ -140,29 +140,25 @@ async fn handle_anchor(
 }
 
 async fn handle_health(State(pipeline): State<HubPipeline>) -> impl IntoResponse {
-    match pipeline.metrics_snapshot().await {
-        ObservabilityReport {
-            uptime,
-            submit_ok_total,
-            submit_err_total,
-            last_stream_seq,
-            mmr_roots,
-        } => {
-            let body = serde_json::json!({
-                "ok": true,
-                "uptime": humantime::format_duration(uptime).to_string(),
-                "submit_ok_total": submit_ok_total,
-                "submit_err_total": submit_err_total,
-                "last_stream_seq": last_stream_seq,
-                "mmr_roots": mmr_roots,
-            });
-            (StatusCode::OK, Json(body)).into_response()
-        }
-    }
+    let ObservabilityReport {
+        uptime,
+        submit_ok_total,
+        submit_err_total,
+        last_stream_seq,
+        mmr_roots,
+    } = pipeline.metrics_snapshot().await;
+    let body = serde_json::json!({
+        "ok": true,
+        "uptime": humantime::format_duration(uptime).to_string(),
+        "submit_ok_total": submit_ok_total,
+        "submit_err_total": submit_err_total,
+        "last_stream_seq": last_stream_seq,
+        "mmr_roots": mmr_roots,
+    });
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 async fn handle_metrics(State(pipeline): State<HubPipeline>) -> impl IntoResponse {
-    match pipeline.metrics_snapshot().await {
-        report => (StatusCode::OK, Json(report)).into_response(),
-    }
+    let report = pipeline.metrics_snapshot().await;
+    (StatusCode::OK, Json(report)).into_response()
 }

@@ -12,6 +12,12 @@ pub struct HubObservability {
     submit_err_total: Arc<dashmap::DashMap<String, AtomicU64>>,
 }
 
+impl Default for HubObservability {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HubObservability {
     pub fn new() -> Self {
         Self {
