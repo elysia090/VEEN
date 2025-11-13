@@ -419,11 +419,9 @@ mod tests {
         let coid3 = AttachmentId::from_ciphertext(c3);
 
         let mut peaks = Vec::new();
-        let mut seq = 0u64;
-        for id in [coid1, coid2, coid3] {
-            seq += 1;
+        for (seq, id) in [coid1, coid2, coid3].into_iter().enumerate() {
             let mut carry = AttachmentNode::from(id);
-            let mut index = seq;
+            let mut index = seq + 1;
             while index & 1 == 0 {
                 let left = peaks.pop().unwrap();
                 carry = AttachmentNode::combine(&left, &carry);
