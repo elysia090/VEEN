@@ -632,6 +632,12 @@ impl WalletBridgeIndex {
             None => true,
         }
     }
+
+    /// Removes a previously recorded parent identifier. Returns `true` when the
+    /// identifier was present in the index.
+    pub fn remove(&mut self, parent_id: &LeafHash) -> bool {
+        self.seen_parent_ids.remove(parent_id)
+    }
 }
 
 /// Canonical helper implementing the day-based reset check described in the specification.
@@ -689,14 +695,21 @@ impl WalletState {
     ) -> Result<bool, WalletFoldError> {
         match bridge_index {
             Some(index) => {
-                if let Some(ref parent) = parent_id {
-                    if index.has_seen(parent) {
+                if let Some(parent) = parent_id {
+                    if !index.observe(Some(parent)) {
                         return Ok(false);
                     }
+
+                    if let Err(error) = event.apply_to(self) {
+                        index.remove(&parent);
+                        return Err(error);
+                    }
+
+                    Ok(true)
+                } else {
+                    event.apply_to(self)?;
+                    Ok(true)
                 }
-                event.apply_to(self)?;
-                index.observe(parent_id);
-                Ok(true)
             }
             None => {
                 event.apply_to(self)?;
