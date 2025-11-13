@@ -1,0 +1,92 @@
+use crate::wire::types::{LeafHash, MmrNode, MmrRoot};
+
+/// Maintains the per-label Merkle Mountain Range state as described in spec-1.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Mmr {
+    seq: u64,
+    peaks: Vec<MmrNode>,
+}
+
+impl Mmr {
+    /// Creates an empty MMR state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the number of leaves that have been appended.
+    #[must_use]
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// Returns the current peaks ordered by increasing tree size.
+    #[must_use]
+    pub fn peaks(&self) -> &[MmrNode] {
+        &self.peaks
+    }
+
+    /// Appends a new leaf hash and returns the updated `(stream_seq, mmr_root)` pair.
+    pub fn append(&mut self, leaf: LeafHash) -> (u64, MmrRoot) {
+        self.seq = self.seq.checked_add(1).expect("stream_seq overflow");
+        let mut carry = MmrNode::from(leaf);
+        let mut seq = self.seq;
+
+        while seq & 1 == 0 {
+            let left = self.peaks.pop().expect("folding requires an existing peak");
+            carry = MmrNode::combine(&left, &carry);
+            seq >>= 1;
+        }
+
+        self.peaks.push(carry);
+        let root = MmrRoot::from_peaks(&self.peaks).expect("peaks must be non-empty");
+        (self.seq, root)
+    }
+
+    /// Computes the current MMR root if any leaves have been appended.
+    #[must_use]
+    pub fn root(&self) -> Option<MmrRoot> {
+        MmrRoot::from_peaks(&self.peaks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(value: u8) -> LeafHash {
+        LeafHash::new([value; 32])
+    }
+
+    #[test]
+    fn empty_mmr_has_no_root() {
+        let mmr = Mmr::new();
+        assert_eq!(mmr.seq(), 0);
+        assert!(mmr.root().is_none());
+    }
+
+    #[test]
+    fn append_follows_spec_fold_order() {
+        let mut mmr = Mmr::new();
+
+        let leaf1 = leaf(0x11);
+        let (seq1, root1) = mmr.append(leaf1);
+        assert_eq!(seq1, 1);
+        assert_eq!(root1.as_bytes(), leaf1.as_bytes());
+        assert_eq!(mmr.peaks().len(), 1);
+
+        let leaf2 = leaf(0x22);
+        let (seq2, root2) = mmr.append(leaf2);
+        let expected_fold = MmrNode::combine(&MmrNode::from(leaf1), &MmrNode::from(leaf2));
+        assert_eq!(seq2, 2);
+        assert_eq!(root2.as_bytes(), expected_fold.as_ref());
+        assert_eq!(mmr.peaks(), &[expected_fold]);
+
+        let leaf3 = leaf(0x33);
+        let (seq3, root3) = mmr.append(leaf3);
+        assert_eq!(seq3, 3);
+        let expected_root = MmrRoot::from_peaks(&[expected_fold, MmrNode::from(leaf3)]).unwrap();
+        assert_eq!(root3, expected_root);
+        assert_eq!(mmr.peaks(), &[expected_fold, MmrNode::from(leaf3)]);
+    }
+}
