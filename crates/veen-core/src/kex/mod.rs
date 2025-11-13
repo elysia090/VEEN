@@ -196,7 +196,7 @@ impl ClientObservationIndex {
             .ok_or(ObservationError::MessageCountOverflow { client_id, label })?;
 
         let lifetime_exceeded = now.checked_sub(entry.first_seen).map_or(false, |elapsed| {
-            elapsed > self.config.max_client_id_lifetime_sec
+            elapsed >= self.config.max_client_id_lifetime_sec
         });
 
         let message_count_exceeded = *count >= self.config.max_msgs_per_label;
@@ -298,9 +298,17 @@ mod tests {
         let lbl = label(0x44);
 
         index.observe(client, lbl, 1_000).unwrap();
-        let decision = index.observe(client, lbl, 1_011).unwrap();
-        assert!(decision.lifetime_exceeded());
-        assert!(decision.is_violation());
+        let before_boundary = index.observe(client, lbl, 1_009).unwrap();
+        assert!(!before_boundary.lifetime_exceeded());
+        assert!(!before_boundary.is_violation());
+
+        let at_boundary = index.observe(client, lbl, 1_010).unwrap();
+        assert!(at_boundary.lifetime_exceeded());
+        assert!(at_boundary.is_violation());
+
+        let after_boundary = index.observe(client, lbl, 1_011).unwrap();
+        assert!(after_boundary.lifetime_exceeded());
+        assert!(after_boundary.is_violation());
     }
 
     #[test]
