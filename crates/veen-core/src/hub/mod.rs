@@ -82,14 +82,7 @@ impl AsRef<[u8]> for HubId {
     }
 }
 
-impl fmt::Display for HubId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(HubId);
 
 impl Serialize for HubId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

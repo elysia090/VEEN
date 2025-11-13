@@ -74,14 +74,7 @@ impl AsRef<[u8]> for ContextId {
     }
 }
 
-impl fmt::Display for ContextId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(ContextId);
 
 impl Serialize for ContextId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

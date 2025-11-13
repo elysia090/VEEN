@@ -76,14 +76,7 @@ impl AsRef<[u8]> for ClientId {
     }
 }
 
-impl fmt::Display for ClientId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(ClientId);
 
 impl Serialize for ClientId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -188,14 +181,7 @@ impl AsRef<[u8]> for AuthRef {
     }
 }
 
-impl fmt::Display for AuthRef {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(AuthRef);
 
 impl Serialize for AuthRef {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -306,14 +292,7 @@ impl AsRef<[u8]> for CtHash {
     }
 }
 
-impl fmt::Display for CtHash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(CtHash);
 
 impl Serialize for CtHash {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -450,14 +429,7 @@ impl AsRef<[u8]> for LeafHash {
     }
 }
 
-impl fmt::Display for LeafHash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(LeafHash);
 
 impl Serialize for LeafHash {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -570,14 +542,7 @@ impl AsRef<[u8]> for MmrNode {
     }
 }
 
-impl fmt::Display for MmrNode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(MmrNode);
 
 impl Serialize for MmrNode {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -707,14 +672,7 @@ impl AsRef<[u8]> for MmrRoot {
     }
 }
 
-impl fmt::Display for MmrRoot {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(MmrRoot);
 
 impl Serialize for MmrRoot {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -856,14 +814,7 @@ impl AsRef<[u8]> for Signature64 {
     }
 }
 
-impl fmt::Display for Signature64 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(Signature64);
 
 impl Serialize for Signature64 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

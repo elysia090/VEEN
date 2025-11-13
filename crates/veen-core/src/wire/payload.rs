@@ -95,14 +95,7 @@ impl AsRef<[u8]> for AttachmentId {
     }
 }
 
-impl fmt::Display for AttachmentId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(AttachmentId);
 
 impl Serialize for AttachmentId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -268,14 +261,7 @@ impl AsRef<[u8]> for AttachmentRoot {
     }
 }
 
-impl fmt::Display for AttachmentRoot {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(AttachmentRoot);
 
 impl Serialize for AttachmentRoot {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

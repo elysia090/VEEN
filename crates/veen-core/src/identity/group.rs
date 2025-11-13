@@ -74,14 +74,7 @@ impl AsRef<[u8]> for GroupId {
     }
 }
 
-impl fmt::Display for GroupId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+crate::hexutil::impl_hex_fmt!(GroupId);
 
 impl Serialize for GroupId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

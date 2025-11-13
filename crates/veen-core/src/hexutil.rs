@@ -57,6 +57,34 @@ pub(crate) fn decode_hex_array<const N: usize>(input: &str) -> Result<[u8; N], P
     Ok(buf)
 }
 
+macro_rules! impl_hex_fmt {
+    ($name:ty) => {
+        impl ::core::fmt::LowerHex for $name {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                for byte in self.as_ref() {
+                    write!(f, "{byte:02x}")?;
+                }
+                Ok(())
+            }
+        }
+
+        impl ::core::fmt::UpperHex for $name {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                for byte in self.as_ref() {
+                    write!(f, "{byte:02X}")?;
+                }
+                Ok(())
+            }
+        }
+
+        impl ::core::fmt::Display for $name {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                ::core::fmt::LowerHex::fmt(self, f)
+            }
+        }
+    };
+}
+
 macro_rules! impl_fixed_hex_from_str {
     ($name:ty, $len:expr) => {
         impl ::core::str::FromStr for $name {
@@ -69,7 +97,7 @@ macro_rules! impl_fixed_hex_from_str {
     };
 }
 
-pub(crate) use impl_fixed_hex_from_str;
+pub(crate) use {impl_fixed_hex_from_str, impl_hex_fmt};
 
 #[cfg(test)]
 mod tests {
@@ -106,5 +134,24 @@ mod tests {
 
         let upper = decode_hex_array::<2>("0A0B").expect("uppercase hex");
         assert_eq!(upper, [0x0a, 0x0b]);
+    }
+
+    #[test]
+    fn impl_hex_fmt_supports_lower_and_upper_hex() {
+        #[derive(Clone, Copy)]
+        struct Dummy([u8; 2]);
+
+        impl AsRef<[u8]> for Dummy {
+            fn as_ref(&self) -> &[u8] {
+                &self.0
+            }
+        }
+
+        crate::hexutil::impl_hex_fmt!(Dummy);
+
+        let value = Dummy([0xde, 0xad]);
+        assert_eq!(format!("{value}"), "dead");
+        assert_eq!(format!("{value:x}"), "dead");
+        assert_eq!(format!("{value:X}"), "DEAD");
     }
 }
