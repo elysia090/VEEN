@@ -218,7 +218,7 @@ pub fn cap_token_expiry(issued_at: u64, ttl: u64) -> Option<u64> {
 #[must_use]
 pub fn cap_token_is_valid(now: u64, issued_at: u64, ttl: u64) -> bool {
     match cap_token_expiry(issued_at, ttl) {
-        Some(expiry) => now <= expiry,
+        Some(expiry) => now < expiry,
         None => true,
     }
 }
@@ -330,7 +330,7 @@ mod tests {
         let ttl = 600;
         let expiry = cap_token_expiry(issued_at, ttl).expect("expiry");
         assert_eq!(expiry, 1_600);
-        assert!(cap_token_is_valid(1_600, issued_at, ttl));
+        assert!(!cap_token_is_valid(1_600, issued_at, ttl));
         assert!(!cap_token_is_valid(1_601, issued_at, ttl));
     }
 
