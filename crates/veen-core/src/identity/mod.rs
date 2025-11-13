@@ -2,14 +2,20 @@ use crate::{label::StreamId, realm::RealmId, LengthError};
 
 mod context;
 mod device;
+mod external;
 mod group;
+mod handle;
 mod org;
 mod principal;
 mod scoped_org;
 
 pub use context::ContextId;
 pub use device::DeviceId;
+pub use external::{schema_external_link, ExternalLinkDirectory, ExternalLinkRecord};
 pub use group::GroupId;
+pub use handle::{
+    schema_handle_map, HandleNamespace, HandleRecord, HandleTarget, HandleTargetType,
+};
 pub use org::OrgId;
 pub use principal::PrincipalId;
 pub use scoped_org::ScopedOrgId;

@@ -28,8 +28,9 @@ pub use crate::federation::{
 pub use crate::hash::{h, ht};
 pub use crate::hub::{HubId, HUB_ID_LEN};
 pub use crate::identity::{
-    stream_id_ctx, stream_id_handle_ns, stream_id_org, stream_id_principal, ContextId, DeviceId,
-    GroupId, OrgId, PrincipalId, ScopedOrgId,
+    schema_external_link, schema_handle_map, stream_id_ctx, stream_id_handle_ns, stream_id_org,
+    stream_id_principal, ContextId, DeviceId, ExternalLinkDirectory, ExternalLinkRecord, GroupId,
+    HandleNamespace, HandleRecord, HandleTarget, HandleTargetType, OrgId, PrincipalId, ScopedOrgId,
 };
 pub use crate::label::{Label, StreamId};
 pub use crate::label_class::{schema_label_class, LabelClassRecord};
