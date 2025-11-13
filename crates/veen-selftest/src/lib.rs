@@ -14,6 +14,10 @@ use veen_core::{
     WalletOpenEvent, WalletState, WalletTransferEvent,
 };
 
+mod overlays;
+
+pub use overlays::run_overlays;
+
 struct SampleData {
     msg: Msg,
     receipt: Receipt,

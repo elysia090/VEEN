@@ -2,11 +2,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
-use veen_hub::config::HubRuntimeConfig;
+use veen_hub::config::{HubRole, HubRuntimeConfig};
 use veen_hub::runtime::HubRuntime;
 
 #[derive(Parser)]
@@ -33,6 +33,24 @@ struct RunCommand {
     /// Optional path to a configuration file describing the runtime overlays.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Role to run the hub as.
+    #[arg(long, value_enum, default_value_t = HubRoleArg::Primary)]
+    role: HubRoleArg,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum HubRoleArg {
+    Primary,
+    Replica,
+}
+
+impl From<HubRoleArg> for HubRole {
+    fn from(value: HubRoleArg) -> Self {
+        match value {
+            HubRoleArg::Primary => HubRole::Primary,
+            HubRoleArg::Replica => HubRole::Replica,
+        }
+    }
 }
 
 #[tokio::main]
@@ -54,7 +72,8 @@ fn init_tracing() {
 
 async fn run_hub(cmd: RunCommand) -> Result<()> {
     let runtime_config =
-        HubRuntimeConfig::from_sources(cmd.listen, cmd.data_dir, cmd.config).await?;
+        HubRuntimeConfig::from_sources(cmd.listen, cmd.data_dir, cmd.config, cmd.role.into())
+            .await?;
     tracing::info!(
         listen = %runtime_config.listen,
         data_dir = %runtime_config.data_dir.display(),

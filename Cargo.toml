@@ -4,6 +4,7 @@ members = [
     "crates/veen-hub",
     "crates/veen-cli",
     "crates/veen-selftest",
+    "crates/veen-bridge",
 ]
 resolver = "2"
 
@@ -38,6 +39,7 @@ thiserror = "1"
 serde_bytes = "0.11"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "fs"] }
+tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 reqwest = { version = "0.11", features = ["json", "gzip", "brotli", "stream"] }

@@ -1,0 +1,31 @@
+[package]
+name = "veen-bridge"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Federation bridge for synchronising VEEN hubs."
+
+[lib]
+name = "veen_bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "veen-bridge"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+hex.workspace = true
+sha2.workspace = true
+veen-core = { path = "../veen-core" }
+veen-hub = { path = "../veen-hub" }
