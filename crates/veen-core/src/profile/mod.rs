@@ -12,6 +12,7 @@ use crate::ht;
 
 /// The canonical VEEN cryptographic profile definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Profile {
     pub aead: &'static str,
     pub kdf: &'static str,
@@ -57,9 +58,10 @@ impl Profile {
 
 #[cfg(test)]
 mod tests {
+    use ciborium::{de::from_reader, ser::into_writer};
     use hex::ToHex;
 
-    use super::Profile;
+    use super::{Profile, ProfileId};
 
     #[test]
     fn default_profile_matches_snapshot() {
@@ -70,5 +72,24 @@ mod tests {
             as_hex,
             "f5a9c1afdd0a8771f8d599ff8ba8146f407455ae6abf451a3e99363577a12d20"
         );
+    }
+
+    #[test]
+    fn profile_id_serializes_as_cbor_bstr() {
+        let profile = Profile::default();
+        let id = profile.id().expect("profile id");
+        let mut buf = Vec::new();
+        into_writer(&id, &mut buf).expect("serialize profile id");
+        assert_eq!(buf[0], 0x58);
+        assert_eq!(buf[1], 32);
+        assert_eq!(&buf[2..], id.as_ref());
+
+        let decoded: ProfileId = from_reader(buf.as_slice()).expect("deserialize profile id");
+        assert_eq!(decoded, id);
+
+        let mut invalid = vec![0x58, 0x21];
+        invalid.extend([0u8; 33]);
+        let result: Result<ProfileId, _> = from_reader(invalid.as_slice());
+        assert!(result.is_err(), "expected profile id length enforcement");
     }
 }

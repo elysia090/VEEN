@@ -1,6 +1,7 @@
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::de::{Error as DeError, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::ht;
 
@@ -9,7 +10,7 @@ pub const STREAM_ID_LEN: usize = 32;
 
 /// Strongly typed wrapper around the 32-byte stream identifier used when
 /// deriving labels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StreamId([u8; STREAM_ID_LEN]);
 
 impl StreamId {
@@ -53,10 +54,59 @@ impl fmt::Display for StreamId {
     }
 }
 
+impl Serialize for StreamId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(self.as_ref())
+    }
+}
+
+struct StreamIdVisitor;
+
+impl<'de> Visitor<'de> for StreamIdVisitor {
+    type Value = StreamId;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "a {STREAM_ID_LEN}-byte VEEN stream identifier")
+    }
+
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+        E: DeError,
+    {
+        if v.len() != STREAM_ID_LEN {
+            return Err(E::invalid_length(v.len(), &self));
+        }
+        let mut bytes = [0u8; STREAM_ID_LEN];
+        bytes.copy_from_slice(v);
+        Ok(StreamId::new(bytes))
+    }
+
+    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+    where
+        E: DeError,
+    {
+        self.visit_bytes(&v)
+    }
+}
+
+impl<'de> Deserialize<'de> for StreamId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_bytes(StreamIdVisitor)
+    }
+}
+
 /// Result of the `label = Ht("veen/label", routing_key || stream_id ||
 /// u64be(epoch))` derivation described in the specification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Label([u8; 32]);
+pub const LABEL_LEN: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Label([u8; LABEL_LEN]);
 
 impl Label {
     /// Computes the canonical label for a given routing key, stream identifier,
@@ -73,19 +123,19 @@ impl Label {
 
     /// Borrows the label bytes.
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] {
+    pub const fn as_bytes(&self) -> &[u8; LABEL_LEN] {
         &self.0
     }
 }
 
-impl From<[u8; 32]> for Label {
-    fn from(value: [u8; 32]) -> Self {
+impl From<[u8; LABEL_LEN]> for Label {
+    fn from(value: [u8; LABEL_LEN]) -> Self {
         Self(value)
     }
 }
 
-impl From<&[u8; 32]> for Label {
-    fn from(value: &[u8; 32]) -> Self {
+impl From<&[u8; LABEL_LEN]> for Label {
+    fn from(value: &[u8; LABEL_LEN]) -> Self {
         Self(*value)
     }
 }
@@ -102,6 +152,53 @@ impl fmt::Display for Label {
             write!(f, "{byte:02x}")?;
         }
         Ok(())
+    }
+}
+
+impl Serialize for Label {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(self.as_ref())
+    }
+}
+
+struct LabelVisitor;
+
+impl<'de> Visitor<'de> for LabelVisitor {
+    type Value = Label;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "a {LABEL_LEN}-byte VEEN label")
+    }
+
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+        E: DeError,
+    {
+        if v.len() != LABEL_LEN {
+            return Err(E::invalid_length(v.len(), &self));
+        }
+        let mut bytes = [0u8; LABEL_LEN];
+        bytes.copy_from_slice(v);
+        Ok(Label(bytes))
+    }
+
+    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+    where
+        E: DeError,
+    {
+        self.visit_bytes(&v)
+    }
+}
+
+impl<'de> Deserialize<'de> for Label {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_bytes(LabelVisitor)
     }
 }
 

@@ -1,6 +1,7 @@
+use ciborium::{de::from_reader, ser::into_writer};
 use hex::ToHex;
 
-use super::{Label, StreamId, STREAM_ID_LEN};
+use super::{Label, StreamId, LABEL_LEN, STREAM_ID_LEN};
 
 #[test]
 fn derive_label_matches_known_vector() {
@@ -13,9 +14,9 @@ fn derive_label_matches_known_vector() {
     let label = Label::derive(routing_key, stream_id, 0x0123_4567_89ab_cdef);
 
     let expected = [
-        0x98, 0x05, 0x04, 0xe8, 0xeb, 0xa5, 0xbb, 0x36, 0xd2, 0x9b, 0xac, 0xd6, 0xef, 0xf0,
-        0x3e, 0xdc, 0x8f, 0xf8, 0x62, 0xd7, 0xc8, 0xc1, 0x46, 0x56, 0xba, 0x93, 0x91, 0x79,
-        0x78, 0xa9, 0x4c, 0x5f,
+        0x98, 0x05, 0x04, 0xe8, 0xeb, 0xa5, 0xbb, 0x36, 0xd2, 0x9b, 0xac, 0xd6, 0xef, 0xf0, 0x3e,
+        0xdc, 0x8f, 0xf8, 0x62, 0xd7, 0xc8, 0xc1, 0x46, 0x56, 0xba, 0x93, 0x91, 0x79, 0x78, 0xa9,
+        0x4c, 0x5f,
     ];
 
     assert_eq!(label.as_bytes(), &expected);
@@ -26,8 +27,39 @@ fn label_and_stream_id_display_as_hex() {
     let mut stream_id_bytes = [0u8; STREAM_ID_LEN];
     stream_id_bytes[STREAM_ID_LEN - 1] = 0xff;
     let stream_id = StreamId::from(stream_id_bytes);
-    let label = Label::from([0u8; 32]);
+    let label = Label::from([0u8; LABEL_LEN]);
 
-    assert_eq!(stream_id.to_string(), stream_id_bytes.encode_hex::<String>());
-    assert_eq!(label.to_string(), [0u8; 32].encode_hex::<String>());
+    assert_eq!(
+        stream_id.to_string(),
+        stream_id_bytes.encode_hex::<String>()
+    );
+    assert_eq!(label.to_string(), [0u8; LABEL_LEN].encode_hex::<String>());
+}
+
+#[test]
+fn stream_id_serializes_as_cbor_bstr() {
+    let stream_id = StreamId::from([0x55; STREAM_ID_LEN]);
+    let mut buf = Vec::new();
+    into_writer(&stream_id, &mut buf).expect("serialize stream id");
+    assert_eq!(buf[0], 0x58);
+    assert_eq!(buf[1], STREAM_ID_LEN as u8);
+    assert_eq!(&buf[2..], stream_id.as_bytes());
+
+    let decoded: StreamId = from_reader(buf.as_slice()).expect("deserialize stream id");
+    assert_eq!(decoded, stream_id);
+}
+
+#[test]
+fn label_serialization_enforces_length() {
+    let label = Label::from([0xaa; LABEL_LEN]);
+    let mut buf = Vec::new();
+    into_writer(&label, &mut buf).expect("serialize label");
+    assert_eq!(buf[0], 0x58);
+    assert_eq!(buf[1], 32);
+    assert_eq!(&buf[2..], label.as_bytes());
+
+    let mut truncated = vec![0x58, 0x1f];
+    truncated.extend([0u8; 31]);
+    let result: Result<Label, _> = from_reader(truncated.as_slice());
+    assert!(result.is_err(), "expected error for invalid label length");
 }
