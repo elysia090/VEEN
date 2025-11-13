@@ -44,3 +44,13 @@ reqwest = { version = "0.11", features = ["json", "gzip", "brotli", "stream"] }
 serde_json = "1"
 rand = { version = "0.8", features = ["std"] }
 rand_core = "0.6"
+toml = "0.8"
+axum = { version = "0.7", features = ["macros", "json"] }
+hyper = { version = "0.14", features = ["full"] }
+base64 = "0.21"
+tempfile = "3"
+assert_cmd = "2"
+serde_path_to_error = "0.1"
+dashmap = "5"
+humantime-serde = "1"
+humantime = "2"
