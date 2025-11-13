@@ -141,9 +141,10 @@ pub fn run_core() -> Result<()> {
 
     let mut tampered_first = data.attachments[0].clone();
     tampered_first[0] ^= 0xFF;
-    let tampered_root = AttachmentRoot::from_ciphertexts(
-        [tampered_first.as_slice(), data.attachments[1].as_slice()].into_iter(),
-    );
+    let tampered_root = AttachmentRoot::from_ciphertexts([
+        tampered_first.as_slice(),
+        data.attachments[1].as_slice(),
+    ]);
     ensure!(
         tampered_root != Some(data.att_root),
         "tampering with attachment ciphertext must change att_root"
