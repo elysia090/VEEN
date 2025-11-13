@@ -650,7 +650,7 @@ pub fn needs_daily_limit_reset(last_reset_ts: u64, now: u64) -> bool {
 }
 
 /// Materialized wallet state derived by folding WAL events.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WalletState {
     wallet_id: Option<WalletId>,
     exists: bool,
@@ -662,23 +662,6 @@ pub struct WalletState {
     last_limit_reset_ts: u64,
     seen_debit_transfers: HashSet<TransferId>,
     seen_credit_transfers: HashSet<TransferId>,
-}
-
-impl Default for WalletState {
-    fn default() -> Self {
-        Self {
-            wallet_id: None,
-            exists: false,
-            closed: false,
-            balance: 0,
-            frozen: false,
-            daily_limit: None,
-            pending_daily_spent: 0,
-            last_limit_reset_ts: 0,
-            seen_debit_transfers: HashSet::new(),
-            seen_credit_transfers: HashSet::new(),
-        }
-    }
 }
 
 impl WalletState {

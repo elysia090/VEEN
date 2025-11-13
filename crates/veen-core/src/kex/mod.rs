@@ -65,9 +65,9 @@ impl ClientUsage {
     /// Returns `true` if the client lifetime bound has been met or exceeded.
     #[must_use]
     pub fn lifetime_exceeded(&self, now: u64, config: ClientUsageConfig) -> bool {
-        now.checked_sub(self.created_at).map_or(false, |elapsed| {
-            elapsed >= config.max_client_id_lifetime_sec
-        })
+        now
+            .checked_sub(self.created_at)
+            .is_some_and(|elapsed| elapsed >= config.max_client_id_lifetime_sec)
     }
 
     /// Returns `true` if any per-label counter has met or exceeded the bound.
@@ -195,9 +195,9 @@ impl ClientObservationIndex {
             .checked_add(1)
             .ok_or(ObservationError::MessageCountOverflow { client_id, label })?;
 
-        let lifetime_exceeded = now.checked_sub(entry.first_seen).map_or(false, |elapsed| {
-            elapsed >= self.config.max_client_id_lifetime_sec
-        });
+        let lifetime_exceeded = now
+            .checked_sub(entry.first_seen)
+            .is_some_and(|elapsed| elapsed >= self.config.max_client_id_lifetime_sec);
 
         let message_count_exceeded = *count >= self.config.max_msgs_per_label;
 
