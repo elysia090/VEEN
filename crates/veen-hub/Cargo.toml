@@ -13,4 +13,25 @@ clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+axum.workspace = true
+hyper.workspace = true
+base64.workspace = true
+serde_path_to_error.workspace = true
+dashmap.workspace = true
+humantime-serde.workspace = true
+ciborium.workspace = true
+humantime.workspace = true
+sha2.workspace = true
+hex.workspace = true
 veen-core = { path = "../veen-core" }
+
+[dev-dependencies]
+tempfile.workspace = true
+assert_cmd.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }
+serde_json.workspace = true
+reqwest.workspace = true
+serde_bytes.workspace = true
