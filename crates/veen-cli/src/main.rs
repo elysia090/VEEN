@@ -7,10 +7,13 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use rand::RngCore;
+use reqwest::{Client as HttpClient, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
@@ -26,6 +29,11 @@ use veen_core::{
     hub::HubId,
     wire::{checkpoint::CHECKPOINT_VERSION, Checkpoint},
     Profile,
+};
+use veen_hub::pipeline::{
+    AttachmentUpload, HubStreamState as RemoteHubStreamState,
+    StoredAttachment as RemoteStoredAttachment, StoredMessage as RemoteStoredMessage,
+    SubmitRequest as RemoteSubmitRequest, SubmitResponse as RemoteSubmitResponse,
 };
 
 const CLIENT_KEY_VERSION: u8 = 1;
@@ -845,6 +853,40 @@ struct StoredAttachment {
     stored_path: String,
 }
 
+impl From<RemoteStoredAttachment> for StoredAttachment {
+    fn from(remote: RemoteStoredAttachment) -> Self {
+        Self {
+            name: remote.name,
+            digest: remote.digest,
+            size: remote.size,
+            stored_path: remote.stored_path,
+        }
+    }
+}
+
+impl From<RemoteStoredMessage> for StoredMessage {
+    fn from(remote: RemoteStoredMessage) -> Self {
+        Self {
+            stream: remote.stream,
+            seq: remote.seq,
+            sent_at: remote.sent_at,
+            client_id: remote.client_id,
+            schema: remote.schema,
+            expires_at: remote.expires_at,
+            parent: remote.parent,
+            body: remote.body,
+            body_digest: remote.body_digest,
+            attachments: remote
+                .attachments
+                .into_iter()
+                .map(StoredAttachment::from)
+                .collect(),
+            cap_id: remote.cap_id,
+            idem: remote.idem,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CapabilityToken {
     version: u8,
@@ -1100,7 +1142,7 @@ async fn handle_hub_stop(args: HubStopArgs) -> Result<()> {
 }
 
 async fn handle_hub_status(args: HubStatusArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
     let state = load_hub_state(&data_dir).await?;
 
     let profile_id = state
@@ -1137,7 +1179,7 @@ async fn handle_hub_status(args: HubStatusArgs) -> Result<()> {
 }
 
 async fn handle_hub_key(args: HubKeyArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
     let key_info = read_hub_key_material(&data_dir).await?;
 
     println!("hub_id: {}", key_info.hub_id_hex);
@@ -1206,7 +1248,7 @@ async fn handle_hub_verify_rotation(args: HubVerifyRotationArgs) -> Result<()> {
 }
 
 async fn handle_hub_health(args: HubHealthArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
     let state = load_hub_state(&data_dir).await?;
     let now = current_unix_timestamp()?;
 
@@ -1231,7 +1273,7 @@ async fn handle_hub_health(args: HubHealthArgs) -> Result<()> {
 }
 
 async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
     let state = load_hub_state(&data_dir).await?;
     let metrics = state.metrics.clone();
 
@@ -1245,7 +1287,7 @@ async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
 }
 
 async fn handle_hub_tls_info(args: HubTlsInfoArgs) -> Result<()> {
-    let hub = parse_hub_reference(&args.hub)?;
+    let hub = parse_hub_reference(&args.hub)?.into_local()?;
     let tls_info_path = hub.join(STATE_DIR).join(TLS_INFO_FILE);
     if !fs::try_exists(&tls_info_path)
         .await
@@ -1467,7 +1509,13 @@ async fn handle_id_rotate(args: IdRotateArgs) -> Result<()> {
 }
 
 async fn handle_send(args: SendArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    match parse_hub_reference(&args.hub)? {
+        HubReference::Local(data_dir) => handle_send_local(data_dir, args).await,
+        HubReference::Remote(client) => handle_send_remote(client, args).await,
+    }
+}
+
+async fn handle_send_local(data_dir: PathBuf, args: SendArgs) -> Result<()> {
     ensure_data_dir_layout(&data_dir).await?;
 
     let mut hub_state = load_hub_state(&data_dir).await?;
@@ -1596,17 +1644,178 @@ async fn handle_send(args: SendArgs) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()> {
+    let identity_path = args.client.join("identity_card.pub");
+    let client_bundle: ClientPublicBundle =
+        read_cbor_file(&identity_path).await.with_context(|| {
+            format!(
+                "reading client identity card from {}",
+                identity_path.display()
+            )
+        })?;
+    let client_id_hex = hex::encode(client_bundle.client_id.as_ref());
+
+    if let Some(ref schema) = args.schema {
+        if schema.len() != 32 && schema.len() != 64 {
+            bail!("schema identifiers must be 32 or 64 hex characters");
+        }
+        if !schema.chars().all(|c| c.is_ascii_hexdigit()) {
+            bail!("schema identifiers must be hexadecimal");
+        }
+    }
+
+    let attachments = if args.attach.is_empty() {
+        None
+    } else {
+        let mut uploads = Vec::new();
+        for attachment in &args.attach {
+            let data = fs::read(attachment)
+                .await
+                .with_context(|| format!("reading attachment {}", attachment.display()))?;
+            let encoded = BASE64_STANDARD.encode(data);
+            uploads.push(AttachmentUpload {
+                name: attachment
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(ToString::to_string),
+                data: encoded,
+            });
+        }
+        Some(uploads)
+    };
+
+    let capability = if let Some(ref cap_path) = args.cap {
+        let token: CapabilityToken = read_json_file(cap_path).await?;
+        if token.expires_at < current_unix_timestamp()? {
+            bail!("capability token {} has expired", token.token_id);
+        }
+        Some(token.token_id)
+    } else {
+        None
+    };
+
+    let payload = serde_json::from_str(&args.body).unwrap_or_else(|_| json!(args.body));
+
+    let request = RemoteSubmitRequest {
+        stream: args.stream.clone(),
+        client_id: client_id_hex.clone(),
+        payload,
+        attachments,
+        capability,
+        expires_at: args.expires_at,
+        schema: args.schema.clone(),
+        idem: None,
+    };
+
+    let response: RemoteSubmitResponse = client
+        .post_json("/submit", &request)
+        .await
+        .context("submitting message to hub")?;
+
+    println!(
+        "sent message seq={} stream={} client_id={}",
+        response.seq, response.stream, client_id_hex
+    );
+    if !response.stored_attachments.is_empty() {
+        println!("attachments stored: {}", response.stored_attachments.len());
+        for attachment in response.stored_attachments {
+            println!(
+                "  {} ({} bytes) -> {}",
+                attachment.name, attachment.size, attachment.digest
+            );
+        }
+    }
 
     Ok(())
 }
 
 async fn handle_stream(args: StreamArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
-    let stream_state = load_stream_state(&data_dir, &args.stream).await?;
+    let hub = parse_hub_reference(&args.hub)?;
+    match hub {
+        HubReference::Local(data_dir) => {
+            let stream_state = load_stream_state(&data_dir, &args.stream).await?;
 
-    let mut emitted = false;
-    for message in stream_state.messages.iter().filter(|m| m.seq >= args.from) {
-        emitted = true;
+            let mut emitted = false;
+            for message in stream_state.messages.iter().filter(|m| m.seq >= args.from) {
+                emitted = true;
+                println!("seq: {}", message.seq);
+                println!("sent_at: {}", message.sent_at);
+                println!("client_id: {}", message.client_id);
+                if let Some(ref schema) = message.schema {
+                    println!("schema: {schema}");
+                }
+                if let Some(expires_at) = message.expires_at {
+                    println!("expires_at: {expires_at}");
+                }
+                if let Some(ref parent) = message.parent {
+                    println!("parent: {parent}");
+                }
+                if let Some(ref cap_id) = message.cap_id {
+                    println!("cap_id: {cap_id}");
+                }
+                match (&message.body, &message.body_digest) {
+                    (Some(body), _) => println!("body: {body}"),
+                    (None, Some(digest)) => println!("body_digest: {digest}"),
+                    _ => println!("body: (omitted)"),
+                }
+                if message.attachments.is_empty() {
+                    println!("attachments: (none)");
+                } else {
+                    println!("attachments:");
+                    for attachment in &message.attachments {
+                        println!(
+                            "  {} ({} bytes) digest={} stored={}",
+                            attachment.name,
+                            attachment.size,
+                            attachment.digest,
+                            attachment.stored_path
+                        );
+                    }
+                }
+                if args.with_proof {
+                    let proof = compute_message_proof(message)?;
+                    println!("proof: {proof}");
+                }
+                println!("---");
+            }
+
+            if !emitted {
+                println!(
+                    "no messages in stream {} from seq {}",
+                    args.stream, args.from
+                );
+            }
+
+            Ok(())
+        }
+        HubReference::Remote(client) => handle_stream_remote(client, args).await,
+    }
+}
+
+async fn handle_stream_remote(client: HubHttpClient, args: StreamArgs) -> Result<()> {
+    let mut query: Vec<(&str, String)> = vec![("stream", args.stream.clone())];
+    if args.from > 0 {
+        query.push(("from", args.from.to_string()));
+    }
+
+    let remote_messages: Vec<RemoteStoredMessage> = client
+        .get_json("/stream", &query)
+        .await
+        .context("fetching stream messages")?;
+
+    if remote_messages.is_empty() {
+        println!(
+            "no messages in stream {} from seq {}",
+            args.stream, args.from
+        );
+        return Ok(());
+    }
+
+    for remote in remote_messages {
+        let message: StoredMessage = remote.into();
         println!("seq: {}", message.seq);
         println!("sent_at: {}", message.sent_at);
         println!("client_id: {}", message.client_id);
@@ -1639,17 +1848,10 @@ async fn handle_stream(args: StreamArgs) -> Result<()> {
             }
         }
         if args.with_proof {
-            let proof = compute_message_proof(message)?;
+            let proof = compute_message_proof(&message)?;
             println!("proof: {proof}");
         }
         println!("---");
-    }
-
-    if !emitted {
-        println!(
-            "no messages in stream {} from seq {}",
-            args.stream, args.from
-        );
     }
 
     Ok(())
@@ -1737,7 +1939,13 @@ async fn handle_cap_issue(args: CapIssueArgs) -> Result<()> {
 }
 
 async fn handle_cap_authorize(args: CapAuthorizeArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    match parse_hub_reference(&args.hub)? {
+        HubReference::Local(data_dir) => handle_cap_authorize_local(data_dir, args).await,
+        HubReference::Remote(client) => handle_cap_authorize_remote(client, args).await,
+    }
+}
+
+async fn handle_cap_authorize_local(data_dir: PathBuf, args: CapAuthorizeArgs) -> Result<()> {
     let token: CapabilityToken = read_json_file(&args.cap).await?;
     let now = current_unix_timestamp()?;
     if token.expires_at < now {
@@ -1759,8 +1967,55 @@ async fn handle_cap_authorize(args: CapAuthorizeArgs) -> Result<()> {
     Ok(())
 }
 
+async fn handle_cap_authorize_remote(client: HubHttpClient, args: CapAuthorizeArgs) -> Result<()> {
+    let token: CapabilityToken = read_json_file(&args.cap).await?;
+    let now = current_unix_timestamp()?;
+    if token.expires_at < now {
+        bail!(
+            "capability token {} expired at {}",
+            token.token_id,
+            token.expires_at
+        );
+    }
+
+    #[derive(Serialize)]
+    struct CapabilityRequestPayload {
+        token_id: String,
+        subject: String,
+        stream: String,
+        expires_at: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_uses: Option<u64>,
+    }
+
+    let payload = CapabilityRequestPayload {
+        token_id: token.token_id.clone(),
+        subject: token.subject.clone(),
+        stream: token.stream.clone(),
+        expires_at: token.expires_at,
+        max_uses: None,
+    };
+
+    client
+        .post_unit("/authorize", &payload)
+        .await
+        .context("authorizing capability with hub")?;
+
+    println!(
+        "authorised capability {} for stream {}",
+        token.token_id, token.stream
+    );
+    Ok(())
+}
+
 async fn handle_resync(args: ResyncArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    match parse_hub_reference(&args.hub)? {
+        HubReference::Local(data_dir) => handle_resync_local(data_dir, args).await,
+        HubReference::Remote(client) => handle_resync_remote(client, args).await,
+    }
+}
+
+async fn handle_resync_local(data_dir: PathBuf, args: ResyncArgs) -> Result<()> {
     let hub_state = load_hub_state(&data_dir).await?;
     let profile_id = hub_state.profile_id.clone().unwrap_or_default();
 
@@ -1792,8 +2047,35 @@ async fn handle_resync(args: ResyncArgs) -> Result<()> {
     Ok(())
 }
 
+async fn handle_resync_remote(client: HubHttpClient, args: ResyncArgs) -> Result<()> {
+    #[derive(Serialize)]
+    struct ResyncRequestPayload {
+        stream: String,
+    }
+
+    let payload = ResyncRequestPayload {
+        stream: args.stream.clone(),
+    };
+
+    let remote_state: RemoteHubStreamState = client
+        .post_json("/resync", &payload)
+        .await
+        .context("requesting resync from hub")?;
+
+    let seq = remote_state.messages.last().map(|msg| msg.seq).unwrap_or(0);
+
+    let mut client_state: ClientStateFile = read_json_file(&args.client.join("state.json")).await?;
+    let label_state = client_state.ensure_label_state(&args.stream);
+    label_state.last_stream_seq = seq;
+    label_state.prev_ack = seq;
+    write_json_file(&args.client.join("state.json"), &client_state).await?;
+
+    println!("resynchronised stream {} to seq {}", args.stream, seq);
+    Ok(())
+}
+
 async fn handle_verify_state(args: VerifyStateArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
     let hub_state = load_hub_state(&data_dir).await?;
     let client_state: ClientStateFile = read_json_file(&args.client.join("state.json")).await?;
 
@@ -1876,7 +2158,7 @@ async fn handle_rpc_call(args: RpcCallArgs) -> Result<()> {
 }
 
 async fn handle_crdt_lww_set(args: CrdtLwwSetArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
     ensure_crdt_stream_dir(&data_dir, &args.stream).await?;
     let mut state = load_lww_state(&data_dir, &args.stream).await?;
     let timestamp = args.ts.unwrap_or(current_unix_timestamp()?);
@@ -1899,7 +2181,7 @@ async fn handle_crdt_lww_set(args: CrdtLwwSetArgs) -> Result<()> {
 }
 
 async fn handle_crdt_lww_get(args: CrdtLwwGetArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let state = load_lww_state(&data_dir, &args.stream).await?;
     if let Some(value) = state.entries.get(&args.key) {
@@ -1912,7 +2194,7 @@ async fn handle_crdt_lww_get(args: CrdtLwwGetArgs) -> Result<()> {
 }
 
 async fn handle_crdt_orset_add(args: CrdtOrsetAddArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
     ensure_crdt_stream_dir(&data_dir, &args.stream).await?;
     let mut state = load_orset_state(&data_dir, &args.stream).await?;
     let now = current_unix_timestamp()?;
@@ -1931,7 +2213,7 @@ async fn handle_crdt_orset_add(args: CrdtOrsetAddArgs) -> Result<()> {
 }
 
 async fn handle_crdt_orset_remove(args: CrdtOrsetRemoveArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let mut state = load_orset_state(&data_dir, &args.stream).await?;
     let now = current_unix_timestamp()?;
@@ -1955,7 +2237,7 @@ async fn handle_crdt_orset_remove(args: CrdtOrsetRemoveArgs) -> Result<()> {
 }
 
 async fn handle_crdt_orset_list(args: CrdtOrsetListArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let state = load_orset_state(&data_dir, &args.stream).await?;
     let mut visible: BTreeSet<&String> = BTreeSet::new();
@@ -1976,7 +2258,7 @@ async fn handle_crdt_orset_list(args: CrdtOrsetListArgs) -> Result<()> {
 }
 
 async fn handle_crdt_counter_add(args: CrdtCounterAddArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
     ensure_crdt_stream_dir(&data_dir, &args.stream).await?;
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let mut state = load_counter_state(&data_dir, &args.stream).await?;
@@ -1987,7 +2269,7 @@ async fn handle_crdt_counter_add(args: CrdtCounterAddArgs) -> Result<()> {
 }
 
 async fn handle_crdt_counter_get(args: CrdtCounterGetArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let state = load_counter_state(&data_dir, &args.stream).await?;
     println!("counter value={}", state.value);
@@ -1995,7 +2277,7 @@ async fn handle_crdt_counter_get(args: CrdtCounterGetArgs) -> Result<()> {
 }
 
 async fn handle_anchor_publish(args: AnchorPublishArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?;
+    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
     let mut log = load_anchor_log(&data_dir).await?;
     let ts = args.ts.unwrap_or(current_unix_timestamp()?);
 
@@ -2473,6 +2755,194 @@ async fn save_hub_state(data_dir: &Path, state: &HubRuntimeState) -> Result<()> 
     Ok(())
 }
 
+#[derive(Clone)]
+enum HubReference {
+    Local(PathBuf),
+    Remote(HubHttpClient),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+    use std::time::Duration;
+    use tempfile::tempdir;
+    use tokio::time::sleep;
+    use veen_hub::config::HubRuntimeConfig;
+    use veen_hub::runtime::HubRuntime;
+
+    #[tokio::test]
+    async fn http_send_stream_and_resync() -> anyhow::Result<()> {
+        let hub_dir = tempdir()?;
+        let client_dir = tempdir()?;
+
+        let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let listen: SocketAddr = socket.local_addr()?;
+        drop(socket);
+        let config =
+            HubRuntimeConfig::from_sources(listen, hub_dir.path().to_path_buf(), None).await?;
+        let runtime = HubRuntime::start(config).await?;
+        let hub_url = format!("http://{}", listen);
+
+        sleep(Duration::from_millis(50)).await;
+
+        handle_keygen(KeygenArgs {
+            out: client_dir.path().to_path_buf(),
+        })
+        .await?;
+
+        handle_send(SendArgs {
+            hub: hub_url.clone(),
+            client: client_dir.path().to_path_buf(),
+            stream: "test".to_string(),
+            body: json!({ "msg": "hello" }).to_string(),
+            schema: None,
+            expires_at: None,
+            cap: None,
+            parent: None,
+            attach: Vec::new(),
+            no_store_body: false,
+        })
+        .await?;
+
+        handle_stream(StreamArgs {
+            hub: hub_url.clone(),
+            client: client_dir.path().to_path_buf(),
+            stream: "test".to_string(),
+            from: 0,
+            with_proof: false,
+        })
+        .await?;
+
+        handle_resync(ResyncArgs {
+            hub: hub_url,
+            client: client_dir.path().to_path_buf(),
+            stream: "test".to_string(),
+        })
+        .await?;
+
+        let state_path = client_dir.path().join("state.json");
+        let state: ClientStateFile = read_json_file(&state_path).await?;
+        let seq = state
+            .labels
+            .get("test")
+            .map(|label| label.last_stream_seq)
+            .unwrap_or(0);
+        assert_eq!(seq, 1);
+
+        runtime.shutdown().await?;
+        Ok(())
+    }
+}
+
+impl HubReference {
+    fn into_local(self) -> Result<PathBuf> {
+        match self {
+            HubReference::Local(path) => Ok(path),
+            HubReference::Remote(_) => {
+                bail!("command requires a local hub data directory reference")
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct HubHttpClient {
+    base_url: Url,
+    http: HttpClient,
+}
+
+impl HubHttpClient {
+    fn new(base_url: Url, http: HttpClient) -> Self {
+        Self { base_url, http }
+    }
+
+    fn url(&self, path: &str) -> Result<Url> {
+        self.base_url
+            .join(path)
+            .with_context(|| format!("constructing hub url {}", path))
+    }
+
+    async fn get_json<T>(&self, path: &str, query: &[(&str, String)]) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let mut url = self.url(path)?;
+        if !query.is_empty() {
+            url.query_pairs_mut()
+                .extend_pairs(query.iter().map(|(k, v)| (*k, v.as_str())));
+        }
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .context("performing hub GET request")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to decode response>".to_string());
+            bail!("hub GET {path} failed with {status}: {body}");
+        }
+        response
+            .json::<T>()
+            .await
+            .context("decoding hub response body")
+    }
+
+    async fn post_json<T, R>(&self, path: &str, body: &T) -> Result<R>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        let url = self.url(path)?;
+        let response = self
+            .http
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .context("performing hub POST request")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to decode response>".to_string());
+            bail!("hub POST {path} failed with {status}: {body}");
+        }
+        response
+            .json::<R>()
+            .await
+            .context("decoding hub response body")
+    }
+
+    async fn post_unit<T>(&self, path: &str, body: &T) -> Result<()>
+    where
+        T: Serialize + ?Sized,
+    {
+        let url = self.url(path)?;
+        let response = self
+            .http
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .context("performing hub POST request")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to decode response>".to_string());
+            bail!("hub POST {path} failed with {status}: {body}");
+        }
+        Ok(())
+    }
+}
+
 async fn write_pid_file(data_dir: &Path, pid: u32) -> Result<()> {
     let pid_path = data_dir.join(HUB_PID_FILE);
     fs::write(&pid_path, pid.to_string())
@@ -2574,16 +3044,28 @@ async fn read_hub_key_material(data_dir: &Path) -> Result<HubKeyInfo> {
     })
 }
 
-fn parse_hub_reference(reference: &str) -> Result<PathBuf> {
+fn parse_hub_reference(reference: &str) -> Result<HubReference> {
     if let Some(path) = reference.strip_prefix("file://") {
-        Ok(PathBuf::from(path))
-    } else if reference.contains("://") {
-        bail!(
-            "network hubs are not supported by this CLI implementation; provide a data directory path or file:// URI"
-        );
-    } else {
-        Ok(PathBuf::from(reference))
+        return Ok(HubReference::Local(PathBuf::from(path)));
     }
+
+    if reference.contains("://") {
+        let url =
+            Url::parse(reference).with_context(|| format!("parsing hub endpoint {reference}"))?;
+        match url.scheme() {
+            "http" | "https" => {
+                let client = HttpClient::builder()
+                    .build()
+                    .context("constructing HTTP client")?;
+                return Ok(HubReference::Remote(HubHttpClient::new(url, client)));
+            }
+            other => {
+                bail!("unsupported hub scheme `{other}`; expected http or https");
+            }
+        }
+    }
+
+    Ok(HubReference::Local(PathBuf::from(reference)))
 }
 
 fn print_metrics_summary(metrics: &HubMetricsSnapshot) {
