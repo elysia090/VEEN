@@ -27,14 +27,14 @@ jobs:
       - name: Cache cargo registry
         uses: actions/cache@v3
         with:
-          path: ${{ env.HOME }}/.cargo/registry
+          path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-registry-
 
       - name: Cache cargo index
         uses: actions/cache@v3
         with:
-          path: ${{ env.HOME }}/.cargo/git
+          path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-git-
 
