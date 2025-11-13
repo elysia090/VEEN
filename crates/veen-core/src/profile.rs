@@ -1,6 +1,7 @@
-use std::fmt::{self, Write as _};
+use std::fmt;
 
 use ciborium::ser::into_writer;
+use hex::encode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -75,11 +76,7 @@ impl Profile {
     /// Formats the profile identifier as lowercase hexadecimal.
     pub fn id_hex(&self) -> Result<String, ProfileError> {
         let id = self.id()?;
-        let mut out = String::with_capacity(64);
-        for byte in id.0 {
-            write!(&mut out, "{byte:02x}").expect("write to string");
-        }
-        Ok(out)
+        Ok(encode(id.0))
     }
 }
 

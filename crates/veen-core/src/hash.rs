@@ -12,10 +12,9 @@ pub fn ht(tag: &str, data: &[u8]) -> [u8; 32] {
     hasher.update([0u8]);
     hasher.update(data);
     let digest = hasher.finalize();
-    digest
-        .as_slice()
-        .try_into()
-        .expect("digest should be 32 bytes")
+    let mut out = [0u8; 32];
+    out.copy_from_slice(digest.as_slice());
+    out
 }
 
 #[cfg(test)]

@@ -22,15 +22,24 @@ The repository ships with tooling commonly used in contemporary Rust projects:
   stable release and installs `clippy` and `rustfmt` automatically.
 - [`Justfile`](Justfile) exposes convenient recipes for formatting, linting, and
   testing.
-- [`clippy.toml`](clippy.toml) denies fallible lint patterns such as
-  `unwrap`/`expect` in production code.
+- Workspace lint configuration in [`Cargo.toml`](Cargo.toml) forbids
+  footguns such as `unwrap`/`expect` in production code.
 - [`rustfmt.toml`](rustfmt.toml) aligns formatting rules across contributors.
 
 ### Quickstart
 
 ```shell
+# Install required Rust components (clippy and rustfmt)
+just tools
+
 # Format, lint, and test the entire workspace
 just ci
+
+# Format without mutating files (useful in CI)
+just fmt-check
+
+# Generate documentation
+just doc
 
 # Run a single check
 just test
