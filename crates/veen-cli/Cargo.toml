@@ -24,3 +24,4 @@ veen-core = { path = "../veen-core" }
 veen-selftest = { path = "../veen-selftest" }
 x25519-dalek.workspace = true
 rand.workspace = true
+sha2.workspace = true
