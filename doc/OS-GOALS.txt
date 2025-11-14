@@ -1,0 +1,438 @@
+VEEN v0.0.1 OS-GOALS
+Host Operating System Operational Goal Specification (Tightened)
+Plain ASCII, English only. No overlays beyond v0.0.1 (OP0, KEX0, RESYNC0, RPC0, CRDT0, ANCHOR0, OBS0, COMP0, SH0, DR0, TS0).
+	0.	Purpose and scope
+
+OS-GOALS defines what must hold at the host operating system level for VEEN v0.0.1 to be considered operationally complete on a Unix-like platform, with Ubuntu 22.04 and 24.04 (including WSL2) as the reference environment.
+
+It constrains:
+	•	how VEEN is built and installed on the OS
+	•	how processes are started, stopped, and supervised
+	•	how persistent data and logs are placed on disk
+	•	how CLI, hub, bridge, and selftest binaries interact with the OS
+	•	how a clean system can be driven from “no VEEN” to “fully functioning VEEN deployment” using only documented commands
+
+If every numbered requirement in this document is satisfied on the reference OS, VEEN v0.0.1 meets OS-GOALS.
+	1.	Target operating systems
+
+OS1.1 Reference distributions
+
+VEEN MUST fully support:
+	•	Ubuntu 22.04 LTS amd64 (native, systemd managed)
+	•	Ubuntu 24.04 LTS amd64 (native, systemd managed)
+	•	WSL2 Ubuntu 22.04 / 24.04 under Windows 10 or 11 (systemd may be absent or disabled)
+
+OS1.2 Single source tree
+
+The same git repository and Cargo workspace MUST:
+	•	build on all reference distributions without source modifications
+	•	not depend on OS-specific feature flags for protocol correctness
+	•	only use OS-specific conditional compilation for optional integrations (for example, systemd units, TLS key paths)
+
+	2.	Dependency model
+
+OS2.1 Minimal system packages
+
+On a clean reference system, the following sequence MUST be sufficient to install all system-level dependencies required to build and run VEEN:
+	•	sudo apt update
+	•	sudo apt install -y build-essential pkg-config libssl-dev curl ca-certificates
+
+No additional mandatory system libraries beyond the standard OpenSSL, pthreads, and libc are allowed for core functionality.
+
+OS2.2 Rust toolchain
+
+VEEN MUST build and run on stable Rust, installed as:
+	•	curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+	•	source "$HOME/.cargo/env"
+
+The minimum Rust version MUST be documented in the repository (for example, in a rust-toolchain.toml or README) and MUST be a stable channel release.
+
+OS2.3 No external services
+
+VEEN core tests and selftest MUST NOT require:
+	•	external databases
+	•	external message brokers
+	•	external key management services
+
+Loopback HTTP ports and the local filesystem are the only mandatory external resources.
+	3.	Source layout and build
+
+OS3.1 Repository layout
+
+The repository root MUST contain:
+	•	a Cargo workspace with member crates including:
+	•	veen-core
+	•	veen-hub
+	•	veen-bridge
+	•	veen-cli
+	•	veen-selftest
+	•	documentation for build and runtime expectations in a text file (for example, README)
+
+OS3.2 Build command
+
+From the repository root:
+	•	cargo build --release
+
+MUST:
+	•	complete with exit status 0 on all reference OS variants
+	•	produce at least:
+	•	target/release/veen (single CLI/hub binary) or
+	•	documented binaries where one binary is the canonical CLI front-end and one is the hub
+	•	not require environment variables beyond those documented (for example, no hidden dependency on PATH hacks)
+
+OS3.3 Test command
+
+From the repository root:
+	•	cargo test --all
+
+MUST:
+	•	complete with exit status 0 on all reference OS variants
+	•	run unit tests for all core protocol components
+	•	not hang indefinitely or require manual interaction
+
+	4.	Installation pattern on native Ubuntu
+
+OS4.1 Standard install prefix
+
+VEEN MUST support installation into a conventional Unix layout:
+	•	binaries under /usr/local/bin or /usr/bin
+	•	configuration under /etc/veen
+	•	persistent data under /var/lib/veen
+	•	logs under /var/log/veen (if not journald-only)
+
+The repository MUST document:
+	•	a simple manual install path using cp or install
+	•	an optional package manager recipe (for example, deb build) may be provided but is not mandatory for OS-GOALS
+
+OS4.2 Binary deployment
+
+A minimal manual install sequence MUST be sufficient:
+	•	sudo cp target/release/veen /usr/local/bin/veen
+	•	sudo chmod 0755 /usr/local/bin/veen
+	•	veen --help returns usage information and exit code 0
+
+OS4.3 Configuration files
+
+If configuration files are required for the hub, they MUST:
+	•	reside under /etc/veen (for example, /etc/veen/veen.toml)
+	•	be optional with sane defaults when absent
+	•	have a documented example configuration
+
+	5.	Runtime processes and supervision
+
+5.1 Process roles
+
+The OS MUST be able to host at least the following VEEN process roles:
+	•	hub process
+	•	bridge process (optional)
+	•	CLI invocations from user shells
+	•	selftest processes that start ephemeral hubs
+
+5.2 Hub as a foreground process
+
+The hub MUST support foreground operation for development and debugging:
+	•	veen hub start --listen 127.0.0.1:8080 --data-dir /var/lib/veen --foreground
+
+This MUST:
+	•	keep the hub in the foreground
+	•	log status and errors to stderr or stdout
+	•	exit with non-zero code on fatal error
+
+5.3 Hub as a background systemd service (native Ubuntu)
+
+On native Ubuntu with systemd, a unit file of the form:
+	•	ExecStart=/usr/local/bin/veen hub start --listen 0.0.0.0:8080 --data-dir /var/lib/veen --config /etc/veen/veen.toml
+
+MUST work such that:
+	•	sudo systemctl start veen-hub launches the hub
+	•	sudo systemctl status veen-hub shows the hub as active
+	•	sudo systemctl stop veen-hub stops the hub gracefully
+
+The hub MUST respond to SIGTERM by:
+	•	flushing receipt and checkpoint files
+	•	flushing log buffers
+	•	closing network listeners
+	•	exiting with code 0 on normal shutdown
+
+5.4 WSL2 environment
+
+In a WSL2 Ubuntu instance with no systemd:
+	•	the hub MUST still be startable as a foreground process
+	•	a simple background pattern such as:
+	•	nohup veen hub start --listen 0.0.0.0:8080 --data-dir ~/veen-data > ~/veen-hub.log 2>&1 &
+MUST be valid and stable
+
+No systemd-specific assumptions may be required for correctness.
+	6.	Filesystem layout and permissions
+
+OS6.1 Ownership model
+
+On native Ubuntu:
+	•	/var/lib/veen MUST be owned by a dedicated system user (for example, veen)
+	•	the hub process SHOULD run as this user, not as root, except for port binding or container contexts
+	•	the CLI may run as any user to manage client identities under that user’s home directory
+
+On WSL2, running as the default user is acceptable but MUST still respect per-user client directories.
+
+OS6.2 Data directory contents
+
+The hub MUST create or reuse the following under its data directory:
+	•	receipts.cborseq
+	•	checkpoints.cborseq
+	•	state/ (internal state)
+	•	anchors/ (if anchoring is enabled)
+	•	optional:
+	•	payloads.cborseq if payload storage at the hub is enabled by configuration
+
+These files and directories MUST:
+	•	be created with permissions that prevent other unrelated users from modifying them (for example, 0700 directories, 0600 files, owned by the hub user)
+	•	be usable across hub restarts without manual repair
+
+OS6.3 Client filesystem layout
+
+Each client identity MUST reside under a user-specific directory, for example:
+	•	$HOME/.local/share/veen/client-main
+	•	or a user-specified path
+
+Each client directory MUST contain:
+	•	keystore.enc (encrypted private keys)
+	•	identity_card.pub (public identity)
+	•	state.json (or equivalent state file)
+	•	optional:
+	•	additional state files such as MMR peaks
+
+File permissions MUST restrict access to the owning user (for example, 0700 directory, 0600 files).
+	7.	Networking and ports
+
+OS7.1 Binding addresses
+
+On the reference OS, the hub MUST be able to bind to:
+	•	127.0.0.1:PORT for local-only testing
+	•	0.0.0.0:PORT for serving remote clients on the host network
+
+The CLI MUST accept hubs specified as:
+	•	http://127.0.0.1:8080
+	•	http://hostname:8080
+
+OS7.2 Port reuse and restart
+
+The hub MUST:
+	•	properly close its listening sockets on shutdown
+	•	allow immediate restart on the same address/port pair without manual socket cleanup
+
+OS7.3 TLS endpoints (optional)
+
+If TLS is enabled (for example, https://hostname:8443), the OS-level integration MUST:
+	•	use the host’s certificate store or files under /etc/veen/tls or similar
+	•	not require OS-specific hacks beyond documented configuration
+
+	8.	CLI behavior on the OS
+
+OS8.1 Path and invocation
+
+After installation, the following MUST be valid on the reference OS:
+	•	veen --help
+	•	veen hub --help
+	•	veen keygen --help
+	•	veen send --help
+	•	veen stream --help
+	•	veen selftest core
+	•	veen selftest all
+
+All of these MUST:
+	•	exit with status 0 when just printing help
+	•	not require environment variables beyond PATH and HOME
+
+OS8.2 Deterministic behavior
+
+Given the same:
+	•	hub data directory
+	•	client directories and files
+	•	VEEN binary version
+	•	OS-level environment variables (for example, TZ)
+
+CLI commands MUST produce:
+	•	the same wire messages
+	•	the same receipts and mmr_root values
+
+apart from values that depend on wall-clock time and OS randomness where the specification allows it.
+
+OS8.3 Error reporting
+
+Any CLI command contacting the hub MUST:
+	•	decode hub responses as CBOR
+	•	if an error response is returned, print:
+	•	the error code (for example, E.SIZE, E.SIG)
+	•	optional detail text if present
+	•	exit with a non-zero exit code
+
+	9.	Logging and observability integration
+
+OS9.1 Hub logs
+
+On native Ubuntu:
+	•	when run under systemd, hub logs MUST be visible via journalctl -u veen-hub
+	•	when run in foreground, logs MUST go to stderr or stdout
+
+Log output SHOULD:
+	•	be structured as text or JSON lines
+	•	contain timestamps and severity levels
+
+OS9.2 Metrics endpoint
+
+The hub MUST expose:
+	•	GET /metrics on its HTTP port
+
+The CLI command:
+	•	veen hub metrics --hub http://127.0.0.1:8080
+
+MUST:
+	•	fetch this endpoint
+	•	print raw output with --raw
+	•	otherwise, summarize key counters and histograms
+
+OS9.3 Health endpoint
+
+The hub MUST expose:
+	•	GET /healthz
+
+The CLI command:
+	•	veen hub health --hub http://127.0.0.1:8080
+
+MUST:
+	•	fetch /healthz
+	•	map the response to a simple JSON or text summary
+
+	10.	Security and OS-level hardening
+
+OS10.1 Non-root operation
+
+On native Ubuntu, VEEN MUST:
+	•	be able to run the hub process as a non-root user for ports above 1024
+	•	not require CAP_NET_ADMIN or similar privileged capabilities for normal operation
+
+Running as root for port 80 or 443 MAY be supported but MUST NOT be required.
+
+OS10.2 File permissions
+
+Installation docs MUST specify:
+	•	recommended permissions for /var/lib/veen
+	•	recommended permissions for client directories under $HOME/.local/share/veen
+
+The VEEN binaries MUST:
+	•	not weaken these permissions automatically
+	•	fail with a clear error message if they cannot create or access their required paths
+
+OS10.3 Resource limits
+
+VEEN MUST behave gracefully under OS resource limits such as:
+	•	process file descriptor limits
+	•	open file limits
+	•	CPU time quotas (in containers)
+
+The selftest suite SHOULD include at least one check that:
+	•	the hub returns E.SIZE or a similar bound-related error when payload sizes exceed configured limits
+	•	the hub does not crash or spin indefinitely under such stress
+
+	11.	WSL2 specifics
+
+OS11.1 Filesystem behavior
+
+On WSL2, VEEN MUST:
+	•	tolerate NTFS-backed filesystem semantics (no assumptions about fsync performance beyond basic durability)
+	•	not rely on Linux-specific filesystem features (extended attributes, special file types) for correctness
+
+OS11.2 Time and clocks
+
+On WSL2, VEEN MUST:
+	•	rely on wall-clock time only for epoch-based label derivation and expiry handling
+	•	tolerate small clock skews without breaking protocol invariants beyond what CLOCK_SKEW_EPOCHS allows
+
+	12.	End-to-end OS-level workflows
+
+OS12.1 Local developer workflow
+
+On a clean reference OS, the following end-to-end sequence MUST be valid and documented:
+	1.	Install toolchain and clone repository.
+	2.	Build VEEN.
+	3.	Start a hub in foreground or via systemd.
+	4.	Generate a client identity.
+	5.	Send a message on core/main.
+	6.	Stream messages on core/main.
+	7.	Verify at least one attachment.
+	8.	Issue a capability token and authorize it.
+	9.	Send a capability-gated message.
+	10.	Run veen resync and veen verify-state.
+	11.	Run veen selftest core.
+	12.	Run veen selftest all.
+
+All steps MUST complete without OS-level surprises beyond normal firewall or port conflict issues.
+
+OS12.2 Minimal production workflow
+
+On native Ubuntu, documentation MUST describe a minimal production deployment pattern:
+	•	create a system user for VEEN
+	•	create /var/lib/veen and /etc/veen
+	•	copy the veen binary into /usr/local/bin
+	•	set up a systemd unit for the hub
+	•	start the hub using systemd
+	•	manage client identities from application hosts or users
+
+	13.	Selftest integration with OS
+
+OS13.1 Selftest independence
+
+veen selftest core and veen selftest all MUST:
+	•	start temporary hubs on random loopback ports
+	•	create temporary data and client directories under /tmp or $TMPDIR
+	•	clean up these directories and processes on success or failure
+	•	not interfere with any existing hub that uses /var/lib/veen
+
+OS13.2 Exit codes
+	•	veen selftest core MUST exit 0 if all core goals are satisfied
+	•	veen selftest all MUST exit 0 if all goals and properties pass
+	•	non-zero exit codes MUST indicate failure and be accompanied by log lines describing which step failed
+
+	14.	OS-GOALS success criteria
+
+VEEN v0.0.1 meets OS-GOALS when all of the following are true on the reference operating systems:
+
+G14.1 Build and test
+	•	cargo build --release succeeds
+	•	cargo test --all succeeds
+	•	the veen binary (or equivalent documented binaries) is usable from the shell
+
+G14.2 Process lifecycle
+	•	the hub can be run in foreground on Ubuntu and WSL2
+	•	the hub can be managed by systemd on native Ubuntu
+	•	shutdown sequences preserve data durability
+
+G14.3 Filesystem and permissions
+	•	hub and client directories are created with safe permissions
+	•	all required paths are created automatically or with documented manual steps
+	•	restarts do not require manual repair of on-disk state
+
+G14.4 Networking
+	•	hubs can bind and listen on loopback and host interfaces
+	•	CLI commands can reach hubs using HTTP URLs
+	•	port reuse works after hub restart
+
+G14.5 CLI capabilities
+
+From a clean OS, using only VEEN and documented commands, an operator can:
+	•	start a hub
+	•	generate and inspect identities
+	•	send and receive messages
+	•	use attachments
+	•	use capability tokens, rate limits, and revocations
+	•	resynchronize and verify client state
+	•	execute RPC and CRDT operations
+	•	inspect health and metrics
+	•	run selftest suites
+
+G14.6 Stability and hardening
+	•	malformed inputs produce controlled errors, not crashes
+	•	large payloads are handled within configured bounds
+	•	repeated selftest runs do not leak processes or files
+
+When all G14.x conditions hold on Ubuntu 22.04 and 24.04 (native and WSL2) with only the documented prerequisites, VEEN v0.0.1 is OS-GOALS complete.
