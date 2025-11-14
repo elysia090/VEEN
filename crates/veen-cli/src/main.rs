@@ -145,6 +145,34 @@ fn json_output_enabled(explicit: bool) -> bool {
     explicit || global_options().json
 }
 
+fn emit_cli_error(code: &str, detail: Option<&str>, use_json: bool) {
+    if use_json {
+        let mut root = JsonMap::new();
+        root.insert("ok".to_string(), JsonValue::Bool(false));
+        root.insert("code".to_string(), JsonValue::String(code.to_string()));
+        match detail {
+            Some(value) => {
+                root.insert("detail".to_string(), JsonValue::String(value.to_string()));
+            }
+            None => {
+                root.insert("detail".to_string(), JsonValue::Null);
+            }
+        }
+        match serde_json::to_string_pretty(&JsonValue::Object(root)) {
+            Ok(rendered) => {
+                eprintln!("{rendered}");
+            }
+            Err(_) => {
+                eprintln!("{{\"ok\":false,\"code\":\"{code}\"}}");
+            }
+        }
+    } else if let Some(detail) = detail {
+        eprintln!("{code}: {detail}");
+    } else {
+        eprintln!("{code}");
+    }
+}
+
 #[cfg(test)]
 fn json_output_enabled_with(explicit: bool, global: &GlobalOptions) -> bool {
     explicit || global.json
@@ -2781,6 +2809,7 @@ async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
         HubReference::Remote(client) => client,
     };
 
+    let use_json = json_output_enabled(args.json);
     let descriptor: RemoteHubProfileDescriptor = client.get_json("/profile", &[]).await?;
     let RemoteHubProfileDescriptor {
         ok,
@@ -2790,7 +2819,14 @@ async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
         features,
     } = descriptor;
 
-    let use_json = json_output_enabled(args.json);
+    if !ok {
+        emit_cli_error(
+            "E.PROFILE",
+            Some("hub declined to provide a capability profile"),
+            use_json,
+        );
+        process::exit(4);
+    }
 
     if use_json {
         let mut root = JsonMap::new();
@@ -2877,6 +2913,8 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
         query.push(("realm_id", hex::encode(realm_id.as_ref())));
     }
 
+    let use_json = json_output_enabled(json);
+
     let response: RemoteHubRoleDescriptor = client.get_json("/role", &query).await?;
     let RemoteHubRoleDescriptor {
         ok,
@@ -2885,11 +2923,23 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
         stream: stream_info,
     } = response;
 
-    if stream_id.is_some() && stream_info.is_none() {
-        bail!("hub did not return role information for the requested stream");
+    if !ok {
+        emit_cli_error(
+            "E.PROFILE",
+            Some("hub declined to provide role information"),
+            use_json,
+        );
+        process::exit(4);
     }
 
-    let use_json = json_output_enabled(json);
+    if stream_id.is_some() && stream_info.is_none() {
+        emit_cli_error(
+            "E.PROFILE",
+            Some("hub did not return role information for the requested stream"),
+            use_json,
+        );
+        process::exit(4);
+    }
 
     if use_json {
         let mut root = JsonMap::new();
