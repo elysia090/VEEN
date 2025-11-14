@@ -19,6 +19,7 @@ pub const CRDT_DIR: &str = "crdt";
 pub const ATTACHMENTS_DIR: &str = "attachments";
 pub const ANCHORS_DIR: &str = "anchors";
 pub const TLS_INFO_FILE: &str = "tls_info.json";
+pub const REVOCATIONS_FILE: &str = "revocations.json";
 
 #[derive(Clone)]
 pub struct HubStorage {
@@ -113,6 +114,10 @@ impl HubStorage {
 
     pub fn anchor_log_path(&self) -> PathBuf {
         self.anchors_dir().join("anchor_log.json")
+    }
+
+    pub fn revocations_store_path(&self) -> PathBuf {
+        self.state_dir().join(REVOCATIONS_FILE)
     }
 }
 
