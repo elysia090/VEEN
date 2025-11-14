@@ -6,6 +6,7 @@
 //! make it straightforward to experiment with protocol implementations while
 //! enforcing consistent hashing and encoding behaviour across binaries.
 
+pub mod capability;
 pub mod federation;
 mod hash;
 mod hexutil;
@@ -23,6 +24,11 @@ pub mod revocation;
 pub mod wallet;
 pub mod wire;
 
+pub use crate::capability::{
+    from_cbor as cap_token_from_cbor, stream_id_from_label as cap_stream_id_from_label, CapToken,
+    CapTokenAllow, CapTokenEncodeError, CapTokenIssueError, CapTokenRate, CapTokenVerifyError,
+    StreamIdParseError, CAP_TOKEN_VERSION,
+};
 pub use crate::federation::{
     schema_fed_authority, AuthorityPolicy, AuthorityRecord, AuthorityView, LabelAuthority,
     LabelPolicy,

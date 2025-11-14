@@ -12,7 +12,6 @@ use base64::Engine;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
-use rand::RngCore;
 use reqwest::{Client as HttpClient, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -25,15 +24,19 @@ use tokio::signal;
 use tracing_subscriber::EnvFilter;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
+use veen_core::CAP_TOKEN_VERSION;
 use veen_core::{
+    cap_stream_id_from_label,
     hub::HubId,
-    wire::{checkpoint::CHECKPOINT_VERSION, Checkpoint},
-    Profile,
+    label::StreamId,
+    wire::{checkpoint::CHECKPOINT_VERSION, Checkpoint, ClientId},
+    CapToken, CapTokenAllow, CapTokenRate, Profile,
 };
 use veen_hub::pipeline::{
-    AttachmentUpload, HubStreamState as RemoteHubStreamState,
-    StoredAttachment as RemoteStoredAttachment, StoredMessage as RemoteStoredMessage,
-    SubmitRequest as RemoteSubmitRequest, SubmitResponse as RemoteSubmitResponse,
+    AttachmentUpload, AuthorizeResponse as RemoteAuthorizeResponse,
+    HubStreamState as RemoteHubStreamState, StoredAttachment as RemoteStoredAttachment,
+    StoredMessage as RemoteStoredMessage, SubmitRequest as RemoteSubmitRequest,
+    SubmitResponse as RemoteSubmitResponse,
 };
 
 const CLIENT_KEY_VERSION: u8 = 1;
@@ -54,11 +57,9 @@ const MESSAGES_DIR: &str = "messages";
 const CAP_TOKENS_DIR: &str = "capabilities";
 const CRDT_DIR: &str = "crdt";
 const ANCHOR_LOG_FILE: &str = "anchor_log.json";
-const AUTHZ_FILE: &str = "authorized_caps.json";
 const RETENTION_CONFIG_FILE: &str = "retention.json";
 const TLS_INFO_FILE: &str = "tls_info.json";
 const ATTACHMENTS_DIR: &str = "attachments";
-const CAPABILITY_VERSION: u8 = 1;
 
 #[derive(Parser)]
 #[command(
@@ -841,7 +842,7 @@ struct StoredMessage {
     body: Option<String>,
     body_digest: Option<String>,
     attachments: Vec<StoredAttachment>,
-    cap_id: Option<String>,
+    auth_ref: Option<String>,
     idem: Option<u64>,
 }
 
@@ -881,28 +882,10 @@ impl From<RemoteStoredMessage> for StoredMessage {
                 .into_iter()
                 .map(StoredAttachment::from)
                 .collect(),
-            cap_id: remote.cap_id,
+            auth_ref: remote.auth_ref,
             idem: remote.idem,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CapabilityToken {
-    version: u8,
-    issued_at: u64,
-    expires_at: u64,
-    issuer: String,
-    subject: String,
-    stream: String,
-    ttl: u64,
-    rate: Option<String>,
-    token_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct AuthorizedCapabilityStore {
-    tokens: BTreeMap<String, CapabilityToken>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1521,6 +1504,9 @@ async fn handle_send_local(data_dir: PathBuf, args: SendArgs) -> Result<()> {
     let mut hub_state = load_hub_state(&data_dir).await?;
     let mut stream_state = load_stream_state(&data_dir, &args.stream).await?;
 
+    let stream_id = cap_stream_id_from_label(&args.stream)
+        .with_context(|| format!("deriving stream identifier for {}", args.stream))?;
+
     let client_bundle: ClientPublicBundle = read_cbor_file(&args.client.join("identity_card.pub"))
         .await
         .with_context(|| {
@@ -1529,7 +1515,9 @@ async fn handle_send_local(data_dir: PathBuf, args: SendArgs) -> Result<()> {
                 args.client.join("identity_card.pub").display()
             )
         })?;
-    let client_id_hex = hex::encode(client_bundle.client_id.as_ref());
+    let client_id = ClientId::from_slice(client_bundle.client_id.as_ref())
+        .context("client identity card contains malformed client_id")?;
+    let client_id_hex = hex::encode(client_id.as_ref());
 
     if let Some(ref schema) = args.schema {
         if schema.len() != 32 && schema.len() != 64 {
@@ -1589,12 +1577,14 @@ async fn handle_send_local(data_dir: PathBuf, args: SendArgs) -> Result<()> {
         stored_attachments.push(attachment_record);
     }
 
-    let cap_id = if let Some(cap_path) = &args.cap {
-        let token: CapabilityToken = read_json_file(cap_path).await?;
-        if token.expires_at < now {
-            bail!("capability token {} has expired", token.token_id);
-        }
-        Some(token.token_id)
+    let auth_ref_hex = if let Some(cap_path) = &args.cap {
+        let token: CapToken = read_cbor_file(cap_path).await?;
+        token
+            .verify()
+            .map_err(|err| anyhow!("capability token verification failed: {err}"))?;
+        ensure_capability_matches(&token, &client_id, &stream_id)?;
+        let auth_ref = token.auth_ref().context("computing capability auth_ref")?;
+        Some(hex::encode(auth_ref.as_ref()))
     } else {
         None
     };
@@ -1610,7 +1600,7 @@ async fn handle_send_local(data_dir: PathBuf, args: SendArgs) -> Result<()> {
         body: body_to_store,
         body_digest,
         attachments: stored_attachments.clone(),
-        cap_id,
+        auth_ref: auth_ref_hex.clone(),
         idem: None,
     };
 
@@ -1649,6 +1639,9 @@ async fn handle_send_local(data_dir: PathBuf, args: SendArgs) -> Result<()> {
 
 async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()> {
     let identity_path = args.client.join("identity_card.pub");
+    let stream_id = cap_stream_id_from_label(&args.stream)
+        .with_context(|| format!("deriving stream identifier for {}", args.stream))?;
+
     let client_bundle: ClientPublicBundle =
         read_cbor_file(&identity_path).await.with_context(|| {
             format!(
@@ -1656,7 +1649,9 @@ async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()>
                 identity_path.display()
             )
         })?;
-    let client_id_hex = hex::encode(client_bundle.client_id.as_ref());
+    let client_id = ClientId::from_slice(client_bundle.client_id.as_ref())
+        .context("client identity card contains malformed client_id")?;
+    let client_id_hex = hex::encode(client_id.as_ref());
 
     if let Some(ref schema) = args.schema {
         if schema.len() != 32 && schema.len() != 64 {
@@ -1687,12 +1682,14 @@ async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()>
         Some(uploads)
     };
 
-    let capability = if let Some(ref cap_path) = args.cap {
-        let token: CapabilityToken = read_json_file(cap_path).await?;
-        if token.expires_at < current_unix_timestamp()? {
-            bail!("capability token {} has expired", token.token_id);
-        }
-        Some(token.token_id)
+    let auth_ref_hex = if let Some(ref cap_path) = args.cap {
+        let token: CapToken = read_cbor_file(cap_path).await?;
+        token
+            .verify()
+            .map_err(|err| anyhow!("capability token verification failed: {err}"))?;
+        ensure_capability_matches(&token, &client_id, &stream_id)?;
+        let auth_ref = token.auth_ref().context("computing capability auth_ref")?;
+        Some(hex::encode(auth_ref.as_ref()))
     } else {
         None
     };
@@ -1704,7 +1701,7 @@ async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()>
         client_id: client_id_hex.clone(),
         payload,
         attachments,
-        capability,
+        auth_ref: auth_ref_hex,
         expires_at: args.expires_at,
         schema: args.schema.clone(),
         idem: None,
@@ -1753,8 +1750,8 @@ async fn handle_stream(args: StreamArgs) -> Result<()> {
                 if let Some(ref parent) = message.parent {
                     println!("parent: {parent}");
                 }
-                if let Some(ref cap_id) = message.cap_id {
-                    println!("cap_id: {cap_id}");
+                if let Some(ref auth_ref) = message.auth_ref {
+                    println!("auth_ref: {auth_ref}");
                 }
                 match (&message.body, &message.body_digest) {
                     (Some(body), _) => println!("body: {body}"),
@@ -1828,8 +1825,8 @@ async fn handle_stream_remote(client: HubHttpClient, args: StreamArgs) -> Result
         if let Some(ref parent) = message.parent {
             println!("parent: {parent}");
         }
-        if let Some(ref cap_id) = message.cap_id {
-            println!("cap_id: {cap_id}");
+        if let Some(ref auth_ref) = message.auth_ref {
+            println!("auth_ref: {auth_ref}");
         }
         match (&message.body, &message.body_digest) {
             (Some(body), _) => println!("body: {body}"),
@@ -1894,117 +1891,94 @@ async fn handle_cap_issue(args: CapIssueArgs) -> Result<()> {
         bail!("ttl must be greater than zero seconds");
     }
 
-    let issuer: ClientPublicBundle = read_cbor_file(&args.issuer.join("identity_card.pub"))
+    let issuer_keystore = args.issuer.join("keystore.enc");
+    let issuer_secret: ClientSecretBundle = read_cbor_file(&issuer_keystore)
         .await
-        .with_context(|| format!("reading issuer identity from {}", args.issuer.display()))?;
-    let subject: ClientPublicBundle = read_cbor_file(&args.subject.join("identity_card.pub"))
-        .await
-        .with_context(|| format!("reading subject identity from {}", args.subject.display()))?;
+        .with_context(|| format!("reading issuer keystore from {}", issuer_keystore.display()))?;
+    let signing_key_bytes: [u8; 32] = issuer_secret
+        .signing_key
+        .as_ref()
+        .try_into()
+        .map_err(|_| anyhow!("issuer signing key has invalid length"))?;
+    let issuer_signing_key = SigningKey::from_bytes(&signing_key_bytes);
 
-    let issued_at = current_unix_timestamp()?;
-    let expires_at = issued_at.saturating_add(args.ttl);
+    let subject_bundle: ClientPublicBundle =
+        read_cbor_file(&args.subject.join("identity_card.pub"))
+            .await
+            .with_context(|| format!("reading subject identity from {}", args.subject.display()))?;
+    let subject_pk = ClientId::from_slice(subject_bundle.client_id.as_ref())
+        .context("subject identity card contains malformed client_id")?;
 
-    let mut rng = OsRng;
-    let mut token_bytes = [0u8; 16];
-    rng.fill_bytes(&mut token_bytes);
-    let token_id = hex::encode(token_bytes);
+    let stream_id = cap_stream_id_from_label(&args.stream)
+        .with_context(|| format!("deriving stream identifier for {}", args.stream))?;
 
-    let token = CapabilityToken {
-        version: CAPABILITY_VERSION,
-        issued_at,
-        expires_at,
-        issuer: hex::encode(issuer.client_id.as_ref()),
-        subject: hex::encode(subject.client_id.as_ref()),
-        stream: args.stream.clone(),
-        ttl: args.ttl,
-        rate: args.rate.clone(),
-        token_id: token_id.clone(),
-    };
+    let mut allow = CapTokenAllow::new(vec![stream_id], args.ttl);
+    if let Some(rate) = args.rate.as_deref() {
+        allow.rate = Some(parse_cap_rate(rate)?);
+    }
 
-    write_json_file(&args.out, &token)
+    let token = CapToken::issue(&issuer_signing_key, subject_pk, allow)
+        .context("issuing capability token")?;
+    token
+        .verify()
+        .map_err(|err| anyhow!("capability token verification failed: {err}"))?;
+    let auth_ref = token.auth_ref().context("computing capability auth_ref")?;
+
+    write_cbor_file(&args.out, &token)
         .await
         .with_context(|| format!("writing capability token to {}", args.out.display()))?;
 
-    println!("issued capability token {token_id}");
-    println!("  issuer: {}", token.issuer);
-    println!("  subject: {}", token.subject);
-    println!("  stream: {}", token.stream);
-    println!("  ttl: {} seconds", token.ttl);
-    println!("  expires_at: {}", token.expires_at);
-    if let Some(ref rate) = token.rate {
-        println!("  rate: {rate}");
+    println!("issued capability token (ver {CAP_TOKEN_VERSION})");
+    println!("  issuer_pk: {}", hex::encode(token.issuer_pk.as_ref()));
+    println!("  subject_pk: {}", hex::encode(token.subject_pk.as_ref()));
+    println!("  stream_id: {}", hex::encode(stream_id.as_ref()));
+    println!("  ttl: {} seconds", token.allow.ttl);
+    if let Some(rate) = &token.allow.rate {
+        println!("  rate: {}/{}", rate.per_sec, rate.burst);
     }
+    println!("  auth_ref: {}", hex::encode(auth_ref.as_ref()));
+    println!("  saved to {}", args.out.display());
 
     Ok(())
 }
 
 async fn handle_cap_authorize(args: CapAuthorizeArgs) -> Result<()> {
     match parse_hub_reference(&args.hub)? {
-        HubReference::Local(data_dir) => handle_cap_authorize_local(data_dir, args).await,
+        HubReference::Local(_) => {
+            bail!("cap authorize requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
         HubReference::Remote(client) => handle_cap_authorize_remote(client, args).await,
     }
 }
 
-async fn handle_cap_authorize_local(data_dir: PathBuf, args: CapAuthorizeArgs) -> Result<()> {
-    let token: CapabilityToken = read_json_file(&args.cap).await?;
-    let now = current_unix_timestamp()?;
-    if token.expires_at < now {
-        bail!(
-            "capability token {} expired at {}",
-            token.token_id,
-            token.expires_at
-        );
-    }
-
-    let mut store = load_authorized_caps(&data_dir).await?;
-    store.tokens.insert(token.token_id.clone(), token.clone());
-    save_authorized_caps(&data_dir, &store).await?;
-
-    println!(
-        "authorised capability {} for stream {}",
-        token.token_id, token.stream
-    );
-    Ok(())
-}
-
 async fn handle_cap_authorize_remote(client: HubHttpClient, args: CapAuthorizeArgs) -> Result<()> {
-    let token: CapabilityToken = read_json_file(&args.cap).await?;
-    let now = current_unix_timestamp()?;
-    if token.expires_at < now {
-        bail!(
-            "capability token {} expired at {}",
-            token.token_id,
-            token.expires_at
-        );
-    }
+    let token: CapToken = read_cbor_file(&args.cap)
+        .await
+        .with_context(|| format!("reading capability token from {}", args.cap.display()))?;
+    token
+        .verify()
+        .map_err(|err| anyhow!("capability token verification failed: {err}"))?;
+    let expected_auth_ref = token.auth_ref().context("computing capability auth_ref")?;
+    let expected_hex = hex::encode(expected_auth_ref.as_ref());
+    let encoded = token
+        .to_cbor()
+        .context("serializing capability token for submission")?;
 
-    #[derive(Serialize)]
-    struct CapabilityRequestPayload {
-        token_id: String,
-        subject: String,
-        stream: String,
-        expires_at: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        max_uses: Option<u64>,
-    }
-
-    let payload = CapabilityRequestPayload {
-        token_id: token.token_id.clone(),
-        subject: token.subject.clone(),
-        stream: token.stream.clone(),
-        expires_at: token.expires_at,
-        max_uses: None,
-    };
-
-    client
-        .post_unit("/authorize", &payload)
+    let response: RemoteAuthorizeResponse = client
+        .post_cbor("/authorize", &encoded)
         .await
         .context("authorizing capability with hub")?;
 
-    println!(
-        "authorised capability {} for stream {}",
-        token.token_id, token.stream
-    );
+    if response.auth_ref != expected_hex {
+        bail!(
+            "hub returned mismatched auth_ref {}; expected {expected_hex}",
+            response.auth_ref
+        );
+    }
+
+    println!("authorised capability");
+    println!("  auth_ref: {}", response.auth_ref);
+    println!("  expires_at: {}", response.expires_at);
     Ok(())
 }
 
@@ -2369,7 +2343,7 @@ async fn handle_retention_show(args: RetentionShowArgs) -> Result<()> {
 
 async fn handle_selftest_core() -> Result<()> {
     println!("running VEEN core self-tests...");
-    veen_selftest::run_core()
+    veen_selftest::run_core().await
 }
 
 async fn handle_selftest_props() -> Result<()> {
@@ -2384,7 +2358,7 @@ async fn handle_selftest_fuzz() -> Result<()> {
 
 async fn handle_selftest_all() -> Result<()> {
     println!("running full VEEN self-test suite...");
-    veen_selftest::run_all()
+    veen_selftest::run_all().await
 }
 
 async fn ensure_data_dir_layout(data_dir: &Path) -> Result<()> {
@@ -2712,23 +2686,43 @@ fn compute_message_proof(message: &StoredMessage) -> Result<String> {
     Ok(compute_digest_hex(&encoded))
 }
 
-async fn load_authorized_caps(data_dir: &Path) -> Result<AuthorizedCapabilityStore> {
-    let path = data_dir.join(STATE_DIR).join(AUTHZ_FILE);
-    if fs::try_exists(&path)
-        .await
-        .with_context(|| format!("checking authorized caps in {}", path.display()))?
-    {
-        read_json_file(&path).await
-    } else {
-        Ok(AuthorizedCapabilityStore::default())
+fn parse_cap_rate(input: &str) -> Result<CapTokenRate> {
+    let parts: Vec<&str> = input.split(',').collect();
+    if parts.len() != 2 {
+        bail!("rate must be provided as per_sec,burst");
     }
+    let per_sec = parts[0]
+        .trim()
+        .parse::<u64>()
+        .context("parsing rate per_sec component")?;
+    let burst = parts[1]
+        .trim()
+        .parse::<u64>()
+        .context("parsing rate burst component")?;
+    Ok(CapTokenRate::new(per_sec, burst))
 }
 
-async fn save_authorized_caps(data_dir: &Path, store: &AuthorizedCapabilityStore) -> Result<()> {
-    let path = data_dir.join(STATE_DIR).join(AUTHZ_FILE);
-    write_json_file(&path, store)
-        .await
-        .with_context(|| format!("writing authorized caps to {}", path.display()))
+fn ensure_capability_matches(
+    token: &CapToken,
+    subject: &ClientId,
+    stream_id: &StreamId,
+) -> Result<()> {
+    if &token.subject_pk != subject {
+        bail!("capability subject does not match client identity");
+    }
+    if !token.allow.stream_ids.iter().any(|id| id == stream_id) {
+        bail!(
+            "capability does not permit stream {}; allowed={:?}",
+            hex::encode(stream_id.as_ref()),
+            token
+                .allow
+                .stream_ids
+                .iter()
+                .map(|id| hex::encode(id.as_ref()))
+                .collect::<Vec<_>>()
+        );
+    }
+    Ok(())
 }
 
 async fn load_hub_state(data_dir: &Path) -> Result<HubRuntimeState> {
@@ -2953,15 +2947,16 @@ impl HubHttpClient {
             .context("decoding hub response body")
     }
 
-    async fn post_unit<T>(&self, path: &str, body: &T) -> Result<()>
+    async fn post_cbor<R>(&self, path: &str, body: &[u8]) -> Result<R>
     where
-        T: Serialize + ?Sized,
+        R: DeserializeOwned,
     {
         let url = self.url(path)?;
         let response = self
             .http
             .post(url)
-            .json(body)
+            .header("Content-Type", "application/cbor")
+            .body(body.to_vec())
             .send()
             .await
             .context("performing hub POST request")?;
@@ -2973,7 +2968,10 @@ impl HubHttpClient {
                 .unwrap_or_else(|_| "<failed to decode response>".to_string());
             bail!("hub POST {path} failed with {status}: {body}");
         }
-        Ok(())
+        response
+            .json::<R>()
+            .await
+            .context("decoding hub response body")
     }
 }
 
