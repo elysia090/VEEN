@@ -34,7 +34,7 @@ use veen_core::{
     cap_stream_id_from_label, cap_token_from_cbor, schema_fed_authority, schema_label_class,
     schema_meta_schema, AuthorityRecord, AuthorityView, CapTokenRate, Label, LabelClassRecord,
     LabelPolicy, PowCookie, RealmId, SchemaDescriptor, StreamId, StreamIdParseError,
-    CAP_TOKEN_VERSION,
+    CAP_TOKEN_VERSION, MAX_ATTACHMENTS_PER_MSG, MAX_BODY_BYTES, MAX_MSG_BYTES,
 };
 
 use thiserror::Error;
@@ -201,6 +201,23 @@ impl HubPipeline {
         })?;
 
         let attachments = attachments.unwrap_or_default();
+        if attachments.len() > MAX_ATTACHMENTS_PER_MSG {
+            return Err(anyhow::Error::new(
+                CapabilityError::AttachmentCountExceeded {
+                    count: attachments.len(),
+                    limit: MAX_ATTACHMENTS_PER_MSG,
+                },
+            ));
+        }
+
+        let payload_json =
+            serde_json::to_string(&payload).context("serialising submit payload to JSON")?;
+        if payload_json.len() > MAX_BODY_BYTES {
+            return Err(anyhow::Error::new(CapabilityError::MessageBodyTooLarge {
+                body_bytes: payload_json.len(),
+                limit: MAX_BODY_BYTES,
+            }));
+        }
         let submitted_at = current_unix_timestamp();
         let submitted_at_ms = current_unix_timestamp_millis();
         let client_id_value = ClientId::from_str(&client_id)
@@ -370,7 +387,8 @@ impl HubPipeline {
             .map(|m| m.seq + 1)
             .unwrap_or(1);
 
-        let stored_attachments = persist_attachments(&self.storage, &stream, &attachments).await?;
+        let stored_attachments =
+            persist_attachments(&self.storage, &stream, &attachments, payload_json.len()).await?;
 
         let stored_message = StoredMessage {
             stream: stream.clone(),
@@ -380,7 +398,7 @@ impl HubPipeline {
             schema,
             expires_at,
             parent: None,
-            body: Some(payload.to_string()),
+            body: Some(payload_json),
             body_digest: None,
             attachments: stored_attachments.clone(),
             auth_ref: auth_ref.clone(),
@@ -920,7 +938,7 @@ pub struct SubmitRequest {
     pub pow_cookie: Option<PowCookieEnvelope>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AttachmentUpload {
     pub name: Option<String>,
     pub data: String,
@@ -1232,6 +1250,12 @@ pub enum CapabilityError {
         policy: &'static str,
         detail: String,
     },
+    #[error("E.SIZE payload body size {body_bytes} bytes exceeds limit {limit} bytes")]
+    MessageBodyTooLarge { body_bytes: usize, limit: usize },
+    #[error("E.SIZE total message size {total_bytes} bytes exceeds limit {limit} bytes")]
+    MessageTotalTooLarge { total_bytes: usize, limit: usize },
+    #[error("E.SIZE attachment count {count} exceeds limit {limit}")]
+    AttachmentCountExceeded { count: usize, limit: usize },
 }
 
 impl CapabilityError {
@@ -1262,6 +1286,9 @@ impl CapabilityError {
             Self::ProofOfWorkRequired { .. }
             | Self::ProofOfWorkInsufficient { .. }
             | Self::ProofOfWorkInvalid { .. } => "E.AUTH",
+            Self::MessageBodyTooLarge { .. }
+            | Self::MessageTotalTooLarge { .. }
+            | Self::AttachmentCountExceeded { .. } => "E.SIZE",
         }
     }
 }
@@ -1535,12 +1562,36 @@ async fn persist_attachments(
     storage: &HubStorage,
     stream: &str,
     attachments: &[AttachmentUpload],
+    initial_bytes: usize,
 ) -> Result<Vec<StoredAttachment>> {
     if attachments.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut stored = Vec::with_capacity(attachments.len());
+    let mut decoded = Vec::with_capacity(attachments.len());
+    let mut total_bytes = initial_bytes;
+
+    for (index, attachment) in attachments.iter().enumerate() {
+        let data = BASE64_STANDARD
+            .decode(&attachment.data)
+            .with_context(|| format!("decoding attachment {} for stream {}", index, stream))?;
+        let new_total = total_bytes.checked_add(data.len()).ok_or_else(|| {
+            CapabilityError::MessageTotalTooLarge {
+                total_bytes: usize::MAX,
+                limit: MAX_MSG_BYTES,
+            }
+        })?;
+        if new_total > MAX_MSG_BYTES {
+            return Err(CapabilityError::MessageTotalTooLarge {
+                total_bytes: new_total,
+                limit: MAX_MSG_BYTES,
+            }
+            .into());
+        }
+        total_bytes = new_total;
+        decoded.push((index, attachment.name.clone(), data));
+    }
+
     fs::create_dir_all(storage.attachments_dir())
         .await
         .with_context(|| {
@@ -1550,10 +1601,8 @@ async fn persist_attachments(
             )
         })?;
 
-    for (index, attachment) in attachments.iter().enumerate() {
-        let data = BASE64_STANDARD
-            .decode(&attachment.data)
-            .with_context(|| format!("decoding attachment {} for stream {}", index, stream))?;
+    let mut stored = Vec::with_capacity(decoded.len());
+    for (index, name, data) in decoded {
         let digest = sha2::Sha256::digest(&data);
         let digest_hex = hex::encode(digest);
         let file_name = format!("{digest_hex}.bin");
@@ -1562,8 +1611,7 @@ async fn persist_attachments(
             .await
             .with_context(|| format!("writing attachment to {}", path.display()))?;
         stored.push(StoredAttachment {
-            name: attachment
-                .name
+            name: name
                 .clone()
                 .unwrap_or_else(|| format!("attachment-{index}")),
             digest: digest_hex,
@@ -2100,6 +2148,22 @@ mod tests {
         init_pipeline_with_overrides(data_dir, HubConfigOverrides::default()).await
     }
 
+    async fn allow_stream_for_hub(pipeline: &HubPipeline, label: &str, realm_name: &str) {
+        let stream_id = cap_stream_id_from_label(label).expect("stream id");
+        let realm = RealmId::derive(realm_name);
+        let record = AuthorityRecord {
+            realm_id: realm,
+            stream_id,
+            primary_hub: pipeline.identity.hub_id,
+            replica_hubs: Vec::new(),
+            policy: AuthorityPolicy::SinglePrimary,
+            ts: current_unix_timestamp(),
+            ttl: 600,
+        };
+        let payload = encode_envelope(schema_fed_authority(), record);
+        pipeline.publish_authority(&payload).await.unwrap();
+    }
+
     fn encode_envelope<T: Serialize>(schema: [u8; 32], body: T) -> Vec<u8> {
         #[derive(Serialize)]
         struct WritableEnvelope<T> {
@@ -2297,6 +2361,136 @@ mod tests {
                 .get(&descriptor.schema_id)
                 .expect("schema descriptor present");
             assert_eq!(stored, &descriptor);
+        });
+    }
+
+    #[test]
+    fn submit_rejects_payload_body_over_limit() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let overrides = HubConfigOverrides {
+                capability_gating_enabled: Some(false),
+                ..HubConfigOverrides::default()
+            };
+            let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
+            allow_stream_for_hub(&pipeline, "core/limit-body", "limit-body").await;
+
+            let body = "x".repeat(MAX_BODY_BYTES + 1);
+            let request = SubmitRequest {
+                stream: "core/limit-body".to_string(),
+                client_id: hex::encode([0xAB; 32]),
+                payload: serde_json::json!({"blob": body}),
+                attachments: None,
+                auth_ref: None,
+                expires_at: None,
+                schema: None,
+                idem: None,
+                pow_cookie: None,
+            };
+
+            let err = pipeline
+                .submit(request)
+                .await
+                .expect_err("submit should fail");
+            let capability_err = err.downcast::<CapabilityError>().expect("capability error");
+            match capability_err {
+                CapabilityError::MessageBodyTooLarge { limit, .. } => {
+                    assert_eq!(limit, MAX_BODY_BYTES);
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn submit_rejects_attachment_count_over_limit() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let overrides = HubConfigOverrides {
+                capability_gating_enabled: Some(false),
+                ..HubConfigOverrides::default()
+            };
+            let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
+            allow_stream_for_hub(&pipeline, "core/limit-attachments", "limit-attachments").await;
+
+            let attachment = AttachmentUpload {
+                name: None,
+                data: BASE64_STANDARD.encode([0u8; 1]),
+            };
+            let attachments = vec![attachment; MAX_ATTACHMENTS_PER_MSG + 1];
+
+            let request = SubmitRequest {
+                stream: "core/limit-attachments".to_string(),
+                client_id: hex::encode([0xBC; 32]),
+                payload: serde_json::json!({"ok": true}),
+                attachments: Some(attachments),
+                auth_ref: None,
+                expires_at: None,
+                schema: None,
+                idem: None,
+                pow_cookie: None,
+            };
+
+            let err = pipeline
+                .submit(request)
+                .await
+                .expect_err("submit should fail");
+            let capability_err = err.downcast::<CapabilityError>().expect("capability error");
+            match capability_err {
+                CapabilityError::AttachmentCountExceeded { limit, .. } => {
+                    assert_eq!(limit, MAX_ATTACHMENTS_PER_MSG);
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn submit_rejects_total_message_size_over_limit() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let overrides = HubConfigOverrides {
+                capability_gating_enabled: Some(false),
+                ..HubConfigOverrides::default()
+            };
+            let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
+            allow_stream_for_hub(&pipeline, "core/limit-total", "limit-total").await;
+
+            // Body well below limit so that attachments trigger the overflow.
+            let body = serde_json::json!({"text": "small"});
+            let body_len = body.to_string().len();
+            let attachment_bytes = MAX_MSG_BYTES - body_len + 1; // forces total > limit
+            let attachment = AttachmentUpload {
+                name: Some("large".into()),
+                data: BASE64_STANDARD.encode(vec![0u8; attachment_bytes]),
+            };
+
+            let request = SubmitRequest {
+                stream: "core/limit-total".to_string(),
+                client_id: hex::encode([0xCD; 32]),
+                payload: body,
+                attachments: Some(vec![attachment]),
+                auth_ref: None,
+                expires_at: None,
+                schema: None,
+                idem: None,
+                pow_cookie: None,
+            };
+
+            let err = pipeline
+                .submit(request)
+                .await
+                .expect_err("submit should fail");
+            let capability_err = err.downcast::<CapabilityError>().expect("capability error");
+            match capability_err {
+                CapabilityError::MessageTotalTooLarge { limit, .. } => {
+                    assert_eq!(limit, MAX_MSG_BYTES);
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
         });
     }
 }

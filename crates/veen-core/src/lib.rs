@@ -16,6 +16,7 @@ pub mod kex;
 pub mod label;
 pub mod label_class;
 mod length;
+pub mod limits;
 pub mod meta;
 pub mod operation;
 pub mod pow;
@@ -49,6 +50,10 @@ pub use crate::kex::{
 pub use crate::label::{Label, StreamId};
 pub use crate::label_class::{schema_label_class, LabelClassRecord};
 pub use crate::length::LengthError;
+pub use crate::limits::{
+    MAX_ATTACHMENTS_PER_MSG, MAX_BODY_BYTES, MAX_CAP_CHAIN, MAX_HDR_BYTES, MAX_MSG_BYTES,
+    MAX_PROOF_LEN,
+};
 pub use crate::meta::{schema_meta_schema, SchemaDescriptor, SchemaId, SchemaOwner, SCHEMA_ID_LEN};
 pub use crate::operation::{
     schema_access_grant, schema_access_revoke, schema_agreement_confirmation,

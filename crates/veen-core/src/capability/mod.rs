@@ -8,6 +8,7 @@ use thiserror::Error;
 use crate::{
     hash::{h, ht},
     label::StreamId,
+    limits::MAX_CAP_CHAIN,
     wire::types::{AuthRef, ClientId, Signature64, SignatureVerifyError, HASH_LEN},
     LengthError,
 };
@@ -68,6 +69,8 @@ pub enum CapTokenDecodeError {
 pub enum CapTokenVerifyError {
     #[error("capability token signature chain is empty")]
     EmptyChain,
+    #[error("capability token signature chain exceeds limit ({len} > {max})")]
+    ChainTooLong { len: usize, max: usize },
     #[error("failed to encode capability token link for verification: {0}")]
     Encoding(#[from] CapTokenEncodeError),
     #[error("capability token signature verification failed at link {index}: {source}")]
@@ -140,6 +143,12 @@ impl CapToken {
     pub fn verify(&self) -> Result<(), CapTokenVerifyError> {
         if self.sig_chain.is_empty() {
             return Err(CapTokenVerifyError::EmptyChain);
+        }
+        if self.sig_chain.len() > MAX_CAP_CHAIN {
+            return Err(CapTokenVerifyError::ChainTooLong {
+                len: self.sig_chain.len(),
+                max: MAX_CAP_CHAIN,
+            });
         }
         let allow_bytes = allow_cbor(&self.allow)?;
         let mut prev_hash = [0u8; HASH_LEN];
@@ -274,6 +283,30 @@ mod tests {
 
         match token.verify() {
             Err(CapTokenVerifyError::Signature { index, .. }) => assert_eq!(index, 0),
+            other => panic!("unexpected verification result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn signature_chain_length_enforced() {
+        let issuer = sample_signing_key(0x30);
+        let subject = ClientId::from([0x33u8; HASH_LEN]);
+        let allow = CapTokenAllow::new(vec![sample_stream_id(0x77)], 3600);
+        let mut token = CapToken::issue(&issuer, subject, allow).expect("cap token");
+
+        // Extend the signature chain beyond the allowed limit by cloning the
+        // valid signature.  Verification should reject the token before
+        // attempting to evaluate the additional signatures.
+        let signature = token.sig_chain[0];
+        while token.sig_chain.len() <= MAX_CAP_CHAIN {
+            token.sig_chain.push(signature);
+        }
+
+        match token.verify() {
+            Err(CapTokenVerifyError::ChainTooLong { len, max }) => {
+                assert_eq!(max, MAX_CAP_CHAIN);
+                assert!(len > max);
+            }
             other => panic!("unexpected verification result: {other:?}"),
         }
     }
