@@ -453,7 +453,7 @@ fn check_cbor_determinism_suite() -> Result<()> {
     assert_cbor_determinism(&msg, "MSG")?;
     assert_cbor_determinism(&receipt, "RECEIPT")?;
 
-    let attachments = vec![
+    let attachments = [
         b"deterministic attachment 1".to_vec(),
         b"deterministic attachment 2".to_vec(),
     ];
