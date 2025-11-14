@@ -49,8 +49,11 @@ just fmt-check
 # Generate documentation
 just doc
 
-# Launch the hub scaffold (currently emits a not-implemented error)
-just hub-run -- --listen 127.0.0.1:8080 --data-dir /tmp/veen-hub
+# Launch a primary hub scaffold (currently emits a not-implemented error)
+just hub-run -- --listen 127.0.0.1:8080 --data-dir /tmp/veen-hub --profile-id 1111111111111111111111111111111111111111111111111111111111111111 --anchor-backend file
+
+# Launch a replica hub scaffold pointed at the primary overlay
+just hub-run -- --listen 127.0.0.1:8081 --data-dir /tmp/veen-replica --role replica --replica-target http://127.0.0.1:8080
 
 # Explore the CLI surface (commands currently terminate with scaffold errors)
 just cli -- keygen --out /tmp/veen-client

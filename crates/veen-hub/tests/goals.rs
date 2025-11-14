@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use veen_core::cap_token_from_cbor;
-use veen_hub::config::{HubRole, HubRuntimeConfig};
+use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::pipeline::{
     AnchorRequest, AttachmentUpload, AuthorizeResponse, SubmitRequest, SubmitResponse,
 };
@@ -33,6 +33,7 @@ async fn goals_core_pipeline() -> Result<()> {
         hub_dir.path().to_path_buf(),
         None,
         HubRole::Primary,
+        HubConfigOverrides::default(),
     )
     .await?;
     let runtime = HubRuntime::start(config).await?;

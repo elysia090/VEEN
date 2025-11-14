@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use tokio::fs;
 
@@ -14,6 +14,8 @@ pub struct HubRuntimeConfig {
     pub profile_id: Option<String>,
     pub anchors: AnchorConfig,
     pub observability: ObservabilityConfig,
+    pub admission: AdmissionConfig,
+    pub federation: FederationConfig,
     pub config_path: Option<PathBuf>,
 }
 
@@ -35,6 +37,29 @@ pub struct ObservabilityConfig {
     pub enable_logs: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AdmissionConfig {
+    pub max_client_id_lifetime_sec: Option<u64>,
+    pub max_msgs_per_client_id_per_label: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FederationConfig {
+    pub replica_targets: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct HubConfigOverrides {
+    pub profile_id: Option<String>,
+    pub anchors_enabled: Option<bool>,
+    pub anchor_backend: Option<String>,
+    pub enable_metrics: Option<bool>,
+    pub enable_logs: Option<bool>,
+    pub max_client_id_lifetime_sec: Option<u64>,
+    pub max_msgs_per_client_id_per_label: Option<u64>,
+    pub replica_targets: Option<Vec<String>>,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct FileConfig {
     listen: Option<SocketAddr>,
@@ -43,6 +68,10 @@ struct FileConfig {
     anchor: AnchorSection,
     #[serde(default)]
     observability: ObservabilitySection,
+    #[serde(default)]
+    admission: AdmissionSection,
+    #[serde(default)]
+    federation: FederationSection,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -57,12 +86,24 @@ struct ObservabilitySection {
     enable_logs: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct AdmissionSection {
+    max_client_id_lifetime_sec: Option<u64>,
+    max_msgs_per_client_id_per_label: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct FederationSection {
+    replica_targets: Option<Vec<String>>,
+}
+
 impl HubRuntimeConfig {
     pub async fn from_sources(
         listen: SocketAddr,
         data_dir: PathBuf,
         config_path: Option<PathBuf>,
         role: HubRole,
+        overrides: HubConfigOverrides,
     ) -> Result<Self> {
         let file_cfg = if let Some(path) = config_path.as_ref() {
             let contents = fs::read_to_string(path)
@@ -74,15 +115,39 @@ impl HubRuntimeConfig {
         };
 
         let resolved_listen = file_cfg.listen.unwrap_or(listen);
-        let profile_id = file_cfg.profile_id;
+        let profile_id = overrides.profile_id.or(file_cfg.profile_id);
         let anchors = AnchorConfig {
-            enabled: file_cfg.anchor.enabled.unwrap_or(true),
-            backend: file_cfg.anchor.backend,
+            enabled: overrides
+                .anchors_enabled
+                .unwrap_or_else(|| file_cfg.anchor.enabled.unwrap_or(true)),
+            backend: overrides.anchor_backend.or(file_cfg.anchor.backend),
         };
         let observability = ObservabilityConfig {
-            enable_metrics: file_cfg.observability.enable_metrics.unwrap_or(true),
-            enable_logs: file_cfg.observability.enable_logs.unwrap_or(true),
+            enable_metrics: overrides
+                .enable_metrics
+                .unwrap_or_else(|| file_cfg.observability.enable_metrics.unwrap_or(true)),
+            enable_logs: overrides
+                .enable_logs
+                .unwrap_or_else(|| file_cfg.observability.enable_logs.unwrap_or(true)),
         };
+        let admission = AdmissionConfig {
+            max_client_id_lifetime_sec: overrides
+                .max_client_id_lifetime_sec
+                .or(file_cfg.admission.max_client_id_lifetime_sec),
+            max_msgs_per_client_id_per_label: overrides
+                .max_msgs_per_client_id_per_label
+                .or(file_cfg.admission.max_msgs_per_client_id_per_label),
+        };
+        let federation = FederationConfig {
+            replica_targets: overrides
+                .replica_targets
+                .or(file_cfg.federation.replica_targets)
+                .unwrap_or_default(),
+        };
+
+        if matches!(role, HubRole::Replica) && federation.replica_targets.is_empty() {
+            bail!("replica hubs require at least one replica target to be configured");
+        }
 
         Ok(Self {
             listen: resolved_listen,
@@ -91,6 +156,8 @@ impl HubRuntimeConfig {
             profile_id,
             anchors,
             observability,
+            admission,
+            federation,
             config_path,
         })
     }

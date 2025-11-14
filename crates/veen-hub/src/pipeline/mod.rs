@@ -17,7 +17,7 @@ use veen_core::wire::mmr::Mmr;
 use veen_core::wire::types::{LeafHash, MmrRoot};
 use veen_core::{cap_stream_id_from_label, cap_token_from_cbor, CapTokenRate, CAP_TOKEN_VERSION};
 
-use crate::config::{HubRole, HubRuntimeConfig};
+use crate::config::{AdmissionConfig, FederationConfig, HubRole, HubRuntimeConfig};
 use crate::observability::HubObservability;
 use crate::storage::HubStorage;
 
@@ -27,6 +27,9 @@ pub struct HubPipeline {
     observability: HubObservability,
     inner: Arc<Mutex<HubState>>,
     role: HubRole,
+    profile_id: Option<String>,
+    admission: AdmissionConfig,
+    federation: FederationConfig,
 }
 
 struct HubState {
@@ -72,11 +75,29 @@ impl HubPipeline {
             observability,
             inner: Arc::new(Mutex::new(state)),
             role: config.role,
+            profile_id: config.profile_id.clone(),
+            admission: config.admission.clone(),
+            federation: config.federation.clone(),
         })
     }
 
     pub fn observability(&self) -> HubObservability {
         self.observability.clone()
+    }
+
+    #[allow(dead_code)]
+    pub fn profile_id(&self) -> Option<&str> {
+        self.profile_id.as_deref()
+    }
+
+    #[allow(dead_code)]
+    pub fn admission_config(&self) -> &AdmissionConfig {
+        &self.admission
+    }
+
+    #[allow(dead_code)]
+    pub fn federation_config(&self) -> &FederationConfig {
+        &self.federation
     }
 
     pub async fn submit(&self, request: SubmitRequest) -> Result<SubmitResponse> {

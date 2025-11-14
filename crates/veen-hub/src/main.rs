@@ -1,12 +1,12 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
-use veen_hub::config::{HubRole, HubRuntimeConfig};
+use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::runtime::HubRuntime;
 
 #[derive(Parser)]
@@ -33,9 +33,33 @@ struct RunCommand {
     /// Optional path to a configuration file describing the runtime overlays.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Optional profile_id to enforce for admitted messages (hex-encoded 32 bytes).
+    #[arg(long = "profile-id", value_parser = parse_profile_id)]
+    profile_id: Option<String>,
     /// Role to run the hub as.
     #[arg(long, value_enum, default_value_t = HubRoleArg::Primary)]
     role: HubRoleArg,
+    /// Disable anchoring regardless of configuration files.
+    #[arg(long = "disable-anchors")]
+    disable_anchors: bool,
+    /// Anchor backend identifier to use (e.g. "file" or "dummy").
+    #[arg(long = "anchor-backend", conflicts_with = "disable_anchors")]
+    anchor_backend: Option<String>,
+    /// Disable exporting Prometheus metrics.
+    #[arg(long = "disable-metrics")]
+    disable_metrics: bool,
+    /// Disable structured log emission.
+    #[arg(long = "disable-logs")]
+    disable_logs: bool,
+    /// Maximum lifetime in seconds for any observed client_id before rotation is required.
+    #[arg(long = "max-client-id-lifetime-sec")]
+    max_client_id_lifetime_sec: Option<u64>,
+    /// Maximum number of messages a client_id may send per label before rotation is required.
+    #[arg(long = "max-msgs-per-client-id-per-label")]
+    max_msgs_per_client_id_per_label: Option<u64>,
+    /// Upstream primary hubs that this replica should follow.
+    #[arg(long = "replica-target", value_name = "URL")]
+    replica_targets: Vec<String>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -71,9 +95,17 @@ fn init_tracing() {
 }
 
 async fn run_hub(cmd: RunCommand) -> Result<()> {
-    let runtime_config =
-        HubRuntimeConfig::from_sources(cmd.listen, cmd.data_dir, cmd.config, cmd.role.into())
-            .await?;
+    cmd.validate()?;
+    let overrides = cmd.as_config_overrides();
+
+    let runtime_config = HubRuntimeConfig::from_sources(
+        cmd.listen,
+        cmd.data_dir,
+        cmd.config,
+        cmd.role.into(),
+        overrides,
+    )
+    .await?;
     tracing::info!(
         listen = %runtime_config.listen,
         data_dir = %runtime_config.data_dir.display(),
@@ -93,4 +125,106 @@ async fn run_hub(cmd: RunCommand) -> Result<()> {
     println!("VEEN hub stopped cleanly");
 
     Ok(())
+}
+
+impl RunCommand {
+    fn validate(&self) -> Result<()> {
+        if matches!(self.role, HubRoleArg::Replica)
+            && self.replica_targets.is_empty()
+            && self.config.is_none()
+        {
+            bail!("replica role requires at least one --replica-target or configuration file");
+        }
+        Ok(())
+    }
+
+    fn as_config_overrides(&self) -> HubConfigOverrides {
+        HubConfigOverrides {
+            profile_id: self.profile_id.clone(),
+            anchors_enabled: self.disable_anchors.then_some(false),
+            anchor_backend: self.anchor_backend.clone(),
+            enable_metrics: self.disable_metrics.then_some(false),
+            enable_logs: self.disable_logs.then_some(false),
+            max_client_id_lifetime_sec: self.max_client_id_lifetime_sec,
+            max_msgs_per_client_id_per_label: self.max_msgs_per_client_id_per_label,
+            replica_targets: if self.replica_targets.is_empty() {
+                None
+            } else {
+                Some(self.replica_targets.clone())
+            },
+        }
+    }
+}
+
+fn parse_profile_id(raw: &str) -> Result<String, String> {
+    if raw.len() != 64 {
+        return Err("profile-id must be 64 hexadecimal characters".into());
+    }
+    if hex::decode(raw).is_err() {
+        return Err("profile-id must be valid hexadecimal".into());
+    }
+    Ok(raw.to_ascii_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use tempfile::tempdir;
+
+    #[test]
+    fn replica_without_targets_is_rejected() {
+        let temp = tempdir().unwrap();
+        let args = [
+            "veen-hub",
+            "run",
+            "--listen",
+            "127.0.0.1:9000",
+            "--data-dir",
+            temp.path().to_str().unwrap(),
+            "--role",
+            "replica",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        let Commands::Run(cmd) = cli.command;
+        let err = cmd.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("replica role requires at least one --replica-target"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn replica_with_target_is_accepted() {
+        let temp = tempdir().unwrap();
+        let args = [
+            "veen-hub",
+            "run",
+            "--listen",
+            "127.0.0.1:9000",
+            "--data-dir",
+            temp.path().to_str().unwrap(),
+            "--role",
+            "replica",
+            "--replica-target",
+            "http://127.0.0.1:8080",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        let Commands::Run(cmd) = cli.command;
+        cmd.validate().unwrap();
+    }
+
+    #[test]
+    fn profile_id_parser_rejects_invalid_length() {
+        let err = parse_profile_id("abc").unwrap_err();
+        assert!(err.contains("64"));
+    }
+
+    #[test]
+    fn profile_id_parser_accepts_hex() {
+        let value = "aa".repeat(32);
+        let parsed = parse_profile_id(&value).unwrap();
+        assert_eq!(parsed, value);
+    }
 }
