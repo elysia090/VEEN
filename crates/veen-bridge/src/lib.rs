@@ -111,7 +111,7 @@ impl BridgeRuntime {
                 if self
                     .streams
                     .entry(stream.clone())
-                    .or_insert_with(StreamState::default)
+                    .or_default()
                     .next_seq
                     == 0
                 {
@@ -134,7 +134,7 @@ impl BridgeRuntime {
             if self
                 .streams
                 .entry(stream.clone())
-                .or_insert_with(StreamState::default)
+                .or_default()
                 .next_seq
                 == 0
             {
@@ -156,7 +156,7 @@ impl BridgeRuntime {
             let state = self
                 .streams
                 .entry(stream.clone())
-                .or_insert_with(StreamState::default);
+                .or_default();
             let next_seq = state.next_seq;
             let messages = self.fetch_primary_stream(&stream, next_seq).await?;
 
@@ -196,7 +196,7 @@ impl BridgeRuntime {
         let entry = self
             .streams
             .entry(stream.to_string())
-            .or_insert_with(StreamState::default);
+            .or_default();
         entry.mmr = mmr;
         entry.next_seq = next_seq;
         Ok(())
@@ -206,7 +206,7 @@ impl BridgeRuntime {
         let entry = self
             .streams
             .entry(stream.to_string())
-            .or_insert_with(StreamState::default);
+            .or_default();
 
         if message.seq != entry.next_seq {
             bail!(
