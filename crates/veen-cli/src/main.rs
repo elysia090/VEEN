@@ -6,7 +6,7 @@ use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command as StdCommand, Stdio};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -122,17 +122,32 @@ struct Cli {
     command: Command,
 }
 
-static GLOBAL_OPTIONS: OnceLock<GlobalOptions> = OnceLock::new();
+static GLOBAL_OPTIONS: OnceLock<RwLock<GlobalOptions>> = OnceLock::new();
+
+fn global_options_lock() -> &'static RwLock<GlobalOptions> {
+    GLOBAL_OPTIONS.get_or_init(|| RwLock::new(GlobalOptions::default()))
+}
 
 fn set_global_options(options: GlobalOptions) {
-    let _ = GLOBAL_OPTIONS.set(options);
+    *global_options_lock()
+        .write()
+        .expect("global options lock poisoned") = options;
 }
 
 fn global_options() -> GlobalOptions {
-    GLOBAL_OPTIONS
-        .get()
-        .cloned()
-        .unwrap_or_else(GlobalOptions::default)
+    global_options_lock()
+        .read()
+        .expect("global options lock poisoned")
+        .clone()
+}
+
+fn json_output_enabled(explicit: bool) -> bool {
+    explicit || global_options().json
+}
+
+#[cfg(test)]
+fn json_output_enabled_with(explicit: bool, global: &GlobalOptions) -> bool {
+    explicit || global.json
 }
 
 #[derive(Subcommand)]
@@ -2775,7 +2790,9 @@ async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
         features,
     } = descriptor;
 
-    if args.json {
+    let use_json = json_output_enabled(args.json);
+
+    if use_json {
         let mut root = JsonMap::new();
         root.insert("ok".to_string(), JsonValue::Bool(ok));
         root.insert("version".to_string(), JsonValue::String(version));
@@ -2872,7 +2889,9 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
         bail!("hub did not return role information for the requested stream");
     }
 
-    if json {
+    let use_json = json_output_enabled(json);
+
+    if use_json {
         let mut root = JsonMap::new();
         root.insert("ok".to_string(), JsonValue::Bool(ok));
         root.insert("hub_id".to_string(), JsonValue::String(hub_id.clone()));
@@ -5218,6 +5237,24 @@ mod tests {
             .verify(digest.as_ref(), &signature)
             .map_err(|err| anyhow!("signature verification failed: {err}"))?;
         Ok(())
+    }
+
+    #[test]
+    fn json_output_enabled_uses_global_flag() {
+        let global_json = GlobalOptions {
+            json: true,
+            quiet: false,
+            timeout_ms: None,
+        };
+        assert!(super::json_output_enabled_with(false, &global_json));
+
+        let global_text = GlobalOptions {
+            json: false,
+            quiet: false,
+            timeout_ms: None,
+        };
+        assert!(super::json_output_enabled_with(true, &global_text));
+        assert!(!super::json_output_enabled_with(false, &global_text));
     }
 
     #[tokio::test]
