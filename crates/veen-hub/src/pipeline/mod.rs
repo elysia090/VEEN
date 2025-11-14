@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::convert::TryInto;
 use std::io::Cursor;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -6,6 +7,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use ciborium::de::from_reader;
 use hex;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
@@ -16,6 +18,7 @@ use tokio::fs;
 use tokio::fs::OpenOptions;
 use tokio::sync::Mutex;
 
+use veen_core::hub::HubId;
 use veen_core::meta::SchemaRegistry;
 use veen_core::revocation::{
     cap_token_hash, schema_revocation, RevocationKind, RevocationRecord, RevocationTarget,
@@ -36,7 +39,7 @@ use veen_core::{
 use thiserror::Error;
 
 use crate::config::{AdmissionConfig, FederationConfig, HubRole, HubRuntimeConfig};
-use crate::observability::HubObservability;
+use crate::observability::{HubObservability, ObservabilitySnapshot};
 use crate::storage::HubStorage;
 
 #[derive(Clone)]
@@ -48,6 +51,7 @@ pub struct HubPipeline {
     profile_id: Option<String>,
     admission: AdmissionConfig,
     federation: FederationConfig,
+    identity: HubIdentity,
 }
 
 struct HubState {
@@ -96,6 +100,7 @@ impl HubPipeline {
         let label_class_index = build_label_class_index(&label_class_records);
         let schema_descriptors = load_schema_descriptors(storage).await?;
         let schema_registry = build_schema_registry(&schema_descriptors);
+        let identity = load_hub_identity(storage).await?;
         let state = HubState {
             streams,
             capabilities,
@@ -122,6 +127,7 @@ impl HubPipeline {
             profile_id: config.profile_id.clone(),
             admission: config.admission.clone(),
             federation: config.federation.clone(),
+            identity,
         })
     }
 
@@ -653,6 +659,7 @@ impl HubPipeline {
         let guard = self.inner.lock().await;
         let mut last_seq = HashMap::new();
         let mut peaks = HashMap::new();
+        let mut max_seq = 0u64;
         for (stream, runtime) in &guard.streams {
             let seq = runtime.mmr.seq();
             if seq > 0 {
@@ -661,13 +668,28 @@ impl HubPipeline {
                     peaks.insert(stream.clone(), hex::encode(root.as_bytes()));
                 }
             }
+            max_seq = max_seq.max(seq);
         }
+        let ObservabilitySnapshot {
+            uptime,
+            submit_ok_total,
+            submit_err_total,
+        } = snapshot;
         ObservabilityReport {
-            uptime: snapshot.uptime,
-            submit_ok_total: snapshot.submit_ok_total,
-            submit_err_total: snapshot.submit_err_total,
+            uptime,
+            submit_ok_total,
+            submit_err_total,
             last_stream_seq: last_seq,
             mmr_roots: peaks,
+            peaks_count: max_seq,
+            profile_id: self.profile_id.clone(),
+            hub_id: Some(self.identity.hub_id_hex.clone()),
+            hub_public_key: Some(self.identity.public_key_hex.clone()),
+            role: match self.role {
+                HubRole::Primary => "primary".to_string(),
+                HubRole::Replica => "replica".to_string(),
+            },
+            data_dir: self.storage.data_dir().to_string_lossy().into_owned(),
         }
     }
 
@@ -1062,9 +1084,74 @@ pub struct ObservabilityReport {
     #[serde(with = "humantime_serde")]
     pub uptime: std::time::Duration,
     pub submit_ok_total: u64,
-    pub submit_err_total: std::collections::BTreeMap<String, u64>,
+    pub submit_err_total: BTreeMap<String, u64>,
     pub last_stream_seq: HashMap<String, u64>,
     pub mmr_roots: HashMap<String, String>,
+    pub peaks_count: u64,
+    pub profile_id: Option<String>,
+    pub hub_id: Option<String>,
+    pub hub_public_key: Option<String>,
+    pub role: String,
+    pub data_dir: String,
+}
+
+const HUB_KEY_VERSION: u8 = 1;
+
+#[derive(Clone)]
+struct HubIdentity {
+    hub_id_hex: String,
+    public_key_hex: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct HubKeyMaterial {
+    version: u8,
+    created_at: u64,
+    #[serde(with = "serde_bytes")]
+    public_key: ByteBuf,
+    #[serde(with = "serde_bytes")]
+    secret_key: ByteBuf,
+}
+
+async fn load_hub_identity(storage: &HubStorage) -> Result<HubIdentity> {
+    let path = storage.hub_key_path();
+    if !fs::try_exists(&path)
+        .await
+        .with_context(|| format!("checking hub key at {}", path.display()))?
+    {
+        bail!(
+            "hub data directory at {} is missing hub_key.cbor",
+            storage.data_dir().display()
+        );
+    }
+
+    let bytes = fs::read(&path)
+        .await
+        .with_context(|| format!("reading hub key material from {}", path.display()))?;
+    let mut cursor = Cursor::new(bytes);
+    let material: HubKeyMaterial =
+        from_reader(&mut cursor).context("decoding hub key material from CBOR")?;
+
+    if material.version != HUB_KEY_VERSION {
+        bail!(
+            "unsupported hub key version {}; expected {}",
+            material.version,
+            HUB_KEY_VERSION
+        );
+    }
+
+    let public_key: [u8; 32] = material
+        .public_key
+        .as_ref()
+        .try_into()
+        .map_err(|_| anyhow!("hub public key must be 32 bytes"))?;
+    let hub_id = HubId::derive(public_key)
+        .map_err(|err| anyhow!("deriving hub identifier failed: {err}"))?;
+
+    Ok(HubIdentity {
+        hub_id_hex: hex::encode(hub_id.as_ref()),
+        public_key_hex: hex::encode(public_key),
+    })
 }
 
 async fn load_existing_streams(storage: &HubStorage) -> Result<HashMap<String, StreamRuntime>> {
@@ -1667,14 +1754,46 @@ fn revocation_target_from_hex_str(value: &str) -> Result<RevocationTarget> {
 mod tests {
     use super::*;
     use crate::config::{AnchorConfig, ObservabilityConfig};
+    use anyhow::Context;
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
     use std::net::SocketAddr;
     use std::path::Path;
     use tempfile::tempdir;
+    use tokio::fs;
     use tokio::runtime::Runtime;
     use veen_core::federation::AuthorityPolicy;
     use veen_core::meta::SchemaId;
     use veen_core::realm::RealmId;
     use veen_core::HubId;
+
+    async fn write_test_hub_key(data_dir: &Path) -> Result<()> {
+        let path = data_dir.join(crate::storage::HUB_KEY_FILE);
+        if fs::try_exists(&path)
+            .await
+            .with_context(|| format!("checking hub key at {}", path.display()))?
+        {
+            return Ok(());
+        }
+
+        let mut rng = OsRng;
+        let signing = SigningKey::generate(&mut rng);
+        let verifying = signing.verifying_key();
+        let material = HubKeyMaterial {
+            version: HUB_KEY_VERSION,
+            created_at: current_unix_timestamp(),
+            public_key: ByteBuf::from(verifying.as_bytes().to_vec()),
+            secret_key: ByteBuf::from(signing.to_bytes().to_vec()),
+        };
+
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&material, &mut encoded)
+            .context("serialising test hub key material")?;
+        fs::write(&path, encoded)
+            .await
+            .with_context(|| format!("writing hub key material to {}", path.display()))?;
+        Ok(())
+    }
 
     async fn init_pipeline(data_dir: &Path) -> HubPipeline {
         let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -1690,6 +1809,7 @@ mod tests {
             config_path: None,
         };
         let storage = HubStorage::bootstrap(&config).await.unwrap();
+        write_test_hub_key(storage.data_dir()).await.unwrap();
         HubPipeline::initialise(&config, &storage).await.unwrap()
     }
 

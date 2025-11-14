@@ -235,6 +235,12 @@ async fn handle_health(State(pipeline): State<HubPipeline>) -> impl IntoResponse
         submit_err_total,
         last_stream_seq,
         mmr_roots,
+        peaks_count,
+        profile_id,
+        hub_id,
+        hub_public_key,
+        role,
+        data_dir,
     } = pipeline.metrics_snapshot().await;
     let body = serde_json::json!({
         "ok": true,
@@ -243,6 +249,12 @@ async fn handle_health(State(pipeline): State<HubPipeline>) -> impl IntoResponse
         "submit_err_total": submit_err_total,
         "last_stream_seq": last_stream_seq,
         "mmr_roots": mmr_roots,
+        "peaks_count": peaks_count,
+        "profile_id": profile_id,
+        "hub_id": hub_id,
+        "hub_public_key": hub_public_key,
+        "role": role,
+        "data_dir": data_dir,
     });
     (StatusCode::OK, Json(body)).into_response()
 }

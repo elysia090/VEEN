@@ -64,7 +64,7 @@ use std::time::Instant;
 #[cfg(unix)]
 use tokio::signal::unix::{signal as unix_signal, SignalKind};
 use veen_hub::pipeline::{
-    AttachmentUpload, AuthorizeResponse as RemoteAuthorizeResponse,
+    AnchorRequest, AttachmentUpload, AuthorizeResponse as RemoteAuthorizeResponse,
     HubStreamState as RemoteHubStreamState, PowCookieEnvelope,
     StoredAttachment as RemoteStoredAttachment, StoredMessage as RemoteStoredMessage,
     StreamMessageWithProof as RemoteStreamMessageWithProof, StreamProof as RemoteStreamProof,
@@ -955,6 +955,18 @@ struct HubMetricsSnapshot {
     end_to_end_latency_ms: HistogramSnapshot,
 }
 
+impl HubMetricsSnapshot {
+    fn from_remote(report: &RemoteObservabilityReport) -> Self {
+        Self {
+            submit_ok_total: report.submit_ok_total,
+            submit_err_total: report.submit_err_total.clone(),
+            verify_latency_ms: HistogramSnapshot::default(),
+            commit_latency_ms: HistogramSnapshot::default(),
+            end_to_end_latency_ms: HistogramSnapshot::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HistogramSnapshot {
     count: u64,
@@ -1002,6 +1014,39 @@ struct HubKeyInfo {
     hub_id_hex: String,
     public_key_hex: String,
     created_at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteObservabilityReport {
+    #[serde(with = "humantime_serde")]
+    uptime: Duration,
+    submit_ok_total: u64,
+    submit_err_total: BTreeMap<String, u64>,
+    last_stream_seq: BTreeMap<String, u64>,
+    mmr_roots: BTreeMap<String, String>,
+    peaks_count: u64,
+    profile_id: Option<String>,
+    hub_id: Option<String>,
+    hub_public_key: Option<String>,
+    role: String,
+    data_dir: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteHealthStatus {
+    ok: bool,
+    #[serde(with = "humantime_serde")]
+    uptime: Duration,
+    submit_ok_total: u64,
+    submit_err_total: BTreeMap<String, u64>,
+    last_stream_seq: BTreeMap<String, u64>,
+    mmr_roots: BTreeMap<String, String>,
+    peaks_count: u64,
+    profile_id: Option<String>,
+    hub_id: Option<String>,
+    hub_public_key: Option<String>,
+    role: String,
+    data_dir: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1594,51 +1639,96 @@ async fn handle_hub_stop(args: HubStopArgs) -> Result<()> {
 }
 
 async fn handle_hub_status(args: HubStatusArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
-    let state = load_hub_state(&data_dir).await?;
+    match parse_hub_reference(&args.hub)? {
+        HubReference::Local(data_dir) => {
+            let state = load_hub_state(&data_dir).await?;
 
-    let profile_id = state
-        .profile_id
-        .as_deref()
-        .with_context(|| format!("hub in {} has not been initialised", data_dir.display()))?;
+            let profile_id = state.profile_id.as_deref().with_context(|| {
+                format!("hub in {} has not been initialised", data_dir.display())
+            })?;
 
-    let now = current_unix_timestamp()?;
+            let now = current_unix_timestamp()?;
 
-    println!("role: standalone");
-    println!("profile_id: {profile_id}");
-    println!("peaks_count: {}", state.peaks_count);
-    if state.last_stream_seq.is_empty() {
-        println!("last_stream_seq: (none)");
-    } else {
-        println!("last_stream_seq:");
-        for (label, seq) in state.last_stream_seq.iter() {
-            println!("  {label}: {seq}");
+            println!("role: standalone");
+            println!("profile_id: {profile_id}");
+            println!("peaks_count: {}", state.peaks_count);
+            if state.last_stream_seq.is_empty() {
+                println!("last_stream_seq: (none)");
+            } else {
+                println!("last_stream_seq:");
+                for (label, seq) in state.last_stream_seq.iter() {
+                    println!("  {label}: {seq}");
+                }
+            }
+            println!("uptime_sec: {}", state.uptime(now));
+            println!("data_dir: {}", state.data_dir);
+            if let Some(ref listen) = state.listen {
+                println!("listen: {listen}");
+            }
+            if let Some(ref hub_id) = state.hub_id {
+                println!("hub_id: {hub_id}");
+            }
+            if let Some(pid) = state.pid {
+                println!("pid: {pid}");
+            }
+            Ok(())
+        }
+        HubReference::Remote(client) => {
+            let report: RemoteObservabilityReport = client.get_json("/metrics", &[]).await?;
+
+            println!("role: {}", report.role);
+            if let Some(profile_id) = report.profile_id.as_deref() {
+                println!("profile_id: {profile_id}");
+            }
+            println!("peaks_count: {}", report.peaks_count);
+            if report.last_stream_seq.is_empty() {
+                println!("last_stream_seq: (none)");
+            } else {
+                println!("last_stream_seq:");
+                for (label, seq) in report.last_stream_seq.iter() {
+                    println!("  {label}: {seq}");
+                }
+            }
+            println!("uptime_sec: {}", report.uptime.as_secs());
+            println!("data_dir: {}", report.data_dir);
+            if let Some(hub_id) = report.hub_id.as_deref() {
+                println!("hub_id: {hub_id}");
+            }
+            if let Some(hub_pk) = report.hub_public_key.as_deref() {
+                println!("hub_pk: {hub_pk}");
+            }
+            Ok(())
         }
     }
-    println!("uptime_sec: {}", state.uptime(now));
-    println!("data_dir: {}", state.data_dir);
-    if let Some(ref listen) = state.listen {
-        println!("listen: {listen}");
-    }
-    if let Some(ref hub_id) = state.hub_id {
-        println!("hub_id: {hub_id}");
-    }
-    if let Some(pid) = state.pid {
-        println!("pid: {pid}");
-    }
-
-    Ok(())
 }
 
 async fn handle_hub_key(args: HubKeyArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
-    let key_info = read_hub_key_material(&data_dir).await?;
+    match parse_hub_reference(&args.hub)? {
+        HubReference::Local(data_dir) => {
+            let key_info = read_hub_key_material(&data_dir).await?;
 
-    println!("hub_id: {}", key_info.hub_id_hex);
-    println!("hub_pk: {}", key_info.public_key_hex);
-    println!("created_at: {}", key_info.created_at);
+            println!("hub_id: {}", key_info.hub_id_hex);
+            println!("hub_pk: {}", key_info.public_key_hex);
+            println!("created_at: {}", key_info.created_at);
 
-    Ok(())
+            Ok(())
+        }
+        HubReference::Remote(client) => {
+            let report: RemoteObservabilityReport = client.get_json("/metrics", &[]).await?;
+            let hub_pk = report
+                .hub_public_key
+                .as_deref()
+                .ok_or_else(|| anyhow!("remote hub did not return a public key"))?;
+            println!("hub_pk: {hub_pk}");
+            if let Some(hub_id) = report.hub_id.as_deref() {
+                println!("hub_id: {hub_id}");
+            }
+            if let Some(profile_id) = report.profile_id.as_deref() {
+                println!("profile_id: {profile_id}");
+            }
+            Ok(())
+        }
+    }
 }
 
 async fn handle_hub_verify_rotation(args: HubVerifyRotationArgs) -> Result<()> {
@@ -1700,42 +1790,101 @@ async fn handle_hub_verify_rotation(args: HubVerifyRotationArgs) -> Result<()> {
 }
 
 async fn handle_hub_health(args: HubHealthArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
-    let state = load_hub_state(&data_dir).await?;
-    let now = current_unix_timestamp()?;
+    match parse_hub_reference(&args.hub)? {
+        HubReference::Local(data_dir) => {
+            let state = load_hub_state(&data_dir).await?;
+            let now = current_unix_timestamp()?;
 
-    if state.running {
-        println!("status: running");
-        println!("uptime_sec: {}", state.uptime(now));
-    } else {
-        println!("status: stopped");
-        if let Some(stopped_at) = state.stopped_at {
-            println!("stopped_at: {stopped_at}");
+            if state.running {
+                println!("status: running");
+                println!("uptime_sec: {}", state.uptime(now));
+            } else {
+                println!("status: stopped");
+                if let Some(stopped_at) = state.stopped_at {
+                    println!("stopped_at: {stopped_at}");
+                }
+            }
+
+            if let Some(ref profile_id) = state.profile_id {
+                println!("profile_id: {profile_id}");
+            }
+            if let Some(ref hub_id) = state.hub_id {
+                println!("hub_id: {hub_id}");
+            }
+
+            Ok(())
+        }
+        HubReference::Remote(client) => {
+            let health: RemoteHealthStatus = client.get_json("/healthz", &[]).await?;
+            println!("status: {}", if health.ok { "running" } else { "error" });
+            println!("uptime_sec: {}", health.uptime.as_secs());
+            println!("role: {}", health.role);
+            println!("peaks_count: {}", health.peaks_count);
+            if let Some(profile_id) = health.profile_id.as_deref() {
+                println!("profile_id: {profile_id}");
+            }
+            if let Some(hub_id) = health.hub_id.as_deref() {
+                println!("hub_id: {hub_id}");
+            }
+            if let Some(hub_pk) = health.hub_public_key.as_deref() {
+                println!("hub_pk: {hub_pk}");
+            }
+            println!("submit_ok_total: {}", health.submit_ok_total);
+            if health.submit_err_total.is_empty() {
+                println!("submit_err_total: (none)");
+            } else {
+                println!("submit_err_total:");
+                for (code, count) in health.submit_err_total.iter() {
+                    println!("  {code}: {count}");
+                }
+            }
+            if health.last_stream_seq.is_empty() {
+                println!("last_stream_seq: (none)");
+            } else {
+                println!("last_stream_seq:");
+                for (label, seq) in health.last_stream_seq.iter() {
+                    println!("  {label}: {seq}");
+                }
+            }
+            if health.mmr_roots.is_empty() {
+                println!("mmr_roots: (none)");
+            } else {
+                println!("mmr_roots:");
+                for (label, root) in health.mmr_roots.iter() {
+                    println!("  {label}: {root}");
+                }
+            }
+            println!("data_dir: {}", health.data_dir);
+            Ok(())
         }
     }
-
-    if let Some(ref profile_id) = state.profile_id {
-        println!("profile_id: {profile_id}");
-    }
-    if let Some(ref hub_id) = state.hub_id {
-        println!("hub_id: {hub_id}");
-    }
-
-    Ok(())
 }
 
 async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
-    let state = load_hub_state(&data_dir).await?;
-    let metrics = state.metrics.clone();
+    match parse_hub_reference(&args.hub)? {
+        HubReference::Local(data_dir) => {
+            let state = load_hub_state(&data_dir).await?;
+            let metrics = state.metrics.clone();
 
-    if args.raw {
-        print_metrics_raw(&metrics);
-    } else {
-        print_metrics_summary(&metrics);
+            if args.raw {
+                print_metrics_raw(&metrics);
+            } else {
+                print_metrics_summary(&metrics);
+            }
+
+            Ok(())
+        }
+        HubReference::Remote(client) => {
+            let report: RemoteObservabilityReport = client.get_json("/metrics", &[]).await?;
+            let metrics = HubMetricsSnapshot::from_remote(&report);
+            if args.raw {
+                print_metrics_raw(&metrics);
+            } else {
+                print_metrics_summary(&metrics);
+            }
+            Ok(())
+        }
     }
-
-    Ok(())
 }
 
 async fn handle_hub_checkpoint_latest(args: HubCheckpointLatestArgs) -> Result<Checkpoint> {
@@ -3233,24 +3382,55 @@ async fn handle_crdt_counter_get(args: CrdtCounterGetArgs) -> Result<()> {
 }
 
 async fn handle_anchor_publish(args: AnchorPublishArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
-    let mut log = load_anchor_log(&data_dir).await?;
-    let ts = args.ts.unwrap_or(current_unix_timestamp()?);
+    match parse_hub_reference(&args.hub)? {
+        HubReference::Local(data_dir) => {
+            let mut log = load_anchor_log(&data_dir).await?;
+            let ts = args.ts.unwrap_or(current_unix_timestamp()?);
+            let mmr_root = compute_local_stream_mmr_root(&data_dir, &args.stream)
+                .await?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "stream {} does not have committed messages to anchor",
+                        args.stream
+                    )
+                })?;
 
-    let record = AnchorRecord {
-        stream: args.stream.clone(),
-        epoch: args.epoch,
-        ts,
-        nonce: args.nonce.clone(),
-    };
-    log.entries.push(record);
-    save_anchor_log(&data_dir, &log).await?;
+            let record = AnchorRecord {
+                stream: args.stream.clone(),
+                epoch: args.epoch,
+                ts,
+                nonce: args.nonce.clone(),
+            };
+            log.entries.push(record);
+            save_anchor_log(&data_dir, &log).await?;
 
-    println!(
-        "queued anchor publication for stream {} at ts {}",
-        args.stream, ts
-    );
-    Ok(())
+            println!(
+                "queued anchor publication for stream {} mmr_root {} at ts {}",
+                args.stream, mmr_root, ts
+            );
+            Ok(())
+        }
+        HubReference::Remote(client) => {
+            let report: RemoteObservabilityReport = client.get_json("/metrics", &[]).await?;
+            let mmr_root = report.mmr_roots.get(&args.stream).cloned().ok_or_else(|| {
+                anyhow!(
+                    "remote hub does not report an mmr_root for stream {}",
+                    args.stream
+                )
+            })?;
+            let request = AnchorRequest {
+                stream: args.stream.clone(),
+                mmr_root: mmr_root.clone(),
+                backend: None,
+            };
+            client.post_json_unit("/anchor", &request).await?;
+            println!(
+                "requested anchor publication for stream {} mmr_root {}",
+                args.stream, mmr_root
+            );
+            Ok(())
+        }
+    }
 }
 
 async fn handle_anchor_verify(args: AnchorVerifyArgs) -> Result<()> {
@@ -3637,6 +3817,19 @@ async fn save_stream_state(data_dir: &Path, stream: &str, state: &HubStreamState
         .with_context(|| format!("persisting stream state to {}", path.display()))
 }
 
+async fn compute_local_stream_mmr_root(data_dir: &Path, stream: &str) -> Result<Option<String>> {
+    let state = load_stream_state(data_dir, stream).await?;
+    if state.messages.is_empty() {
+        return Ok(None);
+    }
+    let mut mmr = Mmr::new();
+    for message in &state.messages {
+        let leaf = compute_message_leaf_hash(message)?;
+        mmr.append(leaf);
+    }
+    Ok(mmr.root().map(|root| hex::encode(root.as_bytes())))
+}
+
 async fn append_receipt<T>(data_dir: &Path, file: &str, value: &T) -> Result<()>
 where
     T: Serialize,
@@ -3851,6 +4044,35 @@ mod tests {
     use veen_hub::pipeline::StreamResponse;
     use veen_hub::runtime::HubRuntime;
 
+    async fn write_test_hub_key(data_dir: &Path) -> anyhow::Result<()> {
+        let path = data_dir.join(HUB_KEY_FILE);
+        if tokio::fs::try_exists(&path)
+            .await
+            .with_context(|| format!("checking hub key at {}", path.display()))?
+        {
+            return Ok(());
+        }
+
+        let mut rng = OsRng;
+        let signing_key = SigningKey::generate(&mut rng);
+        let verifying_key = signing_key.verifying_key();
+        let created_at = current_unix_timestamp()?;
+        let material = HubKeyMaterial {
+            version: HUB_KEY_VERSION,
+            created_at,
+            public_key: ByteBuf::from(verifying_key.to_bytes().to_vec()),
+            secret_key: ByteBuf::from(signing_key.to_bytes().to_vec()),
+        };
+
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&material, &mut encoded)
+            .context("serialising test hub key material")?;
+        tokio::fs::write(&path, encoded)
+            .await
+            .with_context(|| format!("writing hub key material to {}", path.display()))?;
+        Ok(())
+    }
+
     async fn spawn_cbor_capture_server(
         path: &'static str,
     ) -> anyhow::Result<(String, mpsc::Receiver<Vec<u8>>, tokio::task::JoinHandle<()>)> {
@@ -3964,6 +4186,7 @@ mod tests {
             },
         )
         .await?;
+        write_test_hub_key(hub_dir.path()).await?;
         let runtime = HubRuntime::start(config).await?;
         let hub_url = format!("http://{}", listen);
 
@@ -4038,6 +4261,7 @@ mod tests {
             },
         )
         .await?;
+        write_test_hub_key(hub_dir.path()).await?;
         let runtime = HubRuntime::start(config).await?;
         let hub_url = format!("http://{}", listen);
 
@@ -4119,6 +4343,7 @@ mod tests {
             },
         )
         .await?;
+        write_test_hub_key(hub_dir.path()).await?;
         let runtime = HubRuntime::start(config).await?;
         let hub_url = format!("http://{}", listen);
 
@@ -4596,6 +4821,29 @@ impl HubHttpClient {
             .json::<R>()
             .await
             .context("decoding hub response body")
+    }
+
+    async fn post_json_unit<T>(&self, path: &str, body: &T) -> Result<()>
+    where
+        T: Serialize + ?Sized,
+    {
+        let url = self.url(path)?;
+        let response = self
+            .http
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .context("performing hub POST request")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to decode response>".to_string());
+            bail!("hub POST {path} failed with {status}: {body}");
+        }
+        Ok(())
     }
 
     async fn post_cbor_unit(&self, path: &str, body: &[u8]) -> Result<()> {
