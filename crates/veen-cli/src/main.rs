@@ -6,6 +6,7 @@ use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command as StdCommand, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -97,6 +98,16 @@ const ATTACHMENTS_DIR: &str = "attachments";
 
 type JsonMap = serde_json::Map<String, JsonValue>;
 
+#[derive(Debug, Clone, Default, Args)]
+struct GlobalOptions {
+    #[arg(long, global = true)]
+    json: bool,
+    #[arg(long, global = true)]
+    quiet: bool,
+    #[arg(long, value_name = "MS", global = true)]
+    timeout_ms: Option<u64>,
+}
+
 #[derive(Parser)]
 #[command(
     name = "veen",
@@ -105,8 +116,23 @@ type JsonMap = serde_json::Map<String, JsonValue>;
     long_about = None
 )]
 struct Cli {
+    #[command(flatten)]
+    global: GlobalOptions,
     #[command(subcommand)]
     command: Command,
+}
+
+static GLOBAL_OPTIONS: OnceLock<GlobalOptions> = OnceLock::new();
+
+fn set_global_options(options: GlobalOptions) {
+    let _ = GLOBAL_OPTIONS.set(options);
+}
+
+fn global_options() -> GlobalOptions {
+    GLOBAL_OPTIONS
+        .get()
+        .cloned()
+        .unwrap_or_else(GlobalOptions::default)
 }
 
 #[derive(Subcommand)]
@@ -1426,10 +1452,11 @@ struct ClientRotationRecord {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let Cli { global, command } = Cli::parse();
+    set_global_options(global);
     init_tracing();
-    let cli = Cli::parse();
 
-    match cli.command {
+    match command {
         Command::Hub(cmd) => match cmd {
             HubCommand::Start(args) => handle_hub_start(args).await,
             HubCommand::Stop(args) => handle_hub_stop(args).await,
@@ -2188,8 +2215,13 @@ fn render_yaml_documents(docs: &[JsonValue]) -> Result<String> {
 }
 
 fn init_tracing() {
+    let default_level = if global_options().quiet {
+        "error"
+    } else {
+        "info"
+    };
     let subscriber = tracing_subscriber::fmt().with_env_filter(
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level)),
     );
     let _ = subscriber.try_init();
 }
@@ -4234,10 +4266,13 @@ async fn handle_rpc_call(args: RpcCallArgs) -> Result<()> {
         Err(_) => json!(args.args),
     };
 
+    let global_timeout_ms = global_options().timeout_ms;
+    let timeout_ms = args.timeout_ms.or(global_timeout_ms);
+
     let payload = json!({
         "method": args.method,
         "args": parsed_args,
-        "timeout_ms": args.timeout_ms,
+        "timeout_ms": timeout_ms,
         "idem": args.idem,
     })
     .to_string();
@@ -4249,7 +4284,7 @@ async fn handle_rpc_call(args: RpcCallArgs) -> Result<()> {
         stream: args.stream,
         body: payload,
         schema: Some(format!("rpc0:{}", compute_digest_hex(b"rpc"))),
-        expires_at: args.timeout_ms.map(|ms| now + ms / 1000),
+        expires_at: timeout_ms.map(|ms| now + ms / 1000),
         cap: None,
         parent: None,
         attach: Vec::new(),
@@ -5430,7 +5465,7 @@ mod tests {
         .await?;
 
         let (url, mut body_rx, server) = spawn_cbor_capture_server("/authority").await?;
-        let client = HubHttpClient::new(Url::parse(&url)?, HttpClient::builder().build()?);
+        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
         let primary_hex = hex::encode([0x11u8; HUB_ID_LEN]);
         let replica_hex = hex::encode([0x22u8; HUB_ID_LEN]);
         let args = AuthoritySetArgs {
@@ -5479,7 +5514,7 @@ mod tests {
         .await?;
 
         let (url, mut body_rx, server) = spawn_cbor_capture_server("/label-class").await?;
-        let client = HubHttpClient::new(Url::parse(&url)?, HttpClient::builder().build()?);
+        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
         let args = LabelClassSetArgs {
             hub: url.clone(),
             signer: signer_dir.path().to_path_buf(),
@@ -5521,7 +5556,7 @@ mod tests {
         .await?;
 
         let (url, mut body_rx, server) = spawn_cbor_capture_server("/schema").await?;
-        let client = HubHttpClient::new(Url::parse(&url)?, HttpClient::builder().build()?);
+        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
         let schema_id_hex = hex::encode([0xAAu8; SCHEMA_ID_LEN]);
         let args = SchemaRegisterArgs {
             hub: url.clone(),
@@ -5571,7 +5606,7 @@ mod tests {
         .await?;
 
         let (url, mut body_rx, server) = spawn_cbor_capture_server("/wallet/transfer").await?;
-        let client = HubHttpClient::new(Url::parse(&url)?, HttpClient::builder().build()?);
+        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
         let wallet_hex = hex::encode([0x55u8; WALLET_ID_LEN]);
         let to_wallet_hex = hex::encode([0x66u8; WALLET_ID_LEN]);
         let args = WalletTransferArgs {
@@ -5647,7 +5682,7 @@ mod tests {
         .await?;
 
         let (url, mut body_rx, server) = spawn_cbor_capture_server("/revoke").await?;
-        let client = HubHttpClient::new(Url::parse(&url)?, HttpClient::builder().build()?);
+        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
         let target_hex = hex::encode([0x77u8; REVOCATION_TARGET_LEN]);
         let args = RevokePublishArgs {
             hub: url.clone(),
@@ -5699,7 +5734,7 @@ mod tests {
         };
         let body_bytes = serde_json::to_vec(&vec![descriptor.clone()])?;
         let (url, server) = spawn_fixed_response_server("/schema", body_bytes).await?;
-        let client = HubHttpClient::new(Url::parse(&url)?, HttpClient::builder().build()?);
+        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
         let fetched = fetch_schema_descriptors(&client).await?;
         server.abort();
         assert_eq!(fetched, vec![descriptor]);
@@ -6005,9 +6040,7 @@ fn parse_hub_reference(reference: &str) -> Result<HubReference> {
             Url::parse(reference).with_context(|| format!("parsing hub endpoint {reference}"))?;
         match url.scheme() {
             "http" | "https" => {
-                let client = HttpClient::builder()
-                    .build()
-                    .context("constructing HTTP client")?;
+                let client = build_http_client()?;
                 return Ok(HubReference::Remote(HubHttpClient::new(url, client)));
             }
             other => {
@@ -6017,6 +6050,16 @@ fn parse_hub_reference(reference: &str) -> Result<HubReference> {
     }
 
     Ok(HubReference::Local(PathBuf::from(reference)))
+}
+
+fn build_http_client() -> Result<HttpClient> {
+    let mut builder = HttpClient::builder();
+    if let Some(timeout_ms) = global_options().timeout_ms {
+        builder = builder.timeout(Duration::from_millis(timeout_ms));
+    }
+    builder
+        .build()
+        .context("constructing HTTP client with global options")
 }
 
 fn print_metrics_summary(metrics: &HubMetricsSnapshot) {
