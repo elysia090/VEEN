@@ -105,10 +105,13 @@ async fn handle_submit(
         Err(err) => {
             if let Some(cap_err) = err.downcast_ref::<CapabilityError>() {
                 tracing::warn!(error = ?cap_err, "submit failed");
-                pipeline.observability().record_submit_err(cap_err.code());
-                let status = match cap_err {
-                    CapabilityError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
-                    _ => StatusCode::FORBIDDEN,
+                let code = cap_err.code();
+                pipeline.observability().record_submit_err(code);
+                let status = match code {
+                    "E.RATE" => StatusCode::TOO_MANY_REQUESTS,
+                    "E.SIZE" => StatusCode::PAYLOAD_TOO_LARGE,
+                    "E.AUTH" | "E.CAP" => StatusCode::FORBIDDEN,
+                    _ => StatusCode::BAD_REQUEST,
                 };
                 let mut response = (status, cap_err.to_string()).into_response();
                 if let Some(wait) = cap_err.retry_after() {
