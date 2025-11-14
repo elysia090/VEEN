@@ -724,6 +724,23 @@ impl CapabilityError {
             None
         }
     }
+
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::RateLimited { .. } => "E.RATE",
+            Self::Unauthorized { .. }
+            | Self::ClientIdRevoked { .. }
+            | Self::ClientLifetimeExceeded { .. }
+            | Self::ClientQuotaExceeded { .. }
+            | Self::ClientUsageOverflow { .. } => "E.AUTH",
+            Self::SubjectMismatch { .. }
+            | Self::StreamMismatch { .. }
+            | Self::StreamDenied { .. }
+            | Self::Expired { .. }
+            | Self::AuthRefRevoked { .. }
+            | Self::CapTokenRevoked { .. } => "E.CAP",
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
