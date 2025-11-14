@@ -380,3 +380,193 @@ fn leaf_hash_for(message: &StoredMessage) -> Result<LeafHash> {
     bytes.copy_from_slice(&digest);
     Ok(LeafHash::new(bytes))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::ensure;
+    use httpmock::prelude::*;
+    use serde_json::json;
+
+    fn sample_message(stream: &str, seq: u64) -> StoredMessage {
+        StoredMessage {
+            stream: stream.to_string(),
+            seq,
+            sent_at: 1_700_000_000,
+            client_id: "bridge-test-client".to_string(),
+            schema: Some("wallet.transfer".to_string()),
+            expires_at: None,
+            parent: None,
+            body: Some("{\"amount\":100}".to_string()),
+            body_digest: None,
+            attachments: Vec::new(),
+            auth_ref: None,
+            idem: None,
+        }
+    }
+
+    async fn start_bridge_runtime(
+        primary: &MockServer,
+        replica: &MockServer,
+        config: BridgeConfig,
+    ) -> Result<BridgeRuntime> {
+        let client = Client::builder().build()?;
+        let mut runtime = BridgeRuntime::new(client, config);
+
+        replica
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/resync")
+                    .json_body(json!({ "stream": "test/stream" }));
+                then.status(404);
+            })
+            .await;
+
+        primary
+            .mock_async(|when, then| {
+                when.method(GET).path("/metrics");
+                then.status(200)
+                    .json_body(json!({ "last_stream_seq": { "test/stream": 1 } }));
+            })
+            .await;
+
+        runtime.initialise().await?;
+        Ok(runtime)
+    }
+
+    #[tokio::test]
+    async fn replicate_applies_message_and_tracks_mmr() -> Result<()> {
+        let primary = MockServer::start_async().await;
+        let replica = MockServer::start_async().await;
+        let stream = "test/stream";
+        let message = sample_message(stream, 1);
+
+        let leaf = leaf_hash_for(&message)?;
+        let mut mmr = Mmr::new();
+        let (_, root) = mmr.append(leaf);
+        let expected_root_hex = hex::encode(root.as_bytes());
+
+        let config = BridgeConfig {
+            primary: EndpointConfig::new(primary.base_url().parse()?, None),
+            replica: EndpointConfig::new(replica.base_url().parse()?, None),
+            poll_interval: Duration::from_millis(10),
+            initial_streams: vec![stream.to_string()],
+        };
+
+        let mut runtime = start_bridge_runtime(&primary, &replica, config).await?;
+
+        primary
+            .mock_async(move |when, then| {
+                when.method(GET)
+                    .path("/stream")
+                    .query_param("stream", stream)
+                    .query_param("from", "1");
+                then.status(200).json_body(json!([message]));
+            })
+            .await;
+
+        let expected_root_request = expected_root_hex.clone();
+        let expected_root_response = expected_root_hex.clone();
+        let bridge_mock = replica
+            .mock_async(move |when, then| {
+                when.method(POST).path("/bridge").json_body(json!({
+                    "message": sample_message(stream, 1),
+                    "expected_mmr_root": expected_root_request,
+                }));
+                then.status(200).json_body(json!({
+                    "stream": stream,
+                    "seq": 1,
+                    "mmr_root": expected_root_response,
+                }));
+            })
+            .await;
+
+        runtime.replicate_once().await?;
+
+        bridge_mock.assert_hits_async(1).await;
+
+        let state = runtime
+            .streams
+            .get(stream)
+            .ok_or_else(|| anyhow!("expected stream state to exist"))?;
+        ensure!(state.next_seq == 2, "next sequence did not advance");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn initialise_discovers_streams_via_metrics() -> Result<()> {
+        let primary = MockServer::start_async().await;
+        let replica = MockServer::start_async().await;
+        let stream = "dynamic/stream";
+        let message = sample_message(stream, 1);
+
+        let leaf = leaf_hash_for(&message)?;
+        let mut mmr = Mmr::new();
+        let (_, root) = mmr.append(leaf);
+        let expected_root_hex = hex::encode(root.as_bytes());
+
+        let config = BridgeConfig {
+            primary: EndpointConfig::new(primary.base_url().parse()?, None),
+            replica: EndpointConfig::new(replica.base_url().parse()?, None),
+            poll_interval: Duration::from_millis(10),
+            initial_streams: Vec::new(),
+        };
+
+        replica
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/resync")
+                    .json_body(json!({ "stream": "dynamic/stream" }));
+                then.status(404);
+            })
+            .await;
+
+        primary
+            .mock_async(|when, then| {
+                when.method(GET).path("/metrics");
+                then.status(200)
+                    .json_body(json!({ "last_stream_seq": { "dynamic/stream": 1 } }));
+            })
+            .await;
+
+        let mut runtime = BridgeRuntime::new(Client::builder().build()?, config);
+        runtime.initialise().await?;
+
+        primary
+            .mock_async(move |when, then| {
+                when.method(GET)
+                    .path("/stream")
+                    .query_param("stream", stream)
+                    .query_param("from", "1");
+                then.status(200).json_body(json!([message]));
+            })
+            .await;
+
+        let expected_root_request = expected_root_hex.clone();
+        let expected_root_response = expected_root_hex.clone();
+        let bridge_mock = replica
+            .mock_async(move |when, then| {
+                when.method(POST).path("/bridge").json_body(json!({
+                    "message": sample_message(stream, 1),
+                    "expected_mmr_root": expected_root_request,
+                }));
+                then.status(200).json_body(json!({
+                    "stream": stream,
+                    "seq": 1,
+                    "mmr_root": expected_root_response,
+                }));
+            })
+            .await;
+
+        runtime.replicate_once().await?;
+        bridge_mock.assert_hits_async(1).await;
+
+        ensure!(
+            runtime.streams.contains_key(stream),
+            "stream was not tracked"
+        );
+
+        Ok(())
+    }
+}
