@@ -108,13 +108,7 @@ impl BridgeRuntime {
             to_bootstrap.extend(self.refresh_streams_from_primary().await?);
         } else {
             for stream in &self.config.initial_streams {
-                if self
-                    .streams
-                    .entry(stream.clone())
-                    .or_default()
-                    .next_seq
-                    == 0
-                {
+                if self.streams.entry(stream.clone()).or_default().next_seq == 0 {
                     to_bootstrap.push(stream.clone());
                 }
             }
@@ -131,13 +125,7 @@ impl BridgeRuntime {
         let metrics = self.fetch_metrics().await?;
         let mut new_streams = Vec::new();
         for stream in metrics.last_stream_seq.keys() {
-            if self
-                .streams
-                .entry(stream.clone())
-                .or_default()
-                .next_seq
-                == 0
-            {
+            if self.streams.entry(stream.clone()).or_default().next_seq == 0 {
                 new_streams.push(stream.clone());
             }
         }
@@ -153,10 +141,7 @@ impl BridgeRuntime {
         }
 
         for stream in self.streams.clone().keys().cloned().collect::<Vec<_>>() {
-            let state = self
-                .streams
-                .entry(stream.clone())
-                .or_default();
+            let state = self.streams.entry(stream.clone()).or_default();
             let next_seq = state.next_seq;
             let messages = self.fetch_primary_stream(&stream, next_seq).await?;
 
@@ -193,20 +178,14 @@ impl BridgeRuntime {
             }
             next_seq = seq.saturating_add(1);
         }
-        let entry = self
-            .streams
-            .entry(stream.to_string())
-            .or_default();
+        let entry = self.streams.entry(stream.to_string()).or_default();
         entry.mmr = mmr;
         entry.next_seq = next_seq;
         Ok(())
     }
 
     async fn apply_message(&mut self, stream: &str, message: StoredMessage) -> Result<()> {
-        let entry = self
-            .streams
-            .entry(stream.to_string())
-            .or_default();
+        let entry = self.streams.entry(stream.to_string()).or_default();
 
         if message.seq != entry.next_seq {
             bail!(
