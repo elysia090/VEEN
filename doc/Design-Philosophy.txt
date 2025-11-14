@@ -8,6 +8,7 @@ Motto:
 
 Treat networks as ephemeral as pods.
 A network should be disposable, verifiable, and reproducible.
+A network you can clone, fork, replay, and interpret.
 
 VEEN interprets this as:
 	•	networks are infrastructure with pod-like lifetimes;
@@ -21,10 +22,10 @@ The goal is to keep these principles stable while implementations, overlays, and
 
 1.1 Ephemeral fabric
 	•	A “network” is treated like a pod:
-	•	it can be created, scaled, drained, and destroyed without reconfiguration debt;
+	•	it can be created, scaled, drained, and destroyed without configuration debt;
 	•	lifetimes are short and repeatable;
-	•	the cost of replacement must be low enough that replacement is the default response to damage.
-	•	The long-lived artefacts are logs and keys, not hub processes or static configs.
+	•	the cheapest response to damage is replacement, not manual surgery.
+	•	The long-lived artefacts are logs, keys, and anchor state, not hub processes, static configs, or mutable databases.
 
 1.2 Disposability
 	•	Hubs are explicitly disposable:
@@ -32,14 +33,17 @@ The goal is to keep these principles stable while implementations, overlays, and
 	•	a hub can be replaced by another binary using the same data directory;
 	•	multiple hubs can serve the same fabric as long as they respect the core invariants.
 	•	Network topologies, pod layouts, and node assignments are allowed to change frequently; logs remain authoritative.
+	•	Operational guidelines should default to:
+	•	“replace the hub” rather than “repair the hub”;
+	•	“replay from logs” rather than “fix state in place”.
 
 1.3 Verifiability
 	•	Every accepted message is committed into an authenticated log:
 	•	leaf_hash and msg_id bind ciphertext to label, profile, and client_seq;
-	•	MMR roots and CHECKPOINT objects give compact inclusion proofs;
+	•	MMR roots and CHECKPOINT objects provide compact inclusion proofs;
 	•	RECEIPT and CHECKPOINT carry hub signatures;
-	•	anchors optionally bind those roots to external ledgers.
-	•	Any statement about “what happened” must be reconstructible and checkable from retained logs and proofs, without trusting a live hub.
+	•	anchors optionally bind MMR roots to external ledgers or trust systems.
+	•	Any statement about “what happened” must be reconstructible and checkable from retained logs and proofs, without trusting a live hub, a particular database, or a specific cluster topology.
 
 1.4 Reproducibility
 	•	For any retained log prefix, folding overlays over that prefix must:
@@ -48,7 +52,10 @@ The goal is to keep these principles stable while implementations, overlays, and
 	•	allow a new hub or client to join by replaying logs only.
 	•	Reproducibility is preferred over mutable databases:
 	•	operational state is derived, not stored ad hoc;
-	•	divergence between stored state and log-derived state is treated as an error to surface.
+	•	divergence between stored state and log-derived state is treated as an error to surface, not a normal condition to tolerate.
+	•	Cloneability and replayability are design requirements:
+	•	copying a data directory must be sufficient to reconstruct the same fabric instance;
+	•	replaying the same event sequence must yield the same overlay state.
 
 1.5 Invariance
 	•	A small set of wire objects and invariants is fixed:
@@ -58,7 +65,7 @@ The goal is to keep these principles stable while implementations, overlays, and
 	•	OS or kernel version;
 	•	container runtime (bare metal, Docker, containerd, etc.);
 	•	hub process layout or topology;
-	•	which overlays are in use.
+	•	which overlays are in use, or how many hubs participate in the fabric.
 
 1.6 Determinism
 	•	For any finite event prefix L on a label:
@@ -67,12 +74,13 @@ The goal is to keep these principles stable while implementations, overlays, and
 	•	All non-determinism is either:
 	•	forbidden, or
 	•	explicitly localized and documented (for example:
-	•	time in ttl checks,
+	•	time in TTL checks,
 	•	day-boundary limit windows,
 	•	tie-breaking using stream_seq).
 	•	Admission and error behavior for a given MSG under v0.0.1 are deterministic given:
 	•	current log state;
 	•	configured limits and profiles.
+	•	Determinism is what makes “replay” and “interpret” meaningful operations rather than approximations.
 
 1.7 Portability
 	•	The same repository and binary must:
@@ -82,7 +90,7 @@ The goal is to keep these principles stable while implementations, overlays, and
 	•	expose identical wire semantics and log behavior.
 	•	A “VEEN fabric instance” is defined by:
 	•	its logs (receipts.cborseq, payloads.cborseq, checkpoints.cborseq, anchors);
-	•	not by OS, container runtime, or process layout.
+	•	not by OS, container runtime, process layout, or cluster design.
 
 1.8 Minimality
 	•	Hubs:
@@ -94,9 +102,27 @@ The goal is to keep these principles stable while implementations, overlays, and
 	•	are pure clients of the log model;
 	•	do not require hub modifications.
 	•	The core remains small enough that:
-	•	audits are feasible;
-	•	alternative hub implementations remain practical.
+	•	audits are feasible and bounded;
+	•	alternative hub implementations remain practical;
+	•	cloning, forking, and replay are implementable without hidden dependencies.
 
+1.9 Clone, fork, replay, interpret
+
+VEEN is designed so that a network can be:
+	•	Cloned:
+	•	copying a fabric data directory and pinned keys is sufficient to stand up an equivalent fabric instance;
+	•	cloned instances can be brought up in isolated environments for testing, audit, or simulation.
+	•	Forked:
+	•	retaining a log prefix and then diverging event streams allows independent evolution from a common history;
+	•	forks are explicit at the fabric or label level and do not require bespoke migration paths.
+	•	Replayed:
+	•	overlay state is reconstructed by replaying events from zero or from a checkpoint;
+	•	replay is deterministic and yields identical results for the same inputs.
+	•	Interpreted:
+	•	new overlays can be applied to existing logs to derive new views of the same history;
+	•	no hub changes are required to interpret old logs with new overlays.
+
+These four operations are core design targets, not side effects.
 	2.	Network-as-container model
 
 2.1 Fabric instance
@@ -115,6 +141,8 @@ This is analogous to:
 	•	enforce admission and invariants;
 	•	interact with anchoring backends.
 
+Cloning or snapshotting a fabric is equivalent to copying container volumes and pinned config.
+
 2.2 Hubs as disposable nodes
 	•	A hub process is started with a data directory, profile, and listen address.
 	•	A hub can be:
@@ -123,7 +151,9 @@ This is analogous to:
 	•	replicated under supervision (systemd, k8s Deployments, k3s) with identical behavior for the same traffic and logs.
 	•	Hubs are expected to be:
 	•	short-lived compared to fabric lifetime;
-	•	rotated often for upgrades and hardening.
+	•	rotated often for upgrades, hardening, and topology changes.
+	•	Operational guidance:
+	•	“drain and replace a hub” should be routine, not exceptional.
 
 2.3 Clients as portable endpoints
 	•	A client identity (keys and state) is stored under a user-controlled path or volume.
@@ -134,7 +164,7 @@ This is analogous to:
 	•	Client correctness depends only on:
 	•	retained logs;
 	•	trust in pinned hub keys and profiles;
-	•	never on hub-local mutable databases.
+	•	never on hub-local mutable databases or in-memory caches.
 
 	3.	Wire and invariants
 
@@ -147,6 +177,8 @@ This is analogous to:
 	•	commits label_prev, label_curr, upto_seq, mmr_root, epoch, hub_sig, optional witness_sigs.
 	•	cap_token:
 	•	carries issuer_pk, subject_pk, allow, sig_chain.
+
+These objects, together with MMR structure and invariants, define what can be cloned, forked, and replayed.
 
 3.2 Hub responsibilities
 
@@ -182,7 +214,8 @@ The hub must not:
 	•	optional anchors that bind mmr_root values externally.
 	•	Hubs may rotate on-disk files and apply retention, but:
 	•	any retained prefix must remain internally consistent and re-foldable;
-	•	truncation must not silently create inconsistent prefixes.
+	•	truncation must not silently create inconsistent prefixes;
+	•	policies for retention and compaction must be documented and auditable.
 
 4.2 Folding semantics
 	•	For each overlay:
@@ -197,7 +230,7 @@ The hub must not:
 	•	which hub accepted the message;
 	•	sender IP or connection metadata;
 	•	OS, hardware, or container runtime.
-	•	Re-running fold on the same retained prefix must exactly reproduce prior overlay state.
+	•	Re-running fold on the same retained prefix must exactly reproduce prior overlay state, enabling replay and offline audit.
 
 4.3 Cross-hub consistency
 	•	Bridging and mirroring must preserve:
@@ -206,7 +239,8 @@ The hub must not:
 	•	a deterministic parent_id link back to original msg_id when mirroring.
 	•	Overlay implementations must:
 	•	treat local and bridged events under the same folding rules;
-	•	document deduplication keys (for example (source_hub, label, stream_seq) or parent_id).
+	•	document deduplication keys (for example (source_hub, label, stream_seq) or parent_id);
+	•	ensure that clones and forks of fabrics that include bridged events remain foldable without ambiguity.
 
 	5.	Overlay design constraints
 
@@ -234,14 +268,16 @@ Overlays must specify:
 	•	stream_seq alone;
 	•	leaf_hash only if needed.
 
-Any ambiguity must be resolved by documented rules. Different implementations must not diverge under the same event prefix.
+Any ambiguity must be resolved by documented rules. Different implementations must not diverge under the same event prefix, otherwise “interpret” ceases to be well-defined.
 
 5.3 Compatibility
 	•	Adding an overlay must not:
 	•	change how MSG are accepted or ordered by the hub;
 	•	require schema-specific error handling in core paths;
 	•	invalidate or reinterpret older logs.
-	•	Overlays must be strictly additive with respect to the core.
+	•	Overlays must be strictly additive with respect to the core:
+	•	new overlays can always be applied to old logs;
+	•	old overlays continue to fold correctly when new overlays are introduced.
 
 	6.	Identity overlay role
 
@@ -262,6 +298,7 @@ Any ambiguity must be resolved by documented rules. Different implementations mu
 	•	reconstructible from logs;
 	•	verifiable offline;
 	•	independent of hub internals.
+	•	Identity overlays must remain foldable on cloned, forked, and replayed fabrics.
 
 	7.	Wallet and paid operation overlay role
 
@@ -269,10 +306,10 @@ Any ambiguity must be resolved by documented rules. Different implementations mu
 	•	A wallet is defined by:
 	•	wallet_id (for example realm, context, currency, account);
 	•	its event stream of wallet operations and paid operations.
-	•	Balances, limits, and freezes are derived entirely by folding events:
+	•	Balances, limits, freezes, and adjustments are derived entirely by folding events:
 	•	debit and credit operations;
-	•	adjustments;
-	•	policy events.
+	•	policy and configuration events;
+	•	revocations and closures.
 
 7.2 No hub-side balances
 	•	Hubs do not:
@@ -281,7 +318,8 @@ Any ambiguity must be resolved by documented rules. Different implementations mu
 	•	distinguish financial messages from other payloads.
 	•	Wallet services and auditors:
 	•	recompute balances from logs;
-	•	detect overdrafts or violations using the same folding rules.
+	•	detect overdrafts or violations using the same folding rules;
+	•	can operate on cloned or forked fabric snapshots for what-if analysis.
 
 	8.	OS and container integration
 
@@ -314,6 +352,7 @@ Any ambiguity must be resolved by documented rules. Different implementations mu
 	•	flush receipts and checkpoints to disk at documented durability guarantees;
 	•	close listeners cleanly;
 	•	permit immediate restart on the same data directory and port.
+	•	Operational practices should treat hub restarts and redeployments as normal background noise, not rare events.
 
 	9.	Security model
 
@@ -338,6 +377,7 @@ Any ambiguity must be resolved by documented rules. Different implementations mu
 	•	client-level via MSG.sig over the canonical MSG encoding (without sig);
 	•	hub-level via hub_sig over RECEIPT and CHECKPOINT;
 	•	log-level via MMR roots and inclusion proofs plus optional external anchoring.
+	•	These properties must hold across clones, forks, and replays of the fabric.
 
 9.3 Revocation and rotation
 	•	Revocation is represented as overlay events and cap_token lifecycle:
@@ -348,7 +388,8 @@ Any ambiguity must be resolved by documented rules. Different implementations mu
 	•	enforce consistent decisions for new messages.
 	•	Key rotation:
 	•	is performed without changing wire semantics;
-	•	is recorded via CHECKPOINT witness signatures and overlay events.
+	•	is recorded via CHECKPOINT witness signatures and overlay events;
+	•	must remain verifiable when logs are cloned, forked, or replayed.
 
 	10.	Evolution and versioning
 
@@ -361,7 +402,8 @@ Any ambiguity must be resolved by documented rules. Different implementations mu
 	•	provide explicit upgrade paths.
 	•	Core evolution must not:
 	•	silently reinterpret v0.0.1 logs;
-	•	break deterministic folding for pre-existing schemas.
+	•	break deterministic folding for pre-existing schemas;
+	•	invalidate the ability to clone, fork, replay, and interpret v0.0.1 fabrics.
 
 10.2 Overlay evolution
 	•	New overlays are added by:
@@ -373,7 +415,8 @@ Any ambiguity must be resolved by documented rules. Different implementations mu
 	•	introduce new fields while keeping old behavior well-defined.
 	•	Overlay evolution must:
 	•	be replayable from combined logs;
-	•	specify precedence and tie-breaking between versions.
+	•	specify precedence and tie-breaking between versions;
+	•	preserve interpretability of past events.
 
 	11.	Non-goals
 
@@ -389,7 +432,10 @@ VEEN aims to be:
 	•	encrypted event transport;
 	•	verifiable logging;
 	•	overlay-defined state;
-	•	a network layer that is as ephemeral as pods but as auditable as a ledger.
+	•	a network layer that is:
+	•	as ephemeral as pods in deployment;
+	•	as auditable as a ledger in history;
+	•	cloneable, forkable, replayable, and re-interpretable in operation.
 
 	12.	Summary axis
 
@@ -399,5 +445,10 @@ The design axis that must not drift is:
 	•	Make hubs disposable containers that attach logs to networks and enforce invariants.
 	•	Keep all higher-level semantics (identity, wallet, RPC, CRDT, operations) as deterministic folds over logs.
 	•	Require OS and container independence: Linux, WSL2, Docker, k8s, and k3s all yield identical semantics for the same logs.
+	•	Ensure that any conforming implementation supports:
+	•	cloning fabrics by copying data;
+	•	forking fabrics by splitting histories;
+	•	replaying fabrics by folding logs;
+	•	interpreting fabrics by adding overlays.
 
-As long as these properties hold, networks can be treated as ephemeral as pods: disposable in deployment, verifiable in audit, and reproducible in operation.
+As long as these properties hold, networks can be treated as ephemeral as pods: disposable in deployment, verifiable in audit, reproducible under replay, and interpretable under new overlays.
