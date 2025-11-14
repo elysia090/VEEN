@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "Command-line client scaffold for the VEEN reference implementation."
 
+[[bin]]
+name = "veen"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
 ciborium.workspace = true
