@@ -277,4 +277,34 @@ mod tests {
             other => panic!("unexpected verification result: {other:?}"),
         }
     }
+
+    #[test]
+    fn stream_id_from_label_accepts_hex_identifier() {
+        let stream = sample_stream_id(0x42);
+        let hex = hex::encode(stream.as_ref());
+        let parsed = stream_id_from_label(&hex).expect("hex stream id");
+        assert_eq!(parsed, stream);
+
+        let upper = hex.to_uppercase();
+        let parsed_upper = stream_id_from_label(&upper).expect("uppercase hex stream id");
+        assert_eq!(parsed_upper, stream);
+    }
+
+    #[test]
+    fn stream_id_from_label_derives_from_text_label() {
+        let label = "core/main";
+        let derived = stream_id_from_label(label).expect("derived stream id");
+        let expected = StreamId::from(super::ht("cli/stream", label.as_bytes()));
+        assert_eq!(derived, expected);
+    }
+
+    #[test]
+    fn stream_id_from_label_handles_non_hex_64_char_input() {
+        let mut label = hex::encode(sample_stream_id(0x99).as_ref());
+        label.replace_range(10..11, "g");
+
+        let derived = stream_id_from_label(&label).expect("derived stream id");
+        let expected = StreamId::from(super::ht("cli/stream", label.as_bytes()));
+        assert_eq!(derived, expected);
+    }
 }
