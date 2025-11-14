@@ -40,8 +40,8 @@ use veen_core::{
         Checkpoint,
     },
     AuthorityPolicy, AuthorityRecord, CapToken, CapTokenAllow, CapTokenRate, LabelClassRecord,
-    Profile, RealmId, RevocationKind, RevocationRecord, RevocationTarget, SchemaDescriptor,
-    SchemaId, SchemaOwner, TransferId, WalletId, WalletTransferEvent,
+    OperationId, Profile, RealmId, RevocationKind, RevocationRecord, RevocationTarget,
+    SchemaDescriptor, SchemaId, SchemaOwner, TransferId, WalletId, WalletTransferEvent,
 };
 use veen_core::{h, ht};
 use veen_core::{
@@ -124,6 +124,9 @@ enum Command {
     /// Wallet overlay helpers.
     #[command(subcommand)]
     Wallet(WalletCommand),
+    /// Operation overlay helpers.
+    #[command(subcommand)]
+    Operation(OperationCommand),
     /// Revocation helpers.
     #[command(subcommand)]
     Revoke(RevokeCommand),
@@ -254,6 +257,13 @@ enum SchemaCommand {
 enum WalletCommand {
     /// Emit a wallet transfer event.
     Transfer(WalletTransferArgs),
+}
+
+#[derive(Subcommand)]
+enum OperationCommand {
+    /// Compute derived identifiers for stored operation messages.
+    #[command(name = "id")]
+    Id(OperationIdArgs),
 }
 
 #[derive(Subcommand)]
@@ -600,6 +610,12 @@ struct WalletTransferArgs {
     transfer_id: Option<String>,
     #[arg(long)]
     metadata: Option<String>,
+}
+
+#[derive(Args)]
+struct OperationIdArgs {
+    #[arg(long)]
+    bundle: PathBuf,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -1239,6 +1255,9 @@ async fn main() -> Result<()> {
         },
         Command::Wallet(cmd) => match cmd {
             WalletCommand::Transfer(args) => handle_wallet_transfer(args).await,
+        },
+        Command::Operation(cmd) => match cmd {
+            OperationCommand::Id(args) => handle_operation_id(args).await,
         },
         Command::Revoke(cmd) => match cmd {
             RevokeCommand::Publish(args) => handle_revoke_publish(args).await,
@@ -2639,6 +2658,18 @@ async fn handle_wallet_transfer_remote(
     println!("  amount: {}", args.amount);
     println!("  transfer_id: {}", hex::encode(transfer_id.as_bytes()));
     Ok(())
+}
+
+async fn handle_operation_id(args: OperationIdArgs) -> Result<()> {
+    let operation_id = operation_id_from_bundle(&args.bundle).await?;
+    println!("operation_id: {}", hex::encode(operation_id.as_bytes()));
+    Ok(())
+}
+
+async fn operation_id_from_bundle(path: &Path) -> Result<OperationId> {
+    let message: StoredMessage = read_json_file(path).await?;
+    let leaf_hash = compute_message_leaf_hash(&message)?;
+    Ok(OperationId::from_leaf_hash(&leaf_hash))
 }
 
 async fn handle_revoke_publish(args: RevokePublishArgs) -> Result<()> {
@@ -4098,6 +4129,36 @@ mod tests {
         let signing_key_bytes: [u8; 32] = secret.signing_key.as_ref().try_into().unwrap();
         let signing_key = SigningKey::from_bytes(&signing_key_bytes);
         verify_envelope_signature(&envelope, schema_wallet_transfer(), &signing_key)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn operation_id_helper_matches_manual_hash() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("message.json");
+        let message = StoredMessage {
+            stream: "core/example".to_string(),
+            seq: 5,
+            sent_at: 1_700_000_000,
+            client_id: hex::encode([0xAAu8; 32]),
+            schema: Some("schema-id".to_string()),
+            expires_at: Some(1_700_000_600),
+            parent: None,
+            body: Some("{\"key\":\"value\"}".to_string()),
+            body_digest: None,
+            attachments: Vec::new(),
+            auth_ref: None,
+            idem: None,
+        };
+
+        write_json_file(&path, &message).await?;
+
+        let expected_leaf = compute_message_leaf_hash(&message)?;
+        let expected = OperationId::from_leaf_hash(&expected_leaf);
+
+        let computed = operation_id_from_bundle(&path).await?;
+        assert_eq!(computed.as_bytes(), expected.as_bytes());
 
         Ok(())
     }
