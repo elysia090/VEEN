@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto;
 use std::fmt;
+use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -164,6 +165,12 @@ enum HubCommand {
     Health(HubHealthArgs),
     /// Fetch hub metrics.
     Metrics(HubMetricsArgs),
+    /// Fetch the latest checkpoint from a hub.
+    #[command(name = "checkpoint-latest")]
+    CheckpointLatest(HubCheckpointLatestArgs),
+    /// Fetch checkpoints within an epoch range from a hub.
+    #[command(name = "checkpoint-range")]
+    CheckpointRange(HubCheckpointRangeArgs),
 }
 
 #[derive(Subcommand)]
@@ -376,6 +383,22 @@ struct HubMetricsArgs {
     hub: String,
     #[arg(long)]
     raw: bool,
+}
+
+#[derive(Args)]
+struct HubCheckpointLatestArgs {
+    #[arg(long)]
+    hub: String,
+}
+
+#[derive(Args)]
+struct HubCheckpointRangeArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long, value_name = "EPOCH")]
+    from_epoch: Option<u64>,
+    #[arg(long, value_name = "EPOCH")]
+    to_epoch: Option<u64>,
 }
 
 #[derive(Args)]
@@ -1155,6 +1178,12 @@ async fn main() -> Result<()> {
             HubCommand::VerifyRotation(args) => handle_hub_verify_rotation(args).await,
             HubCommand::Health(args) => handle_hub_health(args).await,
             HubCommand::Metrics(args) => handle_hub_metrics(args).await,
+            HubCommand::CheckpointLatest(args) => {
+                handle_hub_checkpoint_latest(args).await.map(|_| ())
+            }
+            HubCommand::CheckpointRange(args) => {
+                handle_hub_checkpoint_range(args).await.map(|_| ())
+            }
         },
         Command::Keygen(args) => handle_keygen(args).await,
         Command::Id(cmd) => match cmd {
@@ -1471,6 +1500,70 @@ async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn handle_hub_checkpoint_latest(args: HubCheckpointLatestArgs) -> Result<Checkpoint> {
+    let client = match parse_hub_reference(&args.hub)? {
+        HubReference::Local(_) => {
+            bail!("checkpoint commands require an HTTP hub endpoint (e.g. http://host:port)")
+        }
+        HubReference::Remote(client) => client,
+    };
+
+    let checkpoint: Checkpoint = client.get_cbor("/checkpoint_latest", &[]).await?;
+    print_checkpoint_summary(&checkpoint);
+    Ok(checkpoint)
+}
+
+async fn handle_hub_checkpoint_range(args: HubCheckpointRangeArgs) -> Result<Vec<Checkpoint>> {
+    let client = match parse_hub_reference(&args.hub)? {
+        HubReference::Local(_) => {
+            bail!("checkpoint commands require an HTTP hub endpoint (e.g. http://host:port)")
+        }
+        HubReference::Remote(client) => client,
+    };
+
+    let mut query = Vec::new();
+    if let Some(from) = args.from_epoch {
+        query.push(("from_epoch", from.to_string()));
+    }
+    if let Some(to) = args.to_epoch {
+        query.push(("to_epoch", to.to_string()));
+    }
+
+    let checkpoints: Vec<Checkpoint> = client.get_cbor("/checkpoint_range", &query).await?;
+    if checkpoints.is_empty() {
+        println!("no checkpoints returned");
+    } else {
+        for (index, checkpoint) in checkpoints.iter().enumerate() {
+            println!("checkpoint[{index}]:");
+            print_checkpoint_summary(checkpoint);
+        }
+    }
+    Ok(checkpoints)
+}
+
+fn print_checkpoint_summary(checkpoint: &Checkpoint) {
+    println!("ver: {}", checkpoint.ver);
+    println!(
+        "label_prev: {}",
+        hex::encode(checkpoint.label_prev.as_ref())
+    );
+    println!(
+        "label_curr: {}",
+        hex::encode(checkpoint.label_curr.as_ref())
+    );
+    println!("upto_seq: {}", checkpoint.upto_seq);
+    println!("epoch: {}", checkpoint.epoch);
+    println!("mmr_root: {}", hex::encode(checkpoint.mmr_root.as_ref()));
+    println!(
+        "witness_sigs: {}",
+        checkpoint
+            .witness_sigs
+            .as_ref()
+            .map(|w| w.len())
+            .unwrap_or(0)
+    );
 }
 
 async fn handle_hub_tls_info(args: HubTlsInfoArgs) -> Result<()> {
@@ -3350,6 +3443,7 @@ enum HubReference {
 mod tests {
     use super::*;
     use ciborium::de::from_reader;
+    use ciborium::ser::into_writer;
     use ed25519_dalek::{Signature, Verifier};
     use hyper::body::to_bytes;
     use hyper::service::{make_service_fn, service_fn};
@@ -3363,6 +3457,7 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::mpsc;
     use tokio::time::sleep;
+    use veen_core::wire::types::{MmrRoot, Signature64};
     use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
     use veen_hub::runtime::HubRuntime;
 
@@ -3527,6 +3622,75 @@ mod tests {
             .map(|label| label.last_stream_seq)
             .unwrap_or(0);
         assert_eq!(seq, 1);
+
+        runtime.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_checkpoint_fetch() -> anyhow::Result<()> {
+        let hub_dir = tempdir()?;
+
+        let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let listen: SocketAddr = socket.local_addr()?;
+        drop(socket);
+        let config = HubRuntimeConfig::from_sources(
+            listen,
+            hub_dir.path().to_path_buf(),
+            None,
+            HubRole::Primary,
+            HubConfigOverrides {
+                capability_gating_enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let runtime = HubRuntime::start(config).await?;
+        let hub_url = format!("http://{}", listen);
+
+        sleep(Duration::from_millis(50)).await;
+
+        let checkpoint1 = Checkpoint {
+            ver: CHECKPOINT_VERSION,
+            label_prev: Label::from([0x11; 32]),
+            label_curr: Label::from([0x22; 32]),
+            upto_seq: 5,
+            mmr_root: MmrRoot::new([0x33; 32]),
+            epoch: 1,
+            hub_sig: Signature64::new([0x44; 64]),
+            witness_sigs: None,
+        };
+        let checkpoint2 = Checkpoint {
+            ver: CHECKPOINT_VERSION,
+            label_prev: Label::from([0x55; 32]),
+            label_curr: Label::from([0x66; 32]),
+            upto_seq: 9,
+            mmr_root: MmrRoot::new([0x77; 32]),
+            epoch: 2,
+            hub_sig: Signature64::new([0x88; 64]),
+            witness_sigs: Some(vec![Signature64::new([0x99; 64])]),
+        };
+
+        let mut encoded = Vec::new();
+        into_writer(&checkpoint1, &mut encoded)?;
+        into_writer(&checkpoint2, &mut encoded)?;
+        fs::write(hub_dir.path().join(CHECKPOINTS_FILE), &encoded).await?;
+
+        sleep(Duration::from_millis(50)).await;
+
+        let latest = handle_hub_checkpoint_latest(HubCheckpointLatestArgs {
+            hub: hub_url.clone(),
+        })
+        .await?;
+        assert_eq!(latest, checkpoint2);
+
+        let range = handle_hub_checkpoint_range(HubCheckpointRangeArgs {
+            hub: hub_url.clone(),
+            from_epoch: Some(1),
+            to_epoch: Some(3),
+        })
+        .await?;
+        assert_eq!(range, vec![checkpoint1.clone(), checkpoint2.clone()]);
 
         runtime.shutdown().await?;
         Ok(())
@@ -3870,6 +4034,37 @@ impl HubHttpClient {
             .json::<T>()
             .await
             .context("decoding hub response body")
+    }
+
+    async fn get_cbor<T>(&self, path: &str, query: &[(&str, String)]) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let mut url = self.url(path)?;
+        if !query.is_empty() {
+            url.query_pairs_mut()
+                .extend_pairs(query.iter().map(|(k, v)| (*k, v.as_str())));
+        }
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .context("performing hub GET request")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to decode response>".to_string());
+            bail!("hub GET {path} failed with {status}: {body}");
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .context("reading hub response body")?;
+        let mut cursor = Cursor::new(bytes.as_ref());
+        ciborium::de::from_reader(&mut cursor).context("decoding hub response body")
     }
 
     async fn post_json<T, R>(&self, path: &str, body: &T) -> Result<R>
