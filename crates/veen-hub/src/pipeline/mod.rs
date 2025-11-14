@@ -21,8 +21,11 @@ use veen_core::revocation::{
     RevocationView,
 };
 use veen_core::wire::checkpoint::Checkpoint;
-use veen_core::wire::mmr::Mmr;
-use veen_core::wire::types::{AuthRef, ClientId, LeafHash, MmrRoot};
+use veen_core::wire::{
+    mmr::Mmr,
+    proof::{Direction, MmrPathNode, MmrProof},
+    types::{AuthRef, ClientId, LeafHash, MmrNode, MmrRoot},
+};
 use veen_core::{
     cap_stream_id_from_label, cap_token_from_cbor, CapTokenRate, StreamIdParseError,
     CAP_TOKEN_VERSION,
@@ -406,20 +409,50 @@ impl HubPipeline {
         persist_revocations(&self.storage, &guard.revocation_log).await
     }
 
-    pub async fn stream(&self, stream: &str, from: u64) -> Result<Vec<StoredMessage>> {
+    pub async fn stream(
+        &self,
+        stream: &str,
+        from: u64,
+        with_proof: bool,
+    ) -> Result<StreamResponse> {
         let guard = self.inner.lock().await;
         let runtime = guard
             .streams
             .get(stream)
             .ok_or_else(|| anyhow!("stream {stream} has no stored messages"))?;
-        let messages = runtime
-            .state
-            .messages
-            .iter()
-            .filter(|msg| msg.seq >= from)
-            .cloned()
-            .collect();
-        Ok(messages)
+
+        if !with_proof {
+            let messages = runtime
+                .state
+                .messages
+                .iter()
+                .filter(|msg| msg.seq >= from)
+                .cloned()
+                .collect();
+            return Ok(StreamResponse::Messages(messages));
+        }
+
+        let mut mmr = Mmr::new();
+        let mut proven = Vec::new();
+        for message in &runtime.state.messages {
+            let leaf = leaf_hash_for(message)?;
+            let (_, root, proof) = mmr.append_with_proof(leaf);
+            if message.seq >= from {
+                let receipt = StreamReceipt {
+                    seq: message.seq,
+                    leaf_hash: hex::encode(leaf.as_bytes()),
+                    mmr_root: hex::encode(root.as_bytes()),
+                    hub_ts: message.sent_at,
+                };
+                proven.push(StreamMessageWithProof {
+                    message: message.clone(),
+                    receipt,
+                    proof: StreamProof::from(proof),
+                });
+            }
+        }
+
+        Ok(StreamResponse::Proven(proven))
     }
 
     pub async fn resync(&self, stream: &str) -> Result<HubStreamState> {
@@ -621,6 +654,104 @@ pub struct AnchorRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct HubStreamState {
     pub messages: Vec<StoredMessage>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StreamResponse {
+    Messages(Vec<StoredMessage>),
+    Proven(Vec<StreamMessageWithProof>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamReceipt {
+    pub seq: u64,
+    pub leaf_hash: String,
+    pub mmr_root: String,
+    pub hub_ts: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamMessageWithProof {
+    pub message: StoredMessage,
+    pub receipt: StreamReceipt,
+    pub proof: StreamProof,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamProofNode {
+    pub dir: Direction,
+    pub sib: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamProof {
+    pub ver: u64,
+    pub leaf_hash: String,
+    pub path: Vec<StreamProofNode>,
+    pub peaks_after: Vec<String>,
+}
+
+impl From<MmrProof> for StreamProof {
+    fn from(proof: MmrProof) -> Self {
+        let path = proof
+            .path
+            .into_iter()
+            .map(|node| StreamProofNode {
+                dir: node.dir,
+                sib: hex::encode(node.sib.as_bytes()),
+            })
+            .collect();
+        let peaks_after = proof
+            .peaks_after
+            .into_iter()
+            .map(|peak| hex::encode(peak.as_bytes()))
+            .collect();
+        Self {
+            ver: proof.ver,
+            leaf_hash: hex::encode(proof.leaf_hash.as_bytes()),
+            path,
+            peaks_after,
+        }
+    }
+}
+
+impl StreamProof {
+    pub fn try_into_mmr(self) -> Result<MmrProof> {
+        let leaf_bytes = hex::decode(&self.leaf_hash)
+            .with_context(|| format!("decoding leaf hash {}", self.leaf_hash))?;
+        let leaf = LeafHash::from_slice(&leaf_bytes)
+            .with_context(|| format!("parsing leaf hash {}", self.leaf_hash))?;
+
+        let path = self
+            .path
+            .into_iter()
+            .map(|node| {
+                let sib_bytes = hex::decode(&node.sib)
+                    .with_context(|| format!("decoding path sibling {}", node.sib))?;
+                let sib = MmrNode::from_slice(&sib_bytes)
+                    .with_context(|| format!("parsing path sibling {}", node.sib))?;
+                Ok(MmrPathNode { dir: node.dir, sib })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let peaks_after = self
+            .peaks_after
+            .into_iter()
+            .map(|peak| {
+                let bytes =
+                    hex::decode(&peak).with_context(|| format!("decoding peak hash {}", peak))?;
+                MmrNode::from_slice(&bytes).with_context(|| format!("parsing peak hash {}", peak))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(MmrProof {
+            ver: self.ver,
+            leaf_hash: leaf,
+            path,
+            peaks_after,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

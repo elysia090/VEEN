@@ -32,7 +32,13 @@ use veen_core::{
     cap_stream_id_from_label,
     hub::{HubId, HUB_ID_LEN},
     label::{Label, StreamId},
-    wire::{checkpoint::CHECKPOINT_VERSION, Checkpoint, ClientId},
+    wire::{
+        checkpoint::CHECKPOINT_VERSION,
+        mmr::Mmr,
+        proof::MmrProof,
+        types::{ClientId, LeafHash, MmrRoot},
+        Checkpoint,
+    },
     AuthorityPolicy, AuthorityRecord, CapToken, CapTokenAllow, CapTokenRate, LabelClassRecord,
     Profile, RealmId, RevocationKind, RevocationRecord, RevocationTarget, SchemaDescriptor,
     SchemaId, SchemaOwner, TransferId, WalletId, WalletTransferEvent,
@@ -45,8 +51,9 @@ use veen_core::{
 use veen_hub::pipeline::{
     AttachmentUpload, AuthorizeResponse as RemoteAuthorizeResponse,
     HubStreamState as RemoteHubStreamState, StoredAttachment as RemoteStoredAttachment,
-    StoredMessage as RemoteStoredMessage, SubmitRequest as RemoteSubmitRequest,
-    SubmitResponse as RemoteSubmitResponse,
+    StoredMessage as RemoteStoredMessage, StreamMessageWithProof as RemoteStreamMessageWithProof,
+    StreamProof as RemoteStreamProof, StreamReceipt as RemoteStreamReceipt,
+    SubmitRequest as RemoteSubmitRequest, SubmitResponse as RemoteSubmitResponse,
 };
 
 const CLIENT_KEY_VERSION: u8 = 1;
@@ -1063,6 +1070,14 @@ struct StoredAttachment {
     stored_path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StreamReceipt {
+    seq: u64,
+    leaf_hash: String,
+    mmr_root: String,
+    hub_ts: u64,
+}
+
 impl From<RemoteStoredAttachment> for StoredAttachment {
     fn from(remote: RemoteStoredAttachment) -> Self {
         Self {
@@ -1070,6 +1085,17 @@ impl From<RemoteStoredAttachment> for StoredAttachment {
             digest: remote.digest,
             size: remote.size,
             stored_path: remote.stored_path,
+        }
+    }
+}
+
+impl From<RemoteStreamReceipt> for StreamReceipt {
+    fn from(remote: RemoteStreamReceipt) -> Self {
+        Self {
+            seq: remote.seq,
+            leaf_hash: remote.leaf_hash,
+            mmr_root: remote.mmr_root,
+            hub_ts: remote.hub_ts,
         }
     }
 }
@@ -2031,48 +2057,43 @@ async fn handle_stream(args: StreamArgs) -> Result<()> {
     match hub {
         HubReference::Local(data_dir) => {
             let stream_state = load_stream_state(&data_dir, &args.stream).await?;
+            if args.with_proof {
+                let mut emitted = false;
+                let mut mmr = Mmr::new();
+                for message in &stream_state.messages {
+                    let leaf = compute_message_leaf_hash(message)?;
+                    let (_, root, mmr_proof) = mmr.append_with_proof(leaf);
+                    if message.seq >= args.from {
+                        emitted = true;
+                        print_stream_message(message);
+                        let receipt = StreamReceipt {
+                            seq: message.seq,
+                            leaf_hash: hex::encode(leaf.as_bytes()),
+                            mmr_root: hex::encode(root.as_bytes()),
+                            hub_ts: message.sent_at,
+                        };
+                        validate_stream_proof(message, &receipt, &mmr_proof)?;
+                        print_stream_receipt(&receipt);
+                        let proof_wire = RemoteStreamProof::from(mmr_proof.clone());
+                        print_stream_proof(&proof_wire)?;
+                        println!("---");
+                    }
+                }
+
+                if !emitted {
+                    println!(
+                        "no messages in stream {} from seq {}",
+                        args.stream, args.from
+                    );
+                }
+
+                return Ok(());
+            }
 
             let mut emitted = false;
             for message in stream_state.messages.iter().filter(|m| m.seq >= args.from) {
                 emitted = true;
-                println!("seq: {}", message.seq);
-                println!("sent_at: {}", message.sent_at);
-                println!("client_id: {}", message.client_id);
-                if let Some(ref schema) = message.schema {
-                    println!("schema: {schema}");
-                }
-                if let Some(expires_at) = message.expires_at {
-                    println!("expires_at: {expires_at}");
-                }
-                if let Some(ref parent) = message.parent {
-                    println!("parent: {parent}");
-                }
-                if let Some(ref auth_ref) = message.auth_ref {
-                    println!("auth_ref: {auth_ref}");
-                }
-                match (&message.body, &message.body_digest) {
-                    (Some(body), _) => println!("body: {body}"),
-                    (None, Some(digest)) => println!("body_digest: {digest}"),
-                    _ => println!("body: (omitted)"),
-                }
-                if message.attachments.is_empty() {
-                    println!("attachments: (none)");
-                } else {
-                    println!("attachments:");
-                    for attachment in &message.attachments {
-                        println!(
-                            "  {} ({} bytes) digest={} stored={}",
-                            attachment.name,
-                            attachment.size,
-                            attachment.digest,
-                            attachment.stored_path
-                        );
-                    }
-                }
-                if args.with_proof {
-                    let proof = compute_message_proof(message)?;
-                    println!("proof: {proof}");
-                }
+                print_stream_message(message);
                 println!("---");
             }
 
@@ -2095,6 +2116,39 @@ async fn handle_stream_remote(client: HubHttpClient, args: StreamArgs) -> Result
         query.push(("from", args.from.to_string()));
     }
 
+    if args.with_proof {
+        query.push(("with_proof", "true".to_string()));
+        let remote_messages: Vec<RemoteStreamMessageWithProof> = client
+            .get_json("/stream", &query)
+            .await
+            .context("fetching stream messages")?;
+
+        if remote_messages.is_empty() {
+            println!(
+                "no messages in stream {} from seq {}",
+                args.stream, args.from
+            );
+            return Ok(());
+        }
+
+        for remote in remote_messages {
+            let message: StoredMessage = remote.message.into();
+            let receipt = StreamReceipt::from(remote.receipt);
+            let proof_wire = remote.proof;
+            let proof = proof_wire
+                .clone()
+                .try_into_mmr()
+                .context("decoding stream proof")?;
+            print_stream_message(&message);
+            validate_stream_proof(&message, &receipt, &proof)?;
+            print_stream_receipt(&receipt);
+            print_stream_proof(&proof_wire)?;
+            println!("---");
+        }
+
+        return Ok(());
+    }
+
     let remote_messages: Vec<RemoteStoredMessage> = client
         .get_json("/stream", &query)
         .await
@@ -2110,41 +2164,7 @@ async fn handle_stream_remote(client: HubHttpClient, args: StreamArgs) -> Result
 
     for remote in remote_messages {
         let message: StoredMessage = remote.into();
-        println!("seq: {}", message.seq);
-        println!("sent_at: {}", message.sent_at);
-        println!("client_id: {}", message.client_id);
-        if let Some(ref schema) = message.schema {
-            println!("schema: {schema}");
-        }
-        if let Some(expires_at) = message.expires_at {
-            println!("expires_at: {expires_at}");
-        }
-        if let Some(ref parent) = message.parent {
-            println!("parent: {parent}");
-        }
-        if let Some(ref auth_ref) = message.auth_ref {
-            println!("auth_ref: {auth_ref}");
-        }
-        match (&message.body, &message.body_digest) {
-            (Some(body), _) => println!("body: {body}"),
-            (None, Some(digest)) => println!("body_digest: {digest}"),
-            _ => println!("body: (omitted)"),
-        }
-        if message.attachments.is_empty() {
-            println!("attachments: (none)");
-        } else {
-            println!("attachments:");
-            for attachment in &message.attachments {
-                println!(
-                    "  {} ({} bytes) digest={} stored={}",
-                    attachment.name, attachment.size, attachment.digest, attachment.stored_path
-                );
-            }
-        }
-        if args.with_proof {
-            let proof = compute_message_proof(&message)?;
-            println!("proof: {proof}");
-        }
+        print_stream_message(&message);
         println!("---");
     }
 
@@ -3365,9 +3385,100 @@ fn compute_digest_hex(data: &[u8]) -> String {
     hex::encode(digest)
 }
 
-fn compute_message_proof(message: &StoredMessage) -> Result<String> {
-    let encoded = serde_json::to_vec(message).context("encoding message for proof computation")?;
-    Ok(compute_digest_hex(&encoded))
+fn compute_message_leaf_hash(message: &StoredMessage) -> Result<LeafHash> {
+    let encoded = serde_json::to_vec(message).context("encoding message for leaf hash")?;
+    let digest = Sha256::digest(&encoded);
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&digest);
+    Ok(LeafHash::new(bytes))
+}
+
+fn print_stream_message(message: &StoredMessage) {
+    println!("seq: {}", message.seq);
+    println!("sent_at: {}", message.sent_at);
+    println!("client_id: {}", message.client_id);
+    if let Some(ref schema) = message.schema {
+        println!("schema: {schema}");
+    }
+    if let Some(expires_at) = message.expires_at {
+        println!("expires_at: {expires_at}");
+    }
+    if let Some(ref parent) = message.parent {
+        println!("parent: {parent}");
+    }
+    if let Some(ref auth_ref) = message.auth_ref {
+        println!("auth_ref: {auth_ref}");
+    }
+    match (&message.body, &message.body_digest) {
+        (Some(body), _) => println!("body: {body}"),
+        (None, Some(digest)) => println!("body_digest: {digest}"),
+        _ => println!("body: (omitted)"),
+    }
+    if message.attachments.is_empty() {
+        println!("attachments: (none)");
+    } else {
+        println!("attachments:");
+        for attachment in &message.attachments {
+            println!(
+                "  {} ({} bytes) digest={} stored={}",
+                attachment.name, attachment.size, attachment.digest, attachment.stored_path
+            );
+        }
+    }
+}
+
+fn print_stream_receipt(receipt: &StreamReceipt) {
+    println!("receipt.seq: {}", receipt.seq);
+    println!("receipt.hub_ts: {}", receipt.hub_ts);
+    println!("receipt.leaf_hash: {}", receipt.leaf_hash);
+    println!("receipt.mmr_root: {}", receipt.mmr_root);
+}
+
+fn print_stream_proof(proof: &RemoteStreamProof) -> Result<()> {
+    let proof_json = serde_json::to_string(proof).context("serializing proof for display")?;
+    println!("proof: {proof_json}");
+    Ok(())
+}
+
+fn validate_stream_proof(
+    message: &StoredMessage,
+    receipt: &StreamReceipt,
+    proof: &MmrProof,
+) -> Result<MmrRoot> {
+    let computed_leaf = compute_message_leaf_hash(message)?;
+    let expected_leaf_hex = hex::encode(computed_leaf.as_bytes());
+    if receipt.leaf_hash != expected_leaf_hex {
+        bail!(
+            "receipt leaf hash mismatch for {}#{}: expected {}, got {}",
+            message.stream,
+            message.seq,
+            expected_leaf_hex,
+            receipt.leaf_hash
+        );
+    }
+
+    if proof.leaf_hash != computed_leaf {
+        bail!(
+            "proof leaf hash mismatch for {}#{}",
+            message.stream,
+            message.seq
+        );
+    }
+
+    let mmr_root_bytes = hex::decode(&receipt.mmr_root)
+        .with_context(|| format!("decoding mmr_root for {}#{}", message.stream, message.seq))?;
+    let mmr_root = MmrRoot::from_slice(&mmr_root_bytes)
+        .with_context(|| format!("parsing mmr_root for {}#{}", message.stream, message.seq))?;
+
+    if !proof.verify(&mmr_root) {
+        bail!(
+            "mmr proof verification failed for {}#{}",
+            message.stream,
+            message.seq
+        );
+    }
+
+    Ok(mmr_root)
 }
 
 fn parse_cap_rate(input: &str) -> Result<CapTokenRate> {
@@ -3459,6 +3570,7 @@ mod tests {
     use tokio::time::sleep;
     use veen_core::wire::types::{MmrRoot, Signature64};
     use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
+    use veen_hub::pipeline::StreamResponse;
     use veen_hub::runtime::HubRuntime;
 
     async fn spawn_cbor_capture_server(
@@ -3622,6 +3734,86 @@ mod tests {
             .map(|label| label.last_stream_seq)
             .unwrap_or(0);
         assert_eq!(seq, 1);
+
+        runtime.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stream_with_proofs_detects_tampering() -> anyhow::Result<()> {
+        let hub_dir = tempdir()?;
+        let client_dir = tempdir()?;
+
+        let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let listen: SocketAddr = socket.local_addr()?;
+        drop(socket);
+        let config = HubRuntimeConfig::from_sources(
+            listen,
+            hub_dir.path().to_path_buf(),
+            None,
+            HubRole::Primary,
+            HubConfigOverrides {
+                capability_gating_enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let runtime = HubRuntime::start(config).await?;
+        let hub_url = format!("http://{}", listen);
+
+        sleep(Duration::from_millis(50)).await;
+
+        handle_keygen(KeygenArgs {
+            out: client_dir.path().to_path_buf(),
+        })
+        .await?;
+
+        handle_send(SendArgs {
+            hub: hub_url.clone(),
+            client: client_dir.path().to_path_buf(),
+            stream: "proofs".to_string(),
+            body: json!({ "msg": "hello" }).to_string(),
+            schema: None,
+            expires_at: None,
+            cap: None,
+            parent: None,
+            attach: Vec::new(),
+            no_store_body: false,
+        })
+        .await?;
+
+        handle_stream(StreamArgs {
+            hub: hub_url.clone(),
+            client: client_dir.path().to_path_buf(),
+            stream: "proofs".to_string(),
+            from: 0,
+            with_proof: true,
+        })
+        .await?;
+
+        let mut proven = match runtime.pipeline().stream("proofs", 0, true).await? {
+            StreamResponse::Proven(items) => items,
+            StreamResponse::Messages(_) => bail!("expected proofs in stream response"),
+        };
+
+        assert_eq!(proven.len(), 1);
+        let original = proven.pop().expect("message");
+
+        let mut tampered_receipt = StreamReceipt::from(original.receipt.clone());
+        let mut root_bytes = hex::decode(&tampered_receipt.mmr_root)?;
+        root_bytes[0] ^= 0xFF;
+        tampered_receipt.mmr_root = hex::encode(root_bytes);
+
+        let message: StoredMessage = original.message.into();
+        let receipt = tampered_receipt;
+        let proof = original
+            .proof
+            .clone()
+            .try_into_mmr()
+            .context("decoding stream proof")?;
+        let err =
+            validate_stream_proof(&message, &receipt, &proof).expect_err("tampered proof fails");
+        assert!(err.to_string().contains("mmr proof verification failed"));
 
         runtime.shutdown().await?;
         Ok(())

@@ -1,3 +1,4 @@
+use crate::wire::proof::{Direction, MmrPathNode, MmrProof, PROOF_VERSION};
 use crate::wire::types::{LeafHash, MmrNode, MmrRoot};
 
 /// Maintains the per-label Merkle Mountain Range state as described in spec-1.
@@ -41,6 +42,37 @@ impl Mmr {
         self.peaks.push(carry);
         let root = MmrRoot::from_peaks(&self.peaks).expect("peaks must be non-empty");
         (self.seq, root)
+    }
+
+    /// Appends a new leaf hash and returns the updated `(stream_seq, mmr_root, proof)` tuple.
+    pub fn append_with_proof(&mut self, leaf: LeafHash) -> (u64, MmrRoot, MmrProof) {
+        self.seq = self.seq.checked_add(1).expect("stream_seq overflow");
+        let mut carry = MmrNode::from(leaf);
+        let mut seq = self.seq;
+        let mut path = Vec::new();
+
+        while seq & 1 == 0 {
+            let left = self.peaks.pop().expect("folding requires an existing peak");
+            path.push(MmrPathNode {
+                dir: Direction::Left,
+                sib: left,
+            });
+            carry = MmrNode::combine(&left, &carry);
+            seq >>= 1;
+        }
+
+        let peaks_after: Vec<MmrNode> = self.peaks.iter().cloned().collect();
+        self.peaks.push(carry);
+        let root = MmrRoot::from_peaks(&self.peaks).expect("peaks must be non-empty");
+
+        let proof = MmrProof {
+            ver: PROOF_VERSION,
+            leaf_hash: leaf,
+            path,
+            peaks_after,
+        };
+
+        (self.seq, root, proof)
     }
 
     /// Computes the current MMR root if any leaves have been appended.
@@ -88,5 +120,18 @@ mod tests {
         let expected_root = MmrRoot::from_peaks(&[expected_fold, MmrNode::from(leaf3)]).unwrap();
         assert_eq!(root3, expected_root);
         assert_eq!(mmr.peaks(), &[expected_fold, MmrNode::from(leaf3)]);
+    }
+
+    #[test]
+    fn append_with_proof_verifies() {
+        let mut mmr = Mmr::new();
+
+        for value in 1..=5u8 {
+            let leaf = leaf(value);
+            let (seq, root, proof) = mmr.append_with_proof(leaf);
+            assert_eq!(seq as u8, value);
+            assert!(proof.verify(&root), "proof must verify for seq {seq}");
+            assert_eq!(proof.leaf_hash, leaf);
+        }
     }
 }

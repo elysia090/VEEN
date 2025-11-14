@@ -101,6 +101,7 @@ pub struct MmrProof {
     pub ver: u64,
     pub leaf_hash: LeafHash,
     pub path: Vec<MmrPathNode>,
+    /// Peaks that precede the target tree in the MMR fold order.
     pub peaks_after: Vec<MmrNode>,
 }
 
@@ -124,8 +125,8 @@ impl MmrProof {
         }
 
         let mut peaks = Vec::with_capacity(1 + self.peaks_after.len());
-        peaks.push(acc);
         peaks.extend(self.peaks_after.iter().cloned());
+        peaks.push(acc);
 
         match MmrRoot::from_peaks(&peaks) {
             Some(root) => root == *expected_root,
