@@ -2,14 +2,15 @@ use std::ffi::OsString;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ciborium::{de::from_reader, ser::into_writer};
 use ed25519_dalek::{Signer, SigningKey};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
+use rand::rngs::OsRng;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use sha2::Digest;
 use tempfile::TempDir;
@@ -25,6 +26,13 @@ use veen_core::wire::checkpoint::{Checkpoint, CHECKPOINT_VERSION};
 use veen_core::wire::mmr::Mmr;
 use veen_core::wire::types::{LeafHash, MmrRoot, Signature64};
 use veen_hub::pipeline::{HubStreamState, StoredMessage, StreamMessageWithProof};
+use veen_hub::storage::HUB_PID_FILE;
+
+const HUB_HEALTH_MAX_ATTEMPTS: usize = 120;
+const HUB_HEALTH_RETRY_DELAY_MS: u64 = 250;
+const REPLICATION_MAX_ATTEMPTS: usize = 120;
+const REPLICATION_RETRY_DELAY_MS: u64 = 250;
+const HUB_KEY_VERSION: u8 = 1;
 
 #[derive(Clone)]
 struct BinaryPaths {
@@ -422,7 +430,7 @@ impl IntegrationHarness {
         ensure_contains(&explain.stdout, "E.AUTH", "explain-error emits description")?;
 
         // Health + metrics diagnostics
-        self.fetch_metrics(&hub_url).await?;
+        let _ = self.fetch_metrics(&hub_url).await?;
         self.fetch_health(&hub_url).await?;
 
         hub.handle.terminate().await?;
@@ -544,6 +552,16 @@ impl IntegrationHarness {
         copy_dir_recursive(&primary.data_dir, &fork_dir)
             .await
             .context("copying primary hub state for forked hub")?;
+
+        let fork_pid_path = fork_dir.join(HUB_PID_FILE);
+        if fs::try_exists(&fork_pid_path)
+            .await
+            .with_context(|| format!("checking fork PID file {}", fork_pid_path.display()))?
+        {
+            fs::remove_file(&fork_pid_path)
+                .await
+                .with_context(|| format!("removing fork PID file {}", fork_pid_path.display()))?;
+        }
 
         let fork = self
             .spawn_hub("fork-hub", HubRole::Primary, &[])
@@ -788,6 +806,10 @@ impl IntegrationHarness {
             .await
             .with_context(|| format!("creating hub data dir {}", data_dir.display()))?;
 
+        ensure_hub_key_material(&data_dir)
+            .await
+            .with_context(|| format!("ensuring hub key material in {}", data_dir.display()))?;
+
         let mut args = vec![
             OsString::from("run"),
             OsString::from("--listen"),
@@ -888,7 +910,7 @@ impl IntegrationHarness {
 
     async fn wait_for_health(&self, listen: SocketAddr) -> Result<()> {
         let url = format!("http://{listen}/healthz");
-        for attempt in 0..40 {
+        for attempt in 0..HUB_HEALTH_MAX_ATTEMPTS {
             match self.http.get(&url).send().await {
                 Ok(resp) if resp.status().is_success() => return Ok(()),
                 Ok(resp) => {
@@ -898,13 +920,13 @@ impl IntegrationHarness {
                     warn!("hub health attempt {} failed: {}", attempt, err);
                 }
             }
-            sleep(Duration::from_millis(250)).await;
+            sleep(Duration::from_millis(HUB_HEALTH_RETRY_DELAY_MS)).await;
         }
         bail!("hub at {url} did not become healthy within timeout");
     }
 
     async fn wait_for_replication(&self, replica_url: &str) -> Result<()> {
-        for attempt in 0..40 {
+        for attempt in 0..REPLICATION_MAX_ATTEMPTS {
             let response = self
                 .http
                 .post(format!("{replica_url}/resync"))
@@ -938,7 +960,7 @@ impl IntegrationHarness {
                     warn!("replica resync attempt {} failed: {}", attempt, err);
                 }
             }
-            sleep(Duration::from_millis(250)).await;
+            sleep(Duration::from_millis(REPLICATION_RETRY_DELAY_MS)).await;
         }
         bail!("replica did not observe federated message within timeout");
     }
@@ -960,7 +982,7 @@ impl IntegrationHarness {
         Ok(())
     }
 
-    async fn fetch_metrics(&self, base: &str) -> Result<String> {
+    async fn fetch_metrics(&self, base: &str) -> Result<serde_json::Value> {
         let response = self
             .http
             .get(format!("{base}/metrics"))
@@ -982,7 +1004,7 @@ impl IntegrationHarness {
             metrics.get("submit_err_total").is_some(),
             "metrics response missing submit_err_total"
         );
-        Ok(body)
+        Ok(metrics)
     }
 
     async fn fetch_health(&self, base: &str) -> Result<()> {
@@ -1159,6 +1181,42 @@ async fn clear_stream_messages(dir: &Path, stream: &str) -> Result<()> {
     Ok(())
 }
 
+async fn ensure_hub_key_material(data_dir: &Path) -> Result<()> {
+    let key_path = data_dir.join("hub_key.cbor");
+    if fs::try_exists(&key_path)
+        .await
+        .with_context(|| format!("checking hub key at {}", key_path.display()))?
+    {
+        return Ok(());
+    }
+
+    let created_at = current_unix_timestamp()?;
+    let mut rng = OsRng;
+    let signing = SigningKey::generate(&mut rng);
+    let verifying = signing.verifying_key();
+
+    let material = HubKeyMaterial {
+        version: HUB_KEY_VERSION,
+        created_at,
+        public_key: ByteBuf::from(verifying.to_bytes().to_vec()),
+        secret_key: ByteBuf::from(signing.to_bytes().to_vec()),
+    };
+
+    let mut encoded = Vec::new();
+    into_writer(&material, &mut encoded).context("encoding hub key material")?;
+    fs::write(&key_path, encoded)
+        .await
+        .with_context(|| format!("writing hub key to {}", key_path.display()))?;
+    Ok(())
+}
+
+fn current_unix_timestamp() -> Result<u64> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before UNIX epoch")?;
+    Ok(duration.as_secs())
+}
+
 fn ensure_contains(haystack: &str, needle: &str, context: &str) -> Result<()> {
     if !haystack.contains(needle) {
         bail!("expected {context}; missing `{needle}` in `{haystack}`");
@@ -1166,12 +1224,12 @@ fn ensure_contains(haystack: &str, needle: &str, context: &str) -> Result<()> {
     Ok(())
 }
 
-fn extract_mmr_root(metrics: &str, stream: &str) -> Option<String> {
+fn extract_mmr_root(metrics: &serde_json::Value, stream: &str) -> Option<String> {
     metrics
-        .lines()
-        .find(|line| line.contains("veen_mmr_root{") && line.contains(stream))
-        .and_then(|line| line.split_whitespace().last())
-        .map(|value| value.trim().to_string())
+        .get("mmr_roots")
+        .and_then(|roots| roots.get(stream))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
 }
 
 async fn persist_recovered_stream_state<I>(data_dir: &Path, stream: &str, messages: I) -> Result<()>
@@ -1263,6 +1321,11 @@ async fn create_checkpoint_for_stream(
     let material: HubKeyMaterial =
         from_reader(key_bytes.as_slice()).context("decoding hub key material")?;
     ensure!(
+        material.version == HUB_KEY_VERSION,
+        "unsupported hub key version {}",
+        material.version
+    );
+    ensure!(
         material.public_key.len() == 32,
         "hub public key must be 32 bytes"
     );
@@ -1271,7 +1334,7 @@ async fn create_checkpoint_for_stream(
         "hub secret key must be 32 bytes"
     );
     let mut secret = [0u8; 32];
-    secret.copy_from_slice(&material.secret_key);
+    secret.copy_from_slice(material.secret_key.as_ref());
     let signing = SigningKey::from_bytes(&secret);
 
     let label_bytes = sha2::Sha256::digest(stream.as_bytes());
@@ -1296,10 +1359,10 @@ async fn create_checkpoint_for_stream(
     Ok(checkpoint)
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct HubKeyMaterial {
-    _version: u8,
-    _created_at: u64,
+    version: u8,
+    created_at: u64,
     #[serde(with = "serde_bytes")]
     public_key: ByteBuf,
     #[serde(with = "serde_bytes")]
