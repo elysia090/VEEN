@@ -16,6 +16,7 @@ use tokio::fs;
 use tokio::fs::OpenOptions;
 use tokio::sync::Mutex;
 
+use veen_core::meta::SchemaRegistry;
 use veen_core::revocation::{
     cap_token_hash, schema_revocation, RevocationKind, RevocationRecord, RevocationTarget,
     RevocationView,
@@ -27,8 +28,9 @@ use veen_core::wire::{
     types::{AuthRef, ClientId, LeafHash, MmrNode, MmrRoot},
 };
 use veen_core::{
-    cap_stream_id_from_label, cap_token_from_cbor, CapTokenRate, StreamIdParseError,
-    CAP_TOKEN_VERSION,
+    cap_stream_id_from_label, cap_token_from_cbor, schema_fed_authority, schema_label_class,
+    schema_meta_schema, AuthorityRecord, AuthorityView, CapTokenRate, Label, LabelClassRecord,
+    SchemaDescriptor, StreamIdParseError, CAP_TOKEN_VERSION,
 };
 
 use thiserror::Error;
@@ -54,6 +56,12 @@ struct HubState {
     anchors: AnchorLog,
     revocations: RevocationView,
     revocation_log: Vec<RevocationRecord>,
+    authority_records: Vec<AuthorityRecord>,
+    authority_view: AuthorityView,
+    label_class_records: Vec<LabelClassRecord>,
+    label_class_index: HashMap<Label, LabelClassRecord>,
+    schema_descriptors: Vec<SchemaDescriptor>,
+    schema_registry: SchemaRegistry,
 }
 
 struct StreamRuntime {
@@ -81,12 +89,25 @@ impl HubPipeline {
         let revocation_log = load_revocation_log(storage).await?;
         let mut revocations = RevocationView::new();
         revocations.extend(revocation_log.iter().cloned());
+        let authority_records = load_authority_records(storage).await?;
+        let mut authority_view = AuthorityView::new();
+        authority_view.extend(authority_records.iter().cloned());
+        let label_class_records = load_label_classes(storage).await?;
+        let label_class_index = build_label_class_index(&label_class_records);
+        let schema_descriptors = load_schema_descriptors(storage).await?;
+        let schema_registry = build_schema_registry(&schema_descriptors);
         let state = HubState {
             streams,
             capabilities,
             anchors,
             revocations,
             revocation_log,
+            authority_records,
+            authority_view,
+            label_class_records,
+            label_class_index,
+            schema_descriptors,
+            schema_registry,
         };
 
         if config.anchors.enabled && state.anchors.entries.is_empty() {
@@ -407,6 +428,67 @@ impl HubPipeline {
         guard.revocations.insert(record.clone());
         guard.revocation_log.push(record);
         persist_revocations(&self.storage, &guard.revocation_log).await
+    }
+
+    pub async fn publish_authority(&self, payload: &[u8]) -> Result<()> {
+        if matches!(self.role, HubRole::Replica) {
+            bail!("replica hubs are read-only");
+        }
+
+        let envelope: SignedEnvelope<AuthorityRecord> =
+            ciborium::de::from_reader(payload).context("decoding authority envelope")?;
+        if envelope.schema.as_ref() != schema_fed_authority().as_slice() {
+            bail!("unexpected schema identifier in authority envelope");
+        }
+
+        let record = envelope.body;
+        tracing::info!(?record, "recorded authority record");
+
+        let mut guard = self.inner.lock().await;
+        guard.authority_records.push(record.clone());
+        guard.authority_view.insert(record);
+        persist_authority_records(&self.storage, &guard.authority_records).await
+    }
+
+    pub async fn publish_label_class(&self, payload: &[u8]) -> Result<()> {
+        if matches!(self.role, HubRole::Replica) {
+            bail!("replica hubs are read-only");
+        }
+
+        let envelope: SignedEnvelope<LabelClassRecord> =
+            ciborium::de::from_reader(payload).context("decoding label class envelope")?;
+        if envelope.schema.as_ref() != schema_label_class().as_slice() {
+            bail!("unexpected schema identifier in label class envelope");
+        }
+
+        let record = envelope.body;
+        tracing::info!(?record, "recorded label class");
+
+        let mut guard = self.inner.lock().await;
+        guard.label_class_index.insert(record.label, record.clone());
+        guard.label_class_records.push(record);
+        persist_label_classes(&self.storage, &guard.label_class_records).await
+    }
+
+    pub async fn register_schema_descriptor(&self, payload: &[u8]) -> Result<()> {
+        if matches!(self.role, HubRole::Replica) {
+            bail!("replica hubs are read-only");
+        }
+
+        let envelope: SignedEnvelope<SchemaDescriptor> =
+            ciborium::de::from_reader(payload).context("decoding schema descriptor envelope")?;
+        if envelope.schema.as_ref() != schema_meta_schema().as_slice() {
+            bail!("unexpected schema identifier in schema descriptor envelope");
+        }
+
+        let descriptor = envelope.body;
+        tracing::info!(?descriptor, "registered schema descriptor");
+
+        let mut guard = self.inner.lock().await;
+        guard.schema_descriptors.push(descriptor.clone());
+        let seq = guard.schema_descriptors.len() as u64;
+        guard.schema_registry.upsert(descriptor, seq);
+        persist_schema_descriptors(&self.storage, &guard.schema_descriptors).await
     }
 
     pub async fn stream(
@@ -1356,6 +1438,125 @@ async fn persist_anchor_log(storage: &HubStorage, log: &AnchorLog) -> Result<()>
         .with_context(|| format!("writing anchor log to {}", path.display()))
 }
 
+fn build_label_class_index(records: &[LabelClassRecord]) -> HashMap<Label, LabelClassRecord> {
+    let mut index = HashMap::new();
+    for record in records {
+        index.insert(record.label, record.clone());
+    }
+    index
+}
+
+fn build_schema_registry(records: &[SchemaDescriptor]) -> SchemaRegistry {
+    let mut registry = SchemaRegistry::new();
+    for (idx, descriptor) in records.iter().cloned().enumerate() {
+        let stream_seq = (idx + 1) as u64;
+        registry.upsert(descriptor, stream_seq);
+    }
+    registry
+}
+
+async fn persist_authority_records(
+    storage: &HubStorage,
+    records: &[AuthorityRecord],
+) -> Result<()> {
+    let path = storage.authority_store_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("ensuring authority directory {}", parent.display()))?;
+    }
+    let data = serde_json::to_vec_pretty(records).context("encoding authority records")?;
+    fs::write(&path, data)
+        .await
+        .with_context(|| format!("writing authority records to {}", path.display()))
+}
+
+async fn load_authority_records(storage: &HubStorage) -> Result<Vec<AuthorityRecord>> {
+    let path = storage.authority_store_path();
+    if !fs::try_exists(&path)
+        .await
+        .with_context(|| format!("checking authority records {}", path.display()))?
+    {
+        return Ok(Vec::new());
+    }
+    let data = fs::read(&path)
+        .await
+        .with_context(|| format!("reading authority records from {}", path.display()))?;
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+    let records = serde_json::from_slice(&data)
+        .with_context(|| format!("parsing authority records from {}", path.display()))?;
+    Ok(records)
+}
+
+async fn persist_label_classes(storage: &HubStorage, records: &[LabelClassRecord]) -> Result<()> {
+    let path = storage.label_class_store_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("ensuring label class directory {}", parent.display()))?;
+    }
+    let data = serde_json::to_vec_pretty(records).context("encoding label class records")?;
+    fs::write(&path, data)
+        .await
+        .with_context(|| format!("writing label class records to {}", path.display()))
+}
+
+async fn load_label_classes(storage: &HubStorage) -> Result<Vec<LabelClassRecord>> {
+    let path = storage.label_class_store_path();
+    if !fs::try_exists(&path)
+        .await
+        .with_context(|| format!("checking label class records {}", path.display()))?
+    {
+        return Ok(Vec::new());
+    }
+    let data = fs::read(&path)
+        .await
+        .with_context(|| format!("reading label class records from {}", path.display()))?;
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+    let records = serde_json::from_slice(&data)
+        .with_context(|| format!("parsing label class records from {}", path.display()))?;
+    Ok(records)
+}
+
+async fn persist_schema_descriptors(
+    storage: &HubStorage,
+    records: &[SchemaDescriptor],
+) -> Result<()> {
+    let path = storage.schema_registry_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("ensuring schema registry directory {}", parent.display()))?;
+    }
+    let data = serde_json::to_vec_pretty(records).context("encoding schema descriptors")?;
+    fs::write(&path, data)
+        .await
+        .with_context(|| format!("writing schema descriptors to {}", path.display()))
+}
+
+async fn load_schema_descriptors(storage: &HubStorage) -> Result<Vec<SchemaDescriptor>> {
+    let path = storage.schema_registry_path();
+    if !fs::try_exists(&path)
+        .await
+        .with_context(|| format!("checking schema registry {}", path.display()))?
+    {
+        return Ok(Vec::new());
+    }
+    let data = fs::read(&path)
+        .await
+        .with_context(|| format!("reading schema descriptors from {}", path.display()))?;
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+    let records = serde_json::from_slice(&data)
+        .with_context(|| format!("parsing schema descriptors from {}", path.display()))?;
+    Ok(records)
+}
+
 async fn persist_revocations(storage: &HubStorage, records: &[RevocationRecord]) -> Result<()> {
     let path = storage.revocations_store_path();
     if let Some(parent) = path.parent() {
@@ -1394,4 +1595,141 @@ fn revocation_target_from_hex_str(value: &str) -> Result<RevocationTarget> {
             err.actual()
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AnchorConfig, ObservabilityConfig};
+    use std::net::SocketAddr;
+    use std::path::Path;
+    use tempfile::tempdir;
+    use tokio::runtime::Runtime;
+    use veen_core::federation::AuthorityPolicy;
+    use veen_core::meta::SchemaId;
+    use veen_core::realm::RealmId;
+    use veen_core::HubId;
+
+    async fn init_pipeline(data_dir: &Path) -> HubPipeline {
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let config = HubRuntimeConfig {
+            listen,
+            data_dir: data_dir.to_path_buf(),
+            role: HubRole::Primary,
+            profile_id: None,
+            anchors: AnchorConfig::default(),
+            observability: ObservabilityConfig::default(),
+            admission: AdmissionConfig::default(),
+            federation: FederationConfig::default(),
+            config_path: None,
+        };
+        let storage = HubStorage::bootstrap(&config).await.unwrap();
+        HubPipeline::initialise(&config, &storage).await.unwrap()
+    }
+
+    fn encode_envelope<T: Serialize>(schema: [u8; 32], body: T) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct WritableEnvelope<T> {
+            #[serde(with = "serde_bytes")]
+            schema: Vec<u8>,
+            body: T,
+            #[serde(with = "serde_bytes")]
+            signature: Vec<u8>,
+        }
+
+        let envelope = WritableEnvelope {
+            schema: schema.to_vec(),
+            body,
+            signature: vec![0u8; 64],
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&envelope, &mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn publish_authority_persists_record() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let pipeline = init_pipeline(temp.path()).await;
+
+            let realm = RealmId::derive("test-realm");
+            let stream = realm.stream_fed_admin();
+            let record = AuthorityRecord {
+                realm_id: realm,
+                stream_id: stream,
+                primary_hub: HubId::new([0x11; 32]),
+                replica_hubs: vec![HubId::new([0x22; 32])],
+                policy: AuthorityPolicy::SinglePrimary,
+                ts: 1,
+                ttl: 600,
+            };
+            let payload = encode_envelope(schema_fed_authority(), record.clone());
+
+            pipeline.publish_authority(&payload).await.unwrap();
+
+            let guard = pipeline.inner.lock().await;
+            assert_eq!(guard.authority_records.len(), 1);
+            assert_eq!(guard.authority_records[0], record);
+            assert!(guard
+                .authority_view
+                .active_record_at(realm, stream, record.ts)
+                .is_some());
+        });
+    }
+
+    #[test]
+    fn publish_label_class_updates_index() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let pipeline = init_pipeline(temp.path()).await;
+
+            let stream = RealmId::derive("realm").stream_label_class();
+            let label = Label::derive([], stream, 0);
+            let record = LabelClassRecord {
+                label,
+                class: "user".into(),
+                sensitivity: Some("medium".into()),
+                retention_hint: Some(86_400),
+            };
+            let payload = encode_envelope(schema_label_class(), record.clone());
+
+            pipeline.publish_label_class(&payload).await.unwrap();
+
+            let guard = pipeline.inner.lock().await;
+            assert_eq!(guard.label_class_records.len(), 1);
+            assert_eq!(guard.label_class_index.get(&label), Some(&record));
+        });
+    }
+
+    #[test]
+    fn register_schema_descriptor_tracks_latest() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let pipeline = init_pipeline(temp.path()).await;
+
+            let descriptor = SchemaDescriptor {
+                schema_id: SchemaId::new([0xAA; 32]),
+                name: "wallet.transfer".into(),
+                version: "v1".into(),
+                doc_url: Some("https://example.com".into()),
+                owner: None,
+                ts: 42,
+            };
+            let payload = encode_envelope(schema_meta_schema(), descriptor.clone());
+
+            pipeline.register_schema_descriptor(&payload).await.unwrap();
+
+            let guard = pipeline.inner.lock().await;
+            assert_eq!(guard.schema_descriptors.len(), 1);
+            let stored = guard
+                .schema_registry
+                .get(&descriptor.schema_id)
+                .expect("schema descriptor present");
+            assert_eq!(stored, &descriptor);
+        });
+    }
 }

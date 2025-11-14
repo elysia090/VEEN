@@ -20,6 +20,9 @@ pub const ATTACHMENTS_DIR: &str = "attachments";
 pub const ANCHORS_DIR: &str = "anchors";
 pub const TLS_INFO_FILE: &str = "tls_info.json";
 pub const REVOCATIONS_FILE: &str = "revocations.json";
+pub const AUTHORITY_FILE: &str = "authority_records.json";
+pub const LABEL_CLASS_FILE: &str = "label_classes.json";
+pub const SCHEMA_REGISTRY_FILE: &str = "schema_descriptors.json";
 
 #[derive(Clone)]
 pub struct HubStorage {
@@ -118,6 +121,18 @@ impl HubStorage {
 
     pub fn revocations_store_path(&self) -> PathBuf {
         self.state_dir().join(REVOCATIONS_FILE)
+    }
+
+    pub fn authority_store_path(&self) -> PathBuf {
+        self.state_dir().join(AUTHORITY_FILE)
+    }
+
+    pub fn label_class_store_path(&self) -> PathBuf {
+        self.state_dir().join(LABEL_CLASS_FILE)
+    }
+
+    pub fn schema_registry_path(&self) -> PathBuf {
+        self.state_dir().join(SCHEMA_REGISTRY_FILE)
     }
 }
 

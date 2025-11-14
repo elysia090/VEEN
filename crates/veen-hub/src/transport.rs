@@ -37,6 +37,9 @@ impl HubServerHandle {
             .route("/stream", get(handle_stream))
             .route("/resync", post(handle_resync))
             .route("/authorize", post(handle_authorize))
+            .route("/authority", post(handle_authority))
+            .route("/label-class", post(handle_label_class))
+            .route("/schema", post(handle_schema_descriptor))
             .route("/anchor", post(handle_anchor))
             .route("/bridge", post(handle_bridge))
             .route("/revoke", post(handle_revoke))
@@ -187,6 +190,39 @@ async fn handle_revoke(State(pipeline): State<HubPipeline>, body: Bytes) -> impl
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "revocation publish failed");
+            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+        }
+    }
+}
+
+async fn handle_authority(State(pipeline): State<HubPipeline>, body: Bytes) -> impl IntoResponse {
+    match pipeline.publish_authority(&body).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "authority publish failed");
+            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+        }
+    }
+}
+
+async fn handle_label_class(State(pipeline): State<HubPipeline>, body: Bytes) -> impl IntoResponse {
+    match pipeline.publish_label_class(&body).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "label class publish failed");
+            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+        }
+    }
+}
+
+async fn handle_schema_descriptor(
+    State(pipeline): State<HubPipeline>,
+    body: Bytes,
+) -> impl IntoResponse {
+    match pipeline.register_schema_descriptor(&body).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "schema descriptor publish failed");
             (StatusCode::BAD_REQUEST, err.to_string()).into_response()
         }
     }
