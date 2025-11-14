@@ -3473,7 +3473,10 @@ mod tests {
             hub_dir.path().to_path_buf(),
             None,
             HubRole::Primary,
-            HubConfigOverrides::default(),
+            HubConfigOverrides {
+                capability_gating_enabled: Some(false),
+                ..Default::default()
+            },
         )
         .await?;
         let runtime = HubRuntime::start(config).await?;
