@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{header::RETRY_AFTER, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{body::Bytes, Json, Router};
@@ -12,7 +12,8 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::pipeline::{
-    AnchorRequest, BridgeIngestRequest, HubPipeline, ObservabilityReport, SubmitRequest,
+    AnchorRequest, BridgeIngestRequest, CapabilityError, HubPipeline, ObservabilityReport,
+    SubmitRequest,
 };
 
 pub struct HubServerHandle {
@@ -79,8 +80,27 @@ async fn handle_submit(
     match pipeline.submit(request).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(err) => {
-            tracing::warn!(error = ?err, "submit failed");
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+            if let Some(cap_err) = err.downcast_ref::<CapabilityError>() {
+                tracing::warn!(error = ?cap_err, "submit failed");
+                let status = match cap_err {
+                    CapabilityError::Unauthorized { .. } => StatusCode::FORBIDDEN,
+                    CapabilityError::SubjectMismatch { .. }
+                    | CapabilityError::StreamMismatch { .. }
+                    | CapabilityError::StreamDenied { .. }
+                    | CapabilityError::Expired { .. } => StatusCode::FORBIDDEN,
+                    CapabilityError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
+                };
+                let mut response = (status, cap_err.to_string()).into_response();
+                if let Some(wait) = cap_err.retry_after() {
+                    if let Ok(value) = HeaderValue::from_str(&wait.to_string()) {
+                        response.headers_mut().insert(RETRY_AFTER, value);
+                    }
+                }
+                response
+            } else {
+                tracing::warn!(error = ?err, "submit failed");
+                (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+            }
         }
     }
 }

@@ -94,6 +94,8 @@ enum Command {
     Id(IdCommand),
     /// Send an encrypted message to a stream.
     Send(SendArgs),
+    /// Authorize a capability token with the hub.
+    Authorize(CapAuthorizeArgs),
     /// Stream and decrypt messages from the hub.
     Stream(StreamArgs),
     /// Attachment tooling.
@@ -1160,6 +1162,7 @@ async fn main() -> Result<()> {
             IdCommand::Rotate(args) => handle_id_rotate(args).await,
         },
         Command::Send(args) => handle_send(args).await,
+        Command::Authorize(args) => handle_cap_authorize(args).await,
         Command::Stream(args) => handle_stream(args).await,
         Command::Attachment(cmd) => match cmd {
             AttachmentCommand::Verify(args) => handle_attachment_verify(args).await,

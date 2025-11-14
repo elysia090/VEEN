@@ -26,6 +26,7 @@ ciborium.workspace = true
 humantime.workspace = true
 sha2.workspace = true
 hex.workspace = true
+thiserror.workspace = true
 veen-core = { path = "../veen-core" }
 
 [dev-dependencies]
