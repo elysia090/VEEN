@@ -4,7 +4,7 @@ use std::{
     fmt,
 };
 
-use serde::de::{Error as DeError, Visitor};
+use serde::de::{Error as DeError, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{h, LengthError};
@@ -114,6 +114,17 @@ impl<'de> Visitor<'de> for SchemaIdVisitor {
     {
         self.visit_bytes(&v)
     }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut buf = Vec::with_capacity(SCHEMA_ID_LEN);
+        while let Some(byte) = seq.next_element::<u8>()? {
+            buf.push(byte);
+        }
+        SchemaId::try_from(buf).map_err(|err| A::Error::invalid_length(err.actual(), &self))
+    }
 }
 
 impl<'de> Deserialize<'de> for SchemaId {
@@ -222,6 +233,17 @@ impl<'de> Visitor<'de> for SchemaOwnerVisitor {
         E: DeError,
     {
         self.visit_bytes(&v)
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut buf = Vec::with_capacity(SCHEMA_ID_LEN);
+        while let Some(byte) = seq.next_element::<u8>()? {
+            buf.push(byte);
+        }
+        SchemaOwner::try_from(buf).map_err(|err| A::Error::invalid_length(err.actual(), &self))
     }
 }
 
