@@ -98,6 +98,7 @@ async fn run_fed_auth() -> Result<()> {
         expires_at: None,
         schema: None,
         idem: None,
+        pow_cookie: None,
     };
 
     http.post(format!("{primary_base}/submit"))

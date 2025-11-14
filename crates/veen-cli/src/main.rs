@@ -14,7 +14,7 @@ use ciborium::value::Value as CborValue;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
+use rand::{rngs::OsRng, RngCore};
 use reqwest::{Client as HttpClient, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,7 @@ use veen_core::{
         Checkpoint,
     },
     AuthorityPolicy, AuthorityRecord, CapToken, CapTokenAllow, CapTokenRate, LabelClassRecord,
-    OperationId, Profile, RealmId, RevocationKind, RevocationRecord, RevocationTarget,
+    OperationId, PowCookie, Profile, RealmId, RevocationKind, RevocationRecord, RevocationTarget,
     SchemaDescriptor, SchemaId, SchemaOwner, TransferId, WalletId, WalletTransferEvent,
 };
 use veen_core::{h, ht};
@@ -50,10 +50,11 @@ use veen_core::{
 };
 use veen_hub::pipeline::{
     AttachmentUpload, AuthorizeResponse as RemoteAuthorizeResponse,
-    HubStreamState as RemoteHubStreamState, StoredAttachment as RemoteStoredAttachment,
-    StoredMessage as RemoteStoredMessage, StreamMessageWithProof as RemoteStreamMessageWithProof,
-    StreamProof as RemoteStreamProof, StreamReceipt as RemoteStreamReceipt,
-    SubmitRequest as RemoteSubmitRequest, SubmitResponse as RemoteSubmitResponse,
+    HubStreamState as RemoteHubStreamState, PowCookieEnvelope,
+    StoredAttachment as RemoteStoredAttachment, StoredMessage as RemoteStoredMessage,
+    StreamMessageWithProof as RemoteStreamMessageWithProof, StreamProof as RemoteStreamProof,
+    StreamReceipt as RemoteStreamReceipt, SubmitRequest as RemoteSubmitRequest,
+    SubmitResponse as RemoteSubmitResponse,
 };
 
 const CLIENT_KEY_VERSION: u8 = 1;
@@ -464,6 +465,10 @@ struct SendArgs {
     attach: Vec<PathBuf>,
     #[arg(long)]
     no_store_body: bool,
+    #[arg(long, value_name = "BITS")]
+    pow_difficulty: Option<u8>,
+    #[arg(long, value_name = "HEX")]
+    pow_challenge: Option<String>,
 }
 
 #[derive(Args)]
@@ -1980,6 +1985,10 @@ async fn handle_send_local(data_dir: PathBuf, args: SendArgs) -> Result<()> {
 }
 
 async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()> {
+    if args.pow_challenge.is_some() && args.pow_difficulty.is_none() {
+        bail!("--pow-challenge requires --pow-difficulty");
+    }
+
     let identity_path = args.client.join("identity_card.pub");
     let stream_id = cap_stream_id_from_label(&args.stream)
         .with_context(|| format!("deriving stream identifier for {}", args.stream))?;
@@ -2038,6 +2047,37 @@ async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()>
 
     let payload = serde_json::from_str(&args.body).unwrap_or_else(|_| json!(args.body));
 
+    let pow_cookie = if let Some(difficulty) = args.pow_difficulty {
+        if difficulty == 0 {
+            bail!("--pow-difficulty must be greater than zero");
+        }
+
+        let challenge = if let Some(ref hex_value) = args.pow_challenge {
+            let bytes = hex::decode(hex_value.trim())
+                .with_context(|| format!("decoding pow challenge {hex_value}"))?;
+            if bytes.is_empty() {
+                bail!("--pow-challenge must not be empty");
+            }
+            bytes
+        } else {
+            let mut bytes = vec![0u8; 32];
+            OsRng.fill_bytes(&mut bytes);
+            bytes
+        };
+
+        let cookie = solve_pow_cookie(challenge, difficulty)?;
+        println!(
+            "proof-of-work: nonce={} difficulty={} challenge={}",
+            cookie.nonce,
+            cookie.difficulty,
+            hex::encode(&cookie.challenge)
+        );
+
+        Some(PowCookieEnvelope::from_cookie(&cookie))
+    } else {
+        None
+    };
+
     let request = RemoteSubmitRequest {
         stream: args.stream.clone(),
         client_id: client_id_hex.clone(),
@@ -2047,6 +2087,7 @@ async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()>
         expires_at: args.expires_at,
         schema: args.schema.clone(),
         idem: None,
+        pow_cookie,
     };
 
     let response: RemoteSubmitResponse = client
@@ -2069,6 +2110,24 @@ async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()>
     }
 
     Ok(())
+}
+
+fn solve_pow_cookie(challenge: Vec<u8>, difficulty: u8) -> Result<PowCookie> {
+    let mut cookie = PowCookie {
+        challenge,
+        nonce: 0,
+        difficulty,
+    };
+
+    loop {
+        if cookie.meets_difficulty() {
+            return Ok(cookie);
+        }
+        if cookie.nonce == u64::MAX {
+            bail!("failed to find proof-of-work nonce (difficulty {difficulty})");
+        }
+        cookie.nonce = cookie.nonce.checked_add(1).expect("nonce overflow checked");
+    }
 }
 
 async fn handle_stream(args: StreamArgs) -> Result<()> {
@@ -2861,6 +2920,8 @@ async fn handle_rpc_call(args: RpcCallArgs) -> Result<()> {
         parent: None,
         attach: Vec::new(),
         no_store_body: false,
+        pow_difficulty: None,
+        pow_challenge: None,
     };
 
     handle_send(send_args).await
@@ -3738,6 +3799,8 @@ mod tests {
             parent: None,
             attach: Vec::new(),
             no_store_body: false,
+            pow_difficulty: None,
+            pow_challenge: None,
         })
         .await?;
 
@@ -3810,6 +3873,8 @@ mod tests {
             parent: None,
             attach: Vec::new(),
             no_store_body: false,
+            pow_difficulty: None,
+            pow_challenge: None,
         })
         .await?;
 

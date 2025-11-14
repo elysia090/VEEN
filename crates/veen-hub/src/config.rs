@@ -42,6 +42,7 @@ pub struct AdmissionConfig {
     pub capability_gating_enabled: bool,
     pub max_client_id_lifetime_sec: Option<u64>,
     pub max_msgs_per_client_id_per_label: Option<u64>,
+    pub pow_difficulty: Option<u8>,
 }
 
 impl Default for AdmissionConfig {
@@ -50,6 +51,7 @@ impl Default for AdmissionConfig {
             capability_gating_enabled: true,
             max_client_id_lifetime_sec: None,
             max_msgs_per_client_id_per_label: None,
+            pow_difficulty: None,
         }
     }
 }
@@ -70,6 +72,7 @@ pub struct HubConfigOverrides {
     pub max_client_id_lifetime_sec: Option<u64>,
     pub max_msgs_per_client_id_per_label: Option<u64>,
     pub replica_targets: Option<Vec<String>>,
+    pub pow_difficulty: Option<u8>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -103,6 +106,7 @@ struct AdmissionSection {
     capability_gating_enabled: Option<bool>,
     max_client_id_lifetime_sec: Option<u64>,
     max_msgs_per_client_id_per_label: Option<u64>,
+    pow_difficulty: Option<u8>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -153,6 +157,9 @@ impl HubRuntimeConfig {
             max_msgs_per_client_id_per_label: overrides
                 .max_msgs_per_client_id_per_label
                 .or(file_cfg.admission.max_msgs_per_client_id_per_label),
+            pow_difficulty: overrides
+                .pow_difficulty
+                .or(file_cfg.admission.pow_difficulty),
         };
         let federation = FederationConfig {
             replica_targets: overrides
