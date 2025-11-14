@@ -15,7 +15,12 @@ use tokio::sync::Mutex;
 
 use veen_core::wire::mmr::Mmr;
 use veen_core::wire::types::{LeafHash, MmrRoot};
-use veen_core::{cap_stream_id_from_label, cap_token_from_cbor, CapTokenRate, CAP_TOKEN_VERSION};
+use veen_core::{
+    cap_stream_id_from_label, cap_token_from_cbor, CapTokenRate, StreamIdParseError,
+    CAP_TOKEN_VERSION,
+};
+
+use thiserror::Error;
 
 use crate::config::{AdmissionConfig, FederationConfig, HubRole, HubRuntimeConfig};
 use crate::observability::HubObservability;
@@ -119,13 +124,16 @@ impl HubPipeline {
         let submitted_at = current_unix_timestamp();
         let mut guard = self.inner.lock().await;
         if let Some(cap) = auth_ref.as_ref() {
-            enforce_capability(
+            if let Err(err) = enforce_capability(
                 &mut guard.capabilities,
                 cap,
                 &client_id,
                 &stream,
                 submitted_at,
-            )?;
+            ) {
+                update_capability_store(&self.storage, &guard.capabilities).await?;
+                return Err(anyhow::Error::new(err));
+            }
         }
 
         let stream_runtime = guard.streams.entry(stream.clone()).or_insert_with(|| {
@@ -327,6 +335,16 @@ impl HubPipeline {
             .map(|id| hex::encode(id.as_ref()))
             .collect();
 
+        tracing::info!(
+            auth_ref = %auth_ref_hex,
+            subject = %subject_hex,
+            streams = ?stream_ids,
+            ttl = token.allow.ttl,
+            rate = ?token.allow.rate,
+            expires_at,
+            "authorised capability admission"
+        );
+
         let mut guard = self.inner.lock().await;
         let record = CapabilityRecord {
             subject: subject_hex,
@@ -334,6 +352,10 @@ impl HubPipeline {
             expires_at,
             ttl: token.allow.ttl,
             rate: token.allow.rate.clone(),
+            bucket_state: token.allow.rate.as_ref().map(|rate| TokenBucketState {
+                tokens: rate.burst,
+                last_refill: now,
+            }),
             uses: 0,
         };
         guard
@@ -488,7 +510,45 @@ struct CapabilityRecord {
     expires_at: u64,
     ttl: u64,
     rate: Option<CapTokenRate>,
+    #[serde(default)]
+    bucket_state: Option<TokenBucketState>,
     uses: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TokenBucketState {
+    tokens: u64,
+    last_refill: u64,
+}
+
+#[derive(Debug, Error)]
+pub enum CapabilityError {
+    #[error("E.AUTH capability {auth_ref} is not authorised")]
+    Unauthorized { auth_ref: String },
+    #[error("E.CAP capability {auth_ref} subject mismatch")]
+    SubjectMismatch { auth_ref: String },
+    #[error("E.CAP capability {auth_ref} stream derivation failed: {source}")]
+    StreamMismatch {
+        auth_ref: String,
+        #[source]
+        source: StreamIdParseError,
+    },
+    #[error("E.CAP capability {auth_ref} does not permit stream {stream}")]
+    StreamDenied { auth_ref: String, stream: String },
+    #[error("E.CAP capability {auth_ref} has expired")]
+    Expired { auth_ref: String },
+    #[error("E.RATE capability {auth_ref} is rate limited (retry after {retry_after}s)")]
+    RateLimited { auth_ref: String, retry_after: u64 },
+}
+
+impl CapabilityError {
+    pub fn retry_after(&self) -> Option<u64> {
+        if let Self::RateLimited { retry_after, .. } = self {
+            Some(*retry_after)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -669,28 +729,103 @@ fn enforce_capability(
     subject: &str,
     stream: &str,
     now: u64,
-) -> Result<()> {
+) -> Result<(), CapabilityError> {
+    if !store.records.contains_key(auth_ref) {
+        return Err(CapabilityError::Unauthorized {
+            auth_ref: auth_ref.to_string(),
+        });
+    }
+
+    if let Some(expired) = store
+        .records
+        .get(auth_ref)
+        .map(|record| record.expires_at < now)
+    {
+        if expired {
+            store.records.remove(auth_ref);
+            return Err(CapabilityError::Expired {
+                auth_ref: auth_ref.to_string(),
+            });
+        }
+    }
+
     let record = store
         .records
         .get_mut(auth_ref)
-        .ok_or_else(|| anyhow!("capability {auth_ref} is not authorised"))?;
+        .expect("capability existence checked above");
+
     if record.subject != subject {
-        bail!("capability subject mismatch");
+        return Err(CapabilityError::SubjectMismatch {
+            auth_ref: auth_ref.to_string(),
+        });
     }
-    let stream_id = cap_stream_id_from_label(stream).context("deriving stream identifier")?;
+
+    if record.rate.is_some() && record.bucket_state.is_none() {
+        record.bucket_state = record.rate.as_ref().map(|rate| TokenBucketState {
+            tokens: rate.burst,
+            last_refill: now,
+        });
+    }
+
+    let stream_id =
+        cap_stream_id_from_label(stream).map_err(|err| CapabilityError::StreamMismatch {
+            auth_ref: auth_ref.to_string(),
+            source: err,
+        })?;
     let stream_hex = hex::encode(stream_id.as_ref());
     if !record
         .stream_ids
         .iter()
         .any(|allowed| allowed == &stream_hex)
     {
-        bail!("capability stream mismatch");
+        return Err(CapabilityError::StreamDenied {
+            auth_ref: auth_ref.to_string(),
+            stream: stream.to_string(),
+        });
     }
-    if record.expires_at < now {
-        bail!("capability token has expired");
+
+    if let (Some(rate), Some(state)) = (&record.rate, record.bucket_state.as_mut()) {
+        refill_bucket(state, rate, now);
+        if state.tokens == 0 {
+            let retry_after = retry_after_seconds(state, now);
+            return Err(CapabilityError::RateLimited {
+                auth_ref: auth_ref.to_string(),
+                retry_after,
+            });
+        }
+        state.tokens = state.tokens.saturating_sub(1);
     }
+
     record.uses = record.uses.saturating_add(1);
     Ok(())
+}
+
+fn refill_bucket(state: &mut TokenBucketState, rate: &CapTokenRate, now: u64) {
+    if now <= state.last_refill {
+        return;
+    }
+    let elapsed = now.saturating_sub(state.last_refill);
+    if elapsed == 0 {
+        return;
+    }
+    let new_tokens = state
+        .tokens
+        .saturating_add(elapsed.saturating_mul(rate.per_sec));
+    state.tokens = new_tokens.min(rate.burst);
+    state.last_refill = now;
+}
+
+fn retry_after_seconds(state: &TokenBucketState, now: u64) -> u64 {
+    if state.last_refill > now {
+        return 1;
+    }
+    let target = state.last_refill.saturating_add(1);
+    let wait = target.saturating_sub(now);
+    if wait == 0 {
+        1
+    } else {
+        wait
+    }
 }
 
 async fn update_capability_store(storage: &HubStorage, store: &CapabilityStore) -> Result<()> {

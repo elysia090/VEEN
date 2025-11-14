@@ -6,7 +6,8 @@ use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
 use base64::Engine;
 use ciborium::de::from_reader;
-use reqwest::Client;
+use reqwest::header::RETRY_AFTER;
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
@@ -137,6 +138,8 @@ async fn goals_core_pipeline() -> Result<()> {
         "core/capped",
         "--ttl",
         "600",
+        "--rate",
+        "1,1",
         "--out",
         cap_file.to_str().unwrap(),
     ])
@@ -215,6 +218,38 @@ async fn goals_core_pipeline() -> Result<()> {
         .json()
         .await
         .context("parsing authorized submit response")?;
+
+    let rate_limited = http
+        .post(&submit_endpoint)
+        .json(&SubmitRequest {
+            stream: "core/capped".to_string(),
+            client_id: hex::encode(cap_token.subject_pk.as_ref()),
+            payload: serde_json::json!({"text":"rate-limited"}),
+            attachments: None,
+            auth_ref: Some(auth_ref_hex.clone()),
+            expires_at: None,
+            schema: None,
+            idem: None,
+        })
+        .send()
+        .await
+        .context("submitting rate-limited message")?;
+    assert_eq!(rate_limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry_after = rate_limited
+        .headers()
+        .get(RETRY_AFTER)
+        .context("missing retry-after header on rate limit")?
+        .to_str()
+        .context("retry-after header not valid UTF-8")?;
+    assert!(!retry_after.is_empty());
+    let rate_body = rate_limited
+        .text()
+        .await
+        .context("reading rate limit response body")?;
+    assert!(
+        rate_body.contains("E.RATE"),
+        "expected rate limit error code in body: {rate_body}"
+    );
 
     // Anchor log via HTTP
     http.post(format!("http://{}/anchor", runtime.listen_addr()))
