@@ -18,6 +18,118 @@ pub fn schema_meta_schema() -> [u8; 32] {
     h(b"veen.meta.schema.v1")
 }
 
+fn copy_schema_bytes(bytes: &[u8]) -> Result<[u8; SCHEMA_ID_LEN], LengthError> {
+    if bytes.len() != SCHEMA_ID_LEN {
+        return Err(LengthError::new(SCHEMA_ID_LEN, bytes.len()));
+    }
+
+    let mut out = [0u8; SCHEMA_ID_LEN];
+    out.copy_from_slice(bytes);
+    Ok(out)
+}
+
+macro_rules! impl_schema_value {
+    ($ty:ident, $visitor:ident, $expecting:literal) => {
+        impl $ty {
+            #[doc = concat!(
+                "Attempts to construct a [`",
+                stringify!($ty),
+                "`] from an arbitrary slice enforcing the exact length from the specification."
+            )]
+            pub fn from_slice(bytes: &[u8]) -> Result<Self, LengthError> {
+                copy_schema_bytes(bytes).map(Self::new)
+            }
+        }
+
+        impl From<[u8; SCHEMA_ID_LEN]> for $ty {
+            fn from(value: [u8; SCHEMA_ID_LEN]) -> Self {
+                Self::new(value)
+            }
+        }
+
+        impl From<&[u8; SCHEMA_ID_LEN]> for $ty {
+            fn from(value: &[u8; SCHEMA_ID_LEN]) -> Self {
+                Self::new(*value)
+            }
+        }
+
+        impl TryFrom<&[u8]> for $ty {
+            type Error = LengthError;
+
+            fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+                Self::from_slice(value)
+            }
+        }
+
+        impl TryFrom<Vec<u8>> for $ty {
+            type Error = LengthError;
+
+            fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+                Self::from_slice(&value)
+            }
+        }
+
+        impl AsRef<[u8]> for $ty {
+            fn as_ref(&self) -> &[u8] {
+                self.as_bytes()
+            }
+        }
+
+        impl Serialize for $ty {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_bytes(self.as_ref())
+            }
+        }
+
+        struct $visitor;
+
+        impl<'de> Visitor<'de> for $visitor {
+            type Value = $ty;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str($expecting)
+            }
+
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                $ty::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
+            }
+
+            fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                self.visit_bytes(&v)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut buf = Vec::with_capacity(SCHEMA_ID_LEN);
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    buf.push(byte);
+                }
+                $ty::try_from(buf).map_err(|err| A::Error::invalid_length(err.actual(), &self))
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $ty {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                deserializer.deserialize_bytes($visitor)
+            }
+        }
+    };
+}
+
 /// Strongly typed wrapper for schema identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SchemaId([u8; SCHEMA_ID_LEN]);
@@ -34,107 +146,9 @@ impl SchemaId {
     pub const fn as_bytes(&self) -> &[u8; SCHEMA_ID_LEN] {
         &self.0
     }
-
-    /// Attempts to construct a [`SchemaId`] from an arbitrary slice enforcing the
-    /// exact length from the specification.
-    pub fn from_slice(bytes: &[u8]) -> Result<Self, LengthError> {
-        if bytes.len() != SCHEMA_ID_LEN {
-            return Err(LengthError::new(SCHEMA_ID_LEN, bytes.len()));
-        }
-        let mut out = [0u8; SCHEMA_ID_LEN];
-        out.copy_from_slice(bytes);
-        Ok(Self::new(out))
-    }
-}
-
-impl From<[u8; SCHEMA_ID_LEN]> for SchemaId {
-    fn from(value: [u8; SCHEMA_ID_LEN]) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&[u8; SCHEMA_ID_LEN]> for SchemaId {
-    fn from(value: &[u8; SCHEMA_ID_LEN]) -> Self {
-        Self::new(*value)
-    }
-}
-
-impl TryFrom<&[u8]> for SchemaId {
-    type Error = LengthError;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        Self::from_slice(value)
-    }
-}
-
-impl TryFrom<Vec<u8>> for SchemaId {
-    type Error = LengthError;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::from_slice(&value)
-    }
-}
-
-impl AsRef<[u8]> for SchemaId {
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
-    }
 }
 
 crate::hexutil::impl_hex_fmt!(SchemaId);
-
-impl Serialize for SchemaId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_bytes(self.as_ref())
-    }
-}
-
-struct SchemaIdVisitor;
-
-impl<'de> Visitor<'de> for SchemaIdVisitor {
-    type Value = SchemaId;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a 32-byte schema identifier")
-    }
-
-    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        SchemaId::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
-    }
-
-    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        self.visit_bytes(&v)
-    }
-
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut buf = Vec::with_capacity(SCHEMA_ID_LEN);
-        while let Some(byte) = seq.next_element::<u8>()? {
-            buf.push(byte);
-        }
-        SchemaId::try_from(buf).map_err(|err| A::Error::invalid_length(err.actual(), &self))
-    }
-}
-
-impl<'de> Deserialize<'de> for SchemaId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_bytes(SchemaIdVisitor)
-    }
-}
 
 crate::hexutil::impl_fixed_hex_from_str!(SchemaId, SCHEMA_ID_LEN);
 
@@ -154,109 +168,19 @@ impl SchemaOwner {
     pub const fn as_bytes(&self) -> &[u8; SCHEMA_ID_LEN] {
         &self.0
     }
-
-    /// Attempts to construct a [`SchemaOwner`] from an arbitrary slice, enforcing the
-    /// fixed length in the specification.
-    pub fn from_slice(bytes: &[u8]) -> Result<Self, LengthError> {
-        if bytes.len() != SCHEMA_ID_LEN {
-            return Err(LengthError::new(SCHEMA_ID_LEN, bytes.len()));
-        }
-        let mut out = [0u8; SCHEMA_ID_LEN];
-        out.copy_from_slice(bytes);
-        Ok(Self::new(out))
-    }
-}
-
-impl From<[u8; SCHEMA_ID_LEN]> for SchemaOwner {
-    fn from(value: [u8; SCHEMA_ID_LEN]) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&[u8; SCHEMA_ID_LEN]> for SchemaOwner {
-    fn from(value: &[u8; SCHEMA_ID_LEN]) -> Self {
-        Self::new(*value)
-    }
-}
-
-impl TryFrom<&[u8]> for SchemaOwner {
-    type Error = LengthError;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        Self::from_slice(value)
-    }
-}
-
-impl TryFrom<Vec<u8>> for SchemaOwner {
-    type Error = LengthError;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::from_slice(&value)
-    }
-}
-
-impl AsRef<[u8]> for SchemaOwner {
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
-    }
 }
 
 crate::hexutil::impl_hex_fmt!(SchemaOwner);
 
-impl Serialize for SchemaOwner {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_bytes(self.as_ref())
-    }
-}
-
-struct SchemaOwnerVisitor;
-
-impl<'de> Visitor<'de> for SchemaOwnerVisitor {
-    type Value = SchemaOwner;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a 32-byte schema owner key")
-    }
-
-    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        SchemaOwner::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
-    }
-
-    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        self.visit_bytes(&v)
-    }
-
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut buf = Vec::with_capacity(SCHEMA_ID_LEN);
-        while let Some(byte) = seq.next_element::<u8>()? {
-            buf.push(byte);
-        }
-        SchemaOwner::try_from(buf).map_err(|err| A::Error::invalid_length(err.actual(), &self))
-    }
-}
-
-impl<'de> Deserialize<'de> for SchemaOwner {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_bytes(SchemaOwnerVisitor)
-    }
-}
-
 crate::hexutil::impl_fixed_hex_from_str!(SchemaOwner, SCHEMA_ID_LEN);
+
+impl_schema_value!(SchemaId, SchemaIdVisitor, "a 32-byte schema identifier");
+
+impl_schema_value!(
+    SchemaOwner,
+    SchemaOwnerVisitor,
+    "a 32-byte schema owner key"
+);
 
 /// Schema descriptor carried on `stream_schema_meta` as defined by META0+.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
