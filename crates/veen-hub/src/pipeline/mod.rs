@@ -1575,7 +1575,7 @@ async fn persist_attachments(
         let data = BASE64_STANDARD
             .decode(&attachment.data)
             .with_context(|| format!("decoding attachment {} for stream {}", index, stream))?;
-        let new_total = total_bytes.checked_add(data.len()).ok_or_else(|| {
+        let new_total = total_bytes.checked_add(data.len()).ok_or({
             CapabilityError::MessageTotalTooLarge {
                 total_bytes: usize::MAX,
                 limit: MAX_MSG_BYTES,
