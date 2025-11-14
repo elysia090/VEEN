@@ -29,3 +29,6 @@ hex.workspace = true
 sha2.workspace = true
 veen-core = { path = "../veen-core" }
 veen-hub = { path = "../veen-hub" }
+
+[dev-dependencies]
+httpmock = "0.7"

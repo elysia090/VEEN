@@ -141,7 +141,7 @@ fn spawn_bridge(
         primary: EndpointConfig::new(primary.parse()?, None),
         replica: EndpointConfig::new(replica.parse()?, None),
         poll_interval: Duration::from_millis(100),
-        initial_streams: vec![FED_CHAT_STREAM.to_string()],
+        initial_streams: Vec::new(),
     };
 
     Ok(tokio::spawn(run_bridge(config, shutdown)))
