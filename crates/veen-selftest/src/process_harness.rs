@@ -424,7 +424,7 @@ impl IntegrationHarness {
             .spawn_hub(
                 "overlay-replica",
                 HubRole::Replica,
-                &[replica_target.clone()],
+                std::slice::from_ref(&replica_target),
             )
             .await
             .context("spawning replica hub")?;
