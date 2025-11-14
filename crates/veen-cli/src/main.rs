@@ -20,7 +20,7 @@ use reqwest::{Client as HttpClient, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
-use serde_json::json;
+use serde_json::{json, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
@@ -93,6 +93,8 @@ const ANCHOR_LOG_FILE: &str = "anchor_log.json";
 const RETENTION_CONFIG_FILE: &str = "retention.json";
 const TLS_INFO_FILE: &str = "tls_info.json";
 const ATTACHMENTS_DIR: &str = "attachments";
+
+type JsonMap = serde_json::Map<String, JsonValue>;
 
 #[derive(Parser)]
 #[command(
@@ -172,6 +174,9 @@ enum Command {
     /// Run VEEN self-test suites.
     #[command(subcommand)]
     Selftest(SelftestCommand),
+    /// Render Kubernetes manifests for VEEN profiles.
+    #[command(subcommand)]
+    K8s(K8sCommand),
 }
 
 #[derive(Subcommand)]
@@ -338,6 +343,91 @@ enum SelftestCommand {
     Fuzz,
     /// Run the full test suite (core + props + fuzz).
     All,
+}
+
+#[derive(Subcommand)]
+enum K8sCommand {
+    /// Render manifests for the authority hub profile.
+    Authority(K8sAuthorityArgs),
+    /// Render manifests for a tenant hub profile.
+    Tenant(K8sTenantArgs),
+}
+
+#[derive(Args)]
+struct K8sAuthorityArgs {
+    /// Universe identifier assigned to the VEEN deployment.
+    #[arg(long)]
+    universe_id: String,
+    /// Semantic version that should be attached to rendered resources.
+    #[arg(long)]
+    version: String,
+    /// Optional override for the Kubernetes namespace. Defaults to veen-system.
+    #[arg(long)]
+    namespace: Option<String>,
+    /// Path to the authority hub configuration file that becomes hub.yaml.
+    #[arg(long)]
+    config: PathBuf,
+    /// Path to the authority hub key bundle encoded into the Secret.
+    #[arg(long)]
+    keys: PathBuf,
+    /// Container image reference for the hub runtime.
+    #[arg(long)]
+    image: Option<String>,
+    /// Kubernetes storage class for the PersistentVolumeClaim.
+    #[arg(long)]
+    storage_class: Option<String>,
+    /// Requested storage capacity for the PersistentVolumeClaim (for example 10Gi).
+    #[arg(long, default_value = "10Gi")]
+    storage_size: String,
+    /// Logical port exposed by the hub Service and container.
+    #[arg(long, default_value_t = 8080)]
+    port: u16,
+    /// Log level exported via VEEN_LOG_LEVEL.
+    #[arg(long, default_value = "info")]
+    log_level: String,
+}
+
+#[derive(Args)]
+struct K8sTenantArgs {
+    /// Tenant identifier used for labels and the namespace default.
+    #[arg(long)]
+    tenant_id: String,
+    /// Universe identifier assigned to the VEEN deployment.
+    #[arg(long)]
+    universe_id: String,
+    /// Semantic version that should be attached to rendered resources.
+    #[arg(long)]
+    version: String,
+    /// Optional override for the namespace. Defaults to veen-tenant-<tenant-id>.
+    #[arg(long)]
+    namespace: Option<String>,
+    /// Path to the tenant hub configuration file rendered as hub.yaml.
+    #[arg(long)]
+    config: PathBuf,
+    /// Path to the tenant hub key bundle encoded into the Secret.
+    #[arg(long)]
+    keys: PathBuf,
+    /// Container image reference for the hub runtime.
+    #[arg(long)]
+    hub_image: Option<String>,
+    /// Container image reference for the self-test job.
+    #[arg(long)]
+    selftest_image: Option<String>,
+    /// Request an additional PersistentVolumeClaim instead of emptyDir storage.
+    #[arg(long, default_value_t = false)]
+    persistent_storage: bool,
+    /// Requested storage capacity for the optional PersistentVolumeClaim.
+    #[arg(long, default_value = "1Gi")]
+    storage_size: String,
+    /// Kubernetes storage class for the optional PersistentVolumeClaim.
+    #[arg(long)]
+    storage_class: Option<String>,
+    /// Logical port exposed by the hub Service and container.
+    #[arg(long, default_value_t = 8080)]
+    port: u16,
+    /// Log level exported via VEEN_LOG_LEVEL.
+    #[arg(long, default_value = "info")]
+    log_level: String,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -1358,6 +1448,10 @@ async fn main() -> Result<()> {
         Command::HubTls(cmd) => match cmd {
             HubTlsCommand::TlsInfo(args) => handle_hub_tls_info(args).await,
         },
+        Command::K8s(cmd) => match cmd {
+            K8sCommand::Authority(args) => handle_k8s_authority(args).await,
+            K8sCommand::Tenant(args) => handle_k8s_tenant(args).await,
+        },
         Command::Selftest(cmd) => match cmd {
             SelftestCommand::Core => handle_selftest_core().await,
             SelftestCommand::Props => handle_selftest_props().await,
@@ -1365,6 +1459,667 @@ async fn main() -> Result<()> {
             SelftestCommand::All => handle_selftest_all().await,
         },
     }
+}
+
+async fn handle_k8s_authority(args: K8sAuthorityArgs) -> Result<()> {
+    let K8sAuthorityArgs {
+        universe_id,
+        version,
+        namespace,
+        config,
+        keys,
+        image,
+        storage_class,
+        storage_size,
+        port,
+        log_level,
+    } = args;
+
+    let namespace = namespace.unwrap_or_else(|| "veen-system".to_string());
+    let image = image.unwrap_or_else(|| format!("veen-hub:{version}"));
+
+    let config_contents = fs::read_to_string(&config)
+        .await
+        .with_context(|| format!("reading authority config {}", config.display()))?;
+    let key_bytes = fs::read(&keys)
+        .await
+        .with_context(|| format!("reading authority keys {}", keys.display()))?;
+
+    let config_hash = sha256_hex(config_contents.as_bytes());
+    let key_hash = sha256_hex(&key_bytes);
+    let combined_hash = sha256_hex_multi(&[config_contents.as_bytes(), key_bytes.as_slice()]);
+    let key_b64 = BASE64_STANDARD.encode(key_bytes);
+
+    let mut docs = Vec::new();
+    docs.push(namespace_manifest(
+        &namespace,
+        &universe_id,
+        &version,
+        "authority",
+        None,
+    ));
+
+    let base_labels = standard_labels("hub", "authority", &universe_id, None);
+
+    docs.push(config_map_manifest(
+        "veen-authority-config",
+        &namespace,
+        base_labels.clone(),
+        default_annotations("authority", &version, Some(&config_hash)),
+        "hub.yaml",
+        &config_contents,
+    ));
+
+    docs.push(secret_manifest(
+        "veen-authority-keys",
+        &namespace,
+        base_labels.clone(),
+        default_annotations("authority", &version, Some(&key_hash)),
+        "hub-key.cbor",
+        &key_b64,
+    ));
+
+    docs.push(pvc_manifest(
+        "veen-authority-data",
+        &namespace,
+        base_labels.clone(),
+        default_annotations("authority", &version, None),
+        &storage_size,
+        storage_class.as_deref(),
+    ));
+
+    docs.push(service_manifest(
+        "veen-authority",
+        &namespace,
+        base_labels.clone(),
+        default_annotations("authority", &version, None),
+        base_labels.clone(),
+        port,
+    ));
+
+    let pod_annotations = default_annotations("authority", &version, Some(&combined_hash));
+    let container = json!({
+        "name": "veen-authority-hub",
+        "image": image,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["veen-hub"],
+        "args": [
+            "--profile=authority",
+            "--config=/etc/veen/hub.yaml",
+            "--data-dir=/var/lib/veen"
+        ],
+        "env": [
+            {"name": "VEEN_ROLE", "value": "authority"},
+            {"name": "VEEN_UNIVERSE_ID", "value": universe_id.clone()},
+            {"name": "VEEN_LOG_LEVEL", "value": log_level.clone()}
+        ],
+        "ports": [
+            {"name": "http", "containerPort": port}
+        ],
+        "volumeMounts": [
+            {"name": "veen-config", "mountPath": "/etc/veen", "readOnly": true},
+            {"name": "veen-keys", "mountPath": "/etc/veen/keys", "readOnly": true},
+            {"name": "veen-data", "mountPath": "/var/lib/veen"}
+        ],
+        "livenessProbe": {
+            "httpGet": {"path": "/healthz", "port": "http"},
+            "initialDelaySeconds": 5,
+            "periodSeconds": 10
+        },
+        "readinessProbe": {
+            "httpGet": {"path": "/readyz", "port": "http"},
+            "initialDelaySeconds": 5,
+            "periodSeconds": 10
+        }
+    });
+
+    let volumes = vec![
+        json!({"name": "veen-config", "configMap": {"name": "veen-authority-config"}}),
+        json!({"name": "veen-keys", "secret": {"secretName": "veen-authority-keys"}}),
+        json!({"name": "veen-data", "persistentVolumeClaim": {"claimName": "veen-authority-data"}}),
+    ];
+
+    docs.push(statefulset_manifest(
+        "veen-authority-hub",
+        &namespace,
+        base_labels.clone(),
+        default_annotations("authority", &version, Some(&combined_hash)),
+        base_labels.clone(),
+        pod_annotations,
+        container,
+        volumes,
+        "veen-authority",
+    ));
+
+    let output = render_yaml_documents(&docs)?;
+    print!("{}", output);
+    Ok(())
+}
+
+async fn handle_k8s_tenant(args: K8sTenantArgs) -> Result<()> {
+    let K8sTenantArgs {
+        tenant_id,
+        universe_id,
+        version,
+        namespace,
+        config,
+        keys,
+        hub_image,
+        selftest_image,
+        persistent_storage,
+        storage_size,
+        storage_class,
+        port,
+        log_level,
+    } = args;
+
+    let namespace = namespace.unwrap_or_else(|| format!("veen-tenant-{tenant_id}"));
+    let hub_image = hub_image.unwrap_or_else(|| format!("veen-hub:{version}"));
+    let selftest_image = selftest_image.unwrap_or_else(|| format!("veen-selftest:{version}"));
+
+    let config_contents = fs::read_to_string(&config)
+        .await
+        .with_context(|| format!("reading tenant config {}", config.display()))?;
+    let key_bytes = fs::read(&keys)
+        .await
+        .with_context(|| format!("reading tenant keys {}", keys.display()))?;
+
+    let config_hash = sha256_hex(config_contents.as_bytes());
+    let key_hash = sha256_hex(&key_bytes);
+    let combined_hash = sha256_hex_multi(&[config_contents.as_bytes(), key_bytes.as_slice()]);
+    let key_b64 = BASE64_STANDARD.encode(key_bytes);
+
+    let mut docs = Vec::new();
+    docs.push(namespace_manifest(
+        &namespace,
+        &universe_id,
+        &version,
+        "tenant",
+        Some(&tenant_id),
+    ));
+
+    let base_labels = standard_labels("hub", "tenant", &universe_id, Some(&tenant_id));
+
+    docs.push(config_map_manifest(
+        "veen-hub-config",
+        &namespace,
+        base_labels.clone(),
+        default_annotations("tenant", &version, Some(&config_hash)),
+        "hub.yaml",
+        &config_contents,
+    ));
+
+    docs.push(secret_manifest(
+        "veen-hub-keys",
+        &namespace,
+        base_labels.clone(),
+        default_annotations("tenant", &version, Some(&key_hash)),
+        "hub-key.cbor",
+        &key_b64,
+    ));
+
+    if persistent_storage {
+        docs.push(pvc_manifest(
+            "veen-hub-data",
+            &namespace,
+            base_labels.clone(),
+            default_annotations("tenant", &version, None),
+            &storage_size,
+            storage_class.as_deref(),
+        ));
+    }
+
+    docs.push(service_manifest(
+        "veen-hub",
+        &namespace,
+        base_labels.clone(),
+        default_annotations("tenant", &version, None),
+        base_labels.clone(),
+        port,
+    ));
+
+    let pod_annotations = default_annotations("tenant", &version, Some(&combined_hash));
+    let mut volume_mounts = vec![
+        json!({"name": "veen-config", "mountPath": "/etc/veen", "readOnly": true}),
+        json!({"name": "veen-keys", "mountPath": "/etc/veen/keys", "readOnly": true}),
+    ];
+    volume_mounts.push(json!({"name": "veen-data", "mountPath": "/var/lib/veen"}));
+
+    let container = json!({
+        "name": "veen-tenant-hub",
+        "image": hub_image,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["veen-hub"],
+        "args": [
+            "--profile=tenant",
+            "--config=/etc/veen/hub.yaml",
+            "--data-dir=/var/lib/veen"
+        ],
+        "env": [
+            {"name": "VEEN_ROLE", "value": "tenant"},
+            {"name": "VEEN_TENANT_ID", "value": tenant_id.clone()},
+            {"name": "VEEN_UNIVERSE_ID", "value": universe_id.clone()},
+            {"name": "VEEN_LOG_LEVEL", "value": log_level.clone()}
+        ],
+        "ports": [
+            {"name": "http", "containerPort": port}
+        ],
+        "volumeMounts": volume_mounts,
+        "livenessProbe": {
+            "httpGet": {"path": "/healthz", "port": "http"},
+            "initialDelaySeconds": 5,
+            "periodSeconds": 10
+        },
+        "readinessProbe": {
+            "httpGet": {"path": "/readyz", "port": "http"},
+            "initialDelaySeconds": 5,
+            "periodSeconds": 10
+        }
+    });
+
+    let mut volumes = vec![
+        json!({"name": "veen-config", "configMap": {"name": "veen-hub-config"}}),
+        json!({"name": "veen-keys", "secret": {"secretName": "veen-hub-keys"}}),
+    ];
+    if persistent_storage {
+        volumes.push(json!({
+            "name": "veen-data",
+            "persistentVolumeClaim": {"claimName": "veen-hub-data"}
+        }));
+    } else {
+        volumes.push(json!({"name": "veen-data", "emptyDir": {}}));
+    }
+
+    docs.push(deployment_manifest(
+        "veen-hub",
+        &namespace,
+        base_labels.clone(),
+        default_annotations("tenant", &version, Some(&combined_hash)),
+        base_labels.clone(),
+        pod_annotations,
+        container,
+        volumes,
+    ));
+
+    let job_labels = standard_labels("selftest", "selftest", &universe_id, Some(&tenant_id));
+    let job_annotations = default_annotations("selftest", &version, None);
+    let hub_url = format!("http://veen-hub:{port}");
+    let job_container = json!({
+        "name": "veen-selftest-core",
+        "image": selftest_image,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["veen-selftest", "core", "--hub", hub_url],
+        "env": [
+            {"name": "VEEN_ROLE", "value": "selftest"},
+            {"name": "VEEN_TENANT_ID", "value": tenant_id.clone()},
+            {"name": "VEEN_UNIVERSE_ID", "value": universe_id.clone()}
+        ],
+        "volumeMounts": [
+            {"name": "work", "mountPath": "/work"}
+        ]
+    });
+    let job_volumes = vec![json!({"name": "work", "emptyDir": {}})];
+
+    docs.push(job_manifest(
+        "veen-selftest-core",
+        &namespace,
+        job_labels,
+        job_annotations,
+        job_container,
+        job_volumes,
+    ));
+
+    let output = render_yaml_documents(&docs)?;
+    print!("{}", output);
+    Ok(())
+}
+
+fn namespace_manifest(
+    name: &str,
+    universe_id: &str,
+    version: &str,
+    profile: &str,
+    tenant_id: Option<&str>,
+) -> JsonValue {
+    let mut labels = JsonMap::new();
+    labels.insert("app.kubernetes.io/part-of".to_string(), json!("veen"));
+    labels.insert(
+        "veen.io/universe-id".to_string(),
+        json!(universe_id.to_string()),
+    );
+    if let Some(tenant) = tenant_id {
+        labels.insert("veen.io/tenant-id".to_string(), json!(tenant.to_string()));
+    }
+    let annotations = default_annotations(profile, version, None);
+
+    let mut root = JsonMap::new();
+    root.insert("apiVersion".to_string(), json!("v1"));
+    root.insert("kind".to_string(), json!("Namespace"));
+    root.insert(
+        "metadata".to_string(),
+        metadata(Some(name), None, Some(labels), Some(annotations)),
+    );
+    JsonValue::Object(root)
+}
+
+fn config_map_manifest(
+    name: &str,
+    namespace: &str,
+    labels: JsonMap,
+    annotations: JsonMap,
+    data_key: &str,
+    data_value: &str,
+) -> JsonValue {
+    let mut data = JsonMap::new();
+    data.insert(
+        data_key.to_string(),
+        JsonValue::String(data_value.to_string()),
+    );
+
+    let mut root = JsonMap::new();
+    root.insert("apiVersion".to_string(), json!("v1"));
+    root.insert("kind".to_string(), json!("ConfigMap"));
+    root.insert(
+        "metadata".to_string(),
+        metadata(Some(name), Some(namespace), Some(labels), Some(annotations)),
+    );
+    root.insert("data".to_string(), JsonValue::Object(data));
+    JsonValue::Object(root)
+}
+
+fn secret_manifest(
+    name: &str,
+    namespace: &str,
+    labels: JsonMap,
+    annotations: JsonMap,
+    data_key: &str,
+    data_value: &str,
+) -> JsonValue {
+    let mut data = JsonMap::new();
+    data.insert(
+        data_key.to_string(),
+        JsonValue::String(data_value.to_string()),
+    );
+
+    let mut root = JsonMap::new();
+    root.insert("apiVersion".to_string(), json!("v1"));
+    root.insert("kind".to_string(), json!("Secret"));
+    root.insert(
+        "metadata".to_string(),
+        metadata(Some(name), Some(namespace), Some(labels), Some(annotations)),
+    );
+    root.insert("type".to_string(), json!("Opaque"));
+    root.insert("data".to_string(), JsonValue::Object(data));
+    JsonValue::Object(root)
+}
+
+fn pvc_manifest(
+    name: &str,
+    namespace: &str,
+    labels: JsonMap,
+    annotations: JsonMap,
+    storage_size: &str,
+    storage_class: Option<&str>,
+) -> JsonValue {
+    let mut requests = JsonMap::new();
+    requests.insert("storage".to_string(), json!(storage_size.to_string()));
+    let mut resources = JsonMap::new();
+    resources.insert("requests".to_string(), JsonValue::Object(requests));
+
+    let mut spec = JsonMap::new();
+    spec.insert("accessModes".to_string(), json!(["ReadWriteOnce"]));
+    spec.insert("resources".to_string(), JsonValue::Object(resources));
+    if let Some(class) = storage_class {
+        spec.insert("storageClassName".to_string(), json!(class.to_string()));
+    }
+
+    let mut root = JsonMap::new();
+    root.insert("apiVersion".to_string(), json!("v1"));
+    root.insert("kind".to_string(), json!("PersistentVolumeClaim"));
+    root.insert(
+        "metadata".to_string(),
+        metadata(Some(name), Some(namespace), Some(labels), Some(annotations)),
+    );
+    root.insert("spec".to_string(), JsonValue::Object(spec));
+    JsonValue::Object(root)
+}
+
+fn service_manifest(
+    name: &str,
+    namespace: &str,
+    labels: JsonMap,
+    annotations: JsonMap,
+    selector: JsonMap,
+    port: u16,
+) -> JsonValue {
+    let mut spec = JsonMap::new();
+    spec.insert("selector".to_string(), JsonValue::Object(selector));
+    spec.insert(
+        "ports".to_string(),
+        json!([{ "name": "http", "port": port, "targetPort": port }]),
+    );
+    spec.insert("type".to_string(), json!("ClusterIP"));
+
+    let mut root = JsonMap::new();
+    root.insert("apiVersion".to_string(), json!("v1"));
+    root.insert("kind".to_string(), json!("Service"));
+    root.insert(
+        "metadata".to_string(),
+        metadata(Some(name), Some(namespace), Some(labels), Some(annotations)),
+    );
+    root.insert("spec".to_string(), JsonValue::Object(spec));
+    JsonValue::Object(root)
+}
+
+fn statefulset_manifest(
+    name: &str,
+    namespace: &str,
+    labels: JsonMap,
+    annotations: JsonMap,
+    selector_labels: JsonMap,
+    pod_annotations: JsonMap,
+    container: JsonValue,
+    volumes: Vec<JsonValue>,
+    service_name: &str,
+) -> JsonValue {
+    let mut spec = JsonMap::new();
+    spec.insert("serviceName".to_string(), json!(service_name.to_string()));
+    spec.insert("replicas".to_string(), json!(1));
+
+    let mut selector = JsonMap::new();
+    selector.insert(
+        "matchLabels".to_string(),
+        JsonValue::Object(selector_labels.clone()),
+    );
+    spec.insert("selector".to_string(), JsonValue::Object(selector));
+
+    let template_metadata = metadata(None, None, Some(selector_labels), Some(pod_annotations));
+
+    let mut template_spec = JsonMap::new();
+    template_spec.insert("containers".to_string(), JsonValue::Array(vec![container]));
+    template_spec.insert("volumes".to_string(), JsonValue::Array(volumes));
+
+    let mut template = JsonMap::new();
+    template.insert("metadata".to_string(), template_metadata);
+    template.insert("spec".to_string(), JsonValue::Object(template_spec));
+
+    spec.insert("template".to_string(), JsonValue::Object(template));
+
+    let mut root = JsonMap::new();
+    root.insert("apiVersion".to_string(), json!("apps/v1"));
+    root.insert("kind".to_string(), json!("StatefulSet"));
+    root.insert(
+        "metadata".to_string(),
+        metadata(Some(name), Some(namespace), Some(labels), Some(annotations)),
+    );
+    root.insert("spec".to_string(), JsonValue::Object(spec));
+    JsonValue::Object(root)
+}
+
+fn deployment_manifest(
+    name: &str,
+    namespace: &str,
+    labels: JsonMap,
+    annotations: JsonMap,
+    selector_labels: JsonMap,
+    pod_annotations: JsonMap,
+    container: JsonValue,
+    volumes: Vec<JsonValue>,
+) -> JsonValue {
+    let mut spec = JsonMap::new();
+    spec.insert("replicas".to_string(), json!(1));
+
+    let mut selector = JsonMap::new();
+    selector.insert(
+        "matchLabels".to_string(),
+        JsonValue::Object(selector_labels.clone()),
+    );
+    spec.insert("selector".to_string(), JsonValue::Object(selector));
+
+    let template_metadata = metadata(None, None, Some(selector_labels), Some(pod_annotations));
+
+    let mut template_spec = JsonMap::new();
+    template_spec.insert("containers".to_string(), JsonValue::Array(vec![container]));
+    template_spec.insert("volumes".to_string(), JsonValue::Array(volumes));
+
+    let mut template = JsonMap::new();
+    template.insert("metadata".to_string(), template_metadata);
+    template.insert("spec".to_string(), JsonValue::Object(template_spec));
+
+    spec.insert("template".to_string(), JsonValue::Object(template));
+
+    let mut root = JsonMap::new();
+    root.insert("apiVersion".to_string(), json!("apps/v1"));
+    root.insert("kind".to_string(), json!("Deployment"));
+    root.insert(
+        "metadata".to_string(),
+        metadata(Some(name), Some(namespace), Some(labels), Some(annotations)),
+    );
+    root.insert("spec".to_string(), JsonValue::Object(spec));
+    JsonValue::Object(root)
+}
+
+fn job_manifest(
+    name: &str,
+    namespace: &str,
+    labels: JsonMap,
+    annotations: JsonMap,
+    container: JsonValue,
+    volumes: Vec<JsonValue>,
+) -> JsonValue {
+    let pod_metadata = metadata(None, None, Some(labels.clone()), Some(annotations.clone()));
+
+    let mut pod_spec = JsonMap::new();
+    pod_spec.insert("containers".to_string(), JsonValue::Array(vec![container]));
+    pod_spec.insert("volumes".to_string(), JsonValue::Array(volumes));
+    pod_spec.insert("restartPolicy".to_string(), json!("Never"));
+
+    let mut template = JsonMap::new();
+    template.insert("metadata".to_string(), pod_metadata);
+    template.insert("spec".to_string(), JsonValue::Object(pod_spec));
+
+    let mut spec = JsonMap::new();
+    spec.insert("template".to_string(), JsonValue::Object(template));
+    spec.insert("backoffLimit".to_string(), json!(1));
+    spec.insert("completions".to_string(), json!(1));
+    spec.insert("parallelism".to_string(), json!(1));
+
+    let mut root = JsonMap::new();
+    root.insert("apiVersion".to_string(), json!("batch/v1"));
+    root.insert("kind".to_string(), json!("Job"));
+    root.insert(
+        "metadata".to_string(),
+        metadata(Some(name), Some(namespace), Some(labels), Some(annotations)),
+    );
+    root.insert("spec".to_string(), JsonValue::Object(spec));
+    JsonValue::Object(root)
+}
+
+fn standard_labels(
+    component: &str,
+    role: &str,
+    universe_id: &str,
+    tenant_id: Option<&str>,
+) -> JsonMap {
+    let mut labels = JsonMap::new();
+    labels.insert("app.kubernetes.io/part-of".to_string(), json!("veen"));
+    labels.insert(
+        "app.kubernetes.io/component".to_string(),
+        json!(component.to_string()),
+    );
+    labels.insert("veen.io/role".to_string(), json!(role.to_string()));
+    labels.insert(
+        "veen.io/universe-id".to_string(),
+        json!(universe_id.to_string()),
+    );
+    if let Some(tenant) = tenant_id {
+        labels.insert("veen.io/tenant-id".to_string(), json!(tenant.to_string()));
+    }
+    labels
+}
+
+fn default_annotations(profile: &str, version: &str, config_hash: Option<&str>) -> JsonMap {
+    let mut annotations = JsonMap::new();
+    annotations.insert("veen.io/profile".to_string(), json!(profile.to_string()));
+    annotations.insert("veen.io/version".to_string(), json!(version.to_string()));
+    if let Some(hash) = config_hash {
+        annotations.insert("veen.io/config-hash".to_string(), json!(hash.to_string()));
+    }
+    annotations
+}
+
+fn metadata(
+    name: Option<&str>,
+    namespace: Option<&str>,
+    labels: Option<JsonMap>,
+    annotations: Option<JsonMap>,
+) -> JsonValue {
+    let mut meta = JsonMap::new();
+    if let Some(n) = name {
+        meta.insert("name".to_string(), json!(n.to_string()));
+    }
+    if let Some(ns) = namespace {
+        meta.insert("namespace".to_string(), json!(ns.to_string()));
+    }
+    if let Some(map) = labels {
+        if !map.is_empty() {
+            meta.insert("labels".to_string(), JsonValue::Object(map));
+        }
+    }
+    if let Some(map) = annotations {
+        if !map.is_empty() {
+            meta.insert("annotations".to_string(), JsonValue::Object(map));
+        }
+    }
+    JsonValue::Object(meta)
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    let digest = Sha256::digest(data);
+    hex::encode(digest)
+}
+
+fn sha256_hex_multi(chunks: &[&[u8]]) -> String {
+    let mut hasher = Sha256::new();
+    for chunk in chunks {
+        hasher.update(chunk);
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn render_yaml_documents(docs: &[JsonValue]) -> Result<String> {
+    let mut rendered = String::new();
+    for (idx, doc) in docs.iter().enumerate() {
+        if idx > 0 {
+            rendered.push_str("---\n");
+        }
+        let serialized = serde_yaml::to_string(doc).context("serializing Kubernetes manifest")?;
+        rendered.push_str(&serialized);
+    }
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    Ok(rendered)
 }
 
 fn init_tracing() {
