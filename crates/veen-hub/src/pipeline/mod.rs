@@ -33,7 +33,7 @@ use veen_core::wire::{
 use veen_core::{
     cap_stream_id_from_label, cap_token_from_cbor, schema_fed_authority, schema_label_class,
     schema_meta_schema, AuthorityRecord, AuthorityView, CapTokenRate, Label, LabelClassRecord,
-    PowCookie, SchemaDescriptor, StreamIdParseError, CAP_TOKEN_VERSION,
+    LabelPolicy, PowCookie, SchemaDescriptor, StreamIdParseError, CAP_TOKEN_VERSION,
 };
 
 use thiserror::Error;
@@ -192,8 +192,16 @@ impl HubPipeline {
             }
         }
 
+        let stream_id = cap_stream_id_from_label(&stream).map_err(|err| {
+            anyhow::Error::new(CapabilityError::StreamInvalid {
+                stream: stream.clone(),
+                source: err,
+            })
+        })?;
+
         let attachments = attachments.unwrap_or_default();
         let submitted_at = current_unix_timestamp();
+        let submitted_at_ms = current_unix_timestamp_millis();
         let client_id_value = ClientId::from_str(&client_id)
             .with_context(|| format!("parsing client_id {client_id} as hex-encoded identifier"))?;
         let client_target = RevocationTarget::from_slice(client_id_value.as_ref())
@@ -212,6 +220,64 @@ impl HubPipeline {
             .context("constructing auth_ref revocation target")?;
 
         let mut guard = self.inner.lock().await;
+
+        let authority = guard
+            .authority_view
+            .label_authority_for_stream(stream_id, submitted_at);
+        if !authority.allows_hub(self.identity.hub_id) {
+            let policy_str = match authority.policy {
+                LabelPolicy::SinglePrimary => "single-primary",
+                LabelPolicy::MultiPrimary => "multi-primary",
+                LabelPolicy::Unspecified => "unspecified",
+            };
+
+            let detail = match authority.policy {
+                LabelPolicy::SinglePrimary => authority
+                    .primary_hub
+                    .map(|primary| format!("; expected primary {}", hex::encode(primary.as_ref())))
+                    .unwrap_or_default(),
+                LabelPolicy::MultiPrimary => {
+                    let mut allowed = Vec::new();
+                    if let Some(primary) = authority.primary_hub {
+                        allowed.push(hex::encode(primary.as_ref()));
+                    }
+                    allowed.extend(
+                        authority
+                            .replica_hubs
+                            .iter()
+                            .map(|hub| hex::encode(hub.as_ref())),
+                    );
+                    if allowed.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; allowed hubs {}", allowed.join(","))
+                    }
+                }
+                LabelPolicy::Unspecified => String::new(),
+            };
+
+            return Err(anyhow::Error::new(
+                CapabilityError::NotAuthorisedForStream {
+                    stream: stream.clone(),
+                    policy: policy_str,
+                    detail,
+                },
+            ));
+        }
+
+        if matches!(authority.policy, LabelPolicy::MultiPrimary) {
+            let mut allowed = Vec::new();
+            if let Some(primary) = authority.primary_hub {
+                allowed.push(hex::encode(primary.as_ref()));
+            }
+            allowed.extend(
+                authority
+                    .replica_hubs
+                    .iter()
+                    .map(|hub| hex::encode(hub.as_ref())),
+            );
+            tracing::debug!(stream = %stream, allowed_hubs = %allowed.join(","), "accepting multi-primary stream");
+        }
 
         if guard
             .revocations
@@ -254,6 +320,7 @@ impl HubPipeline {
                 &client_id,
                 &stream,
                 submitted_at,
+                submitted_at_ms,
             ) {
                 update_capability_store(&self.storage, &guard.capabilities).await?;
                 return Err(anyhow::Error::new(err));
@@ -624,10 +691,11 @@ impl HubPipeline {
             expires_at,
             ttl: token.allow.ttl,
             rate: token.allow.rate.clone(),
-            bucket_state: token.allow.rate.as_ref().map(|rate| TokenBucketState {
-                tokens: rate.burst,
-                last_refill: now,
-            }),
+            bucket_state: token
+                .allow
+                .rate
+                .as_ref()
+                .map(|rate| TokenBucketState::new(rate.burst, current_unix_timestamp_millis())),
             uses: 0,
             token_hash: Some(hex::encode(cap_token_hash(token_bytes))),
         };
@@ -957,6 +1025,16 @@ struct CapabilityStore {
     client_usage: HashMap<String, ClientAdmissionState>,
 }
 
+impl CapabilityStore {
+    fn normalise_bucket_state(&mut self) {
+        for record in self.records.values_mut() {
+            if let Some(state) = record.bucket_state.as_mut() {
+                state.normalise_units();
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CapabilityRecord {
     subject: String,
@@ -999,6 +1077,21 @@ struct TokenBucketState {
     last_refill: u64,
 }
 
+impl TokenBucketState {
+    fn new(burst: u64, now_ms: u64) -> Self {
+        Self {
+            tokens: burst,
+            last_refill: now_ms,
+        }
+    }
+
+    fn normalise_units(&mut self) {
+        if self.last_refill < 1_000_000_000_000 {
+            self.last_refill = self.last_refill.saturating_mul(1_000);
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum CapabilityError {
     #[error("E.AUTH capability {auth_ref} is not authorised")]
@@ -1008,6 +1101,12 @@ pub enum CapabilityError {
     #[error("E.CAP capability {auth_ref} stream derivation failed: {source}")]
     StreamMismatch {
         auth_ref: String,
+        #[source]
+        source: StreamIdParseError,
+    },
+    #[error("E.AUTH invalid stream identifier {stream}: {source}")]
+    StreamInvalid {
+        stream: String,
         #[source]
         source: StreamIdParseError,
     },
@@ -1041,6 +1140,12 @@ pub enum CapabilityError {
     ProofOfWorkInsufficient { required: u8, provided: u8 },
     #[error("E.AUTH proof-of-work cookie failed verification (required {required})")]
     ProofOfWorkInvalid { required: u8 },
+    #[error("E.AUTH hub not authorised for stream {stream} under {policy}{detail}")]
+    NotAuthorisedForStream {
+        stream: String,
+        policy: &'static str,
+        detail: String,
+    },
 }
 
 impl CapabilityError {
@@ -1059,7 +1164,9 @@ impl CapabilityError {
             | Self::ClientIdRevoked { .. }
             | Self::ClientLifetimeExceeded { .. }
             | Self::ClientQuotaExceeded { .. }
-            | Self::ClientUsageOverflow { .. } => "E.AUTH",
+            | Self::ClientUsageOverflow { .. }
+            | Self::StreamInvalid { .. }
+            | Self::NotAuthorisedForStream { .. } => "E.AUTH",
             Self::SubjectMismatch { .. }
             | Self::StreamMismatch { .. }
             | Self::StreamDenied { .. }
@@ -1099,6 +1206,7 @@ const HUB_KEY_VERSION: u8 = 1;
 
 #[derive(Clone)]
 struct HubIdentity {
+    hub_id: HubId,
     hub_id_hex: String,
     public_key_hex: String,
 }
@@ -1149,6 +1257,7 @@ async fn load_hub_identity(storage: &HubStorage) -> Result<HubIdentity> {
         .map_err(|err| anyhow!("deriving hub identifier failed: {err}"))?;
 
     Ok(HubIdentity {
+        hub_id,
         hub_id_hex: hex::encode(hub_id.as_ref()),
         public_key_hex: hex::encode(public_key),
     })
@@ -1415,6 +1524,7 @@ fn enforce_capability(
     subject: &str,
     stream: &str,
     now: u64,
+    now_ms: u64,
 ) -> Result<(), CapabilityError> {
     if !store.records.contains_key(auth_ref) {
         return Err(CapabilityError::Unauthorized {
@@ -1447,10 +1557,10 @@ fn enforce_capability(
     }
 
     if record.rate.is_some() && record.bucket_state.is_none() {
-        record.bucket_state = record.rate.as_ref().map(|rate| TokenBucketState {
-            tokens: rate.burst,
-            last_refill: now,
-        });
+        record.bucket_state = record
+            .rate
+            .as_ref()
+            .map(|rate| TokenBucketState::new(rate.burst, now_ms));
     }
 
     let stream_id =
@@ -1471,9 +1581,9 @@ fn enforce_capability(
     }
 
     if let (Some(rate), Some(state)) = (&record.rate, record.bucket_state.as_mut()) {
-        refill_bucket(state, rate, now);
+        refill_bucket(state, rate, now_ms);
         if state.tokens == 0 {
-            let retry_after = retry_after_seconds(state, now);
+            let retry_after = retry_after_seconds(rate, state, now_ms);
             return Err(CapabilityError::RateLimited {
                 auth_ref: auth_ref.to_string(),
                 retry_after,
@@ -1486,31 +1596,66 @@ fn enforce_capability(
     Ok(())
 }
 
-fn refill_bucket(state: &mut TokenBucketState, rate: &CapTokenRate, now: u64) {
-    if now <= state.last_refill {
+fn refill_bucket(state: &mut TokenBucketState, rate: &CapTokenRate, now_ms: u64) {
+    if now_ms <= state.last_refill {
         return;
     }
-    let elapsed = now.saturating_sub(state.last_refill);
+    let elapsed = now_ms.saturating_sub(state.last_refill);
     if elapsed == 0 {
         return;
     }
-    let new_tokens = state
-        .tokens
-        .saturating_add(elapsed.saturating_mul(rate.per_sec));
-    state.tokens = new_tokens.min(rate.burst);
-    state.last_refill = now;
+    if rate.per_sec == 0 {
+        return;
+    }
+
+    let gained = ((elapsed as u128) * (rate.per_sec as u128)) / 1_000;
+    if gained == 0 {
+        return;
+    }
+
+    let available_capacity = (rate.burst as u128).saturating_sub(state.tokens as u128);
+    if available_capacity == 0 {
+        state.last_refill = now_ms;
+        return;
+    }
+
+    let added = gained.min(available_capacity);
+    state.tokens = state.tokens.saturating_add(added as u64);
+
+    let consumed = ((added * 1_000) / (rate.per_sec as u128)) as u64;
+    state.last_refill = state.last_refill.saturating_add(consumed).min(now_ms);
 }
 
-fn retry_after_seconds(state: &TokenBucketState, now: u64) -> u64 {
-    if state.last_refill > now {
+fn retry_after_seconds(rate: &CapTokenRate, state: &TokenBucketState, now_ms: u64) -> u64 {
+    if rate.per_sec == 0 {
         return 1;
     }
-    let target = state.last_refill.saturating_add(1);
-    let wait = target.saturating_sub(now);
-    if wait == 0 {
+
+    let interval = div_ceil(1_000, rate.per_sec);
+    let target = state.last_refill.saturating_add(interval);
+    if target <= now_ms {
+        return 1;
+    }
+
+    let wait_ms = target - now_ms;
+    let wait_secs = wait_ms / 1_000;
+    if wait_secs == 0 {
         1
     } else {
-        wait
+        wait_secs
+    }
+}
+
+fn div_ceil(lhs: u64, rhs: u64) -> u64 {
+    if rhs == 0 {
+        return lhs;
+    }
+    let quotient = lhs / rhs;
+    let remainder = lhs % rhs;
+    if remainder == 0 {
+        quotient
+    } else {
+        quotient.saturating_add(1)
     }
 }
 
@@ -1538,8 +1683,9 @@ async fn load_capabilities(storage: &HubStorage) -> Result<CapabilityStore> {
     let data = fs::read(&path)
         .await
         .with_context(|| format!("reading capabilities store from {}", path.display()))?;
-    let store = serde_json::from_slice(&data)
+    let mut store: CapabilityStore = serde_json::from_slice(&data)
         .with_context(|| format!("parsing capability store from {}", path.display()))?;
+    store.normalise_bucket_state();
     Ok(store)
 }
 
@@ -1738,6 +1884,13 @@ fn current_unix_timestamp() -> u64 {
     now.as_secs()
 }
 
+fn current_unix_timestamp_millis() -> u64 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before UNIX_EPOCH");
+    now.as_millis() as u64
+}
+
 fn revocation_target_from_hex_str(value: &str) -> Result<RevocationTarget> {
     let bytes =
         hex::decode(value).with_context(|| format!("decoding revocation target {value}"))?;
@@ -1753,7 +1906,7 @@ fn revocation_target_from_hex_str(value: &str) -> Result<RevocationTarget> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AnchorConfig, ObservabilityConfig};
+    use crate::config::HubConfigOverrides;
     use anyhow::Context;
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
@@ -1762,6 +1915,7 @@ mod tests {
     use tempfile::tempdir;
     use tokio::fs;
     use tokio::runtime::Runtime;
+    use veen_core::cap_stream_id_from_label;
     use veen_core::federation::AuthorityPolicy;
     use veen_core::meta::SchemaId;
     use veen_core::realm::RealmId;
@@ -1795,22 +1949,27 @@ mod tests {
         Ok(())
     }
 
-    async fn init_pipeline(data_dir: &Path) -> HubPipeline {
+    async fn init_pipeline_with_overrides(
+        data_dir: &Path,
+        overrides: HubConfigOverrides,
+    ) -> HubPipeline {
         let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let config = HubRuntimeConfig {
+        let config = HubRuntimeConfig::from_sources(
             listen,
-            data_dir: data_dir.to_path_buf(),
-            role: HubRole::Primary,
-            profile_id: None,
-            anchors: AnchorConfig::default(),
-            observability: ObservabilityConfig::default(),
-            admission: AdmissionConfig::default(),
-            federation: FederationConfig::default(),
-            config_path: None,
-        };
+            data_dir.to_path_buf(),
+            None,
+            HubRole::Primary,
+            overrides,
+        )
+        .await
+        .unwrap();
         let storage = HubStorage::bootstrap(&config).await.unwrap();
         write_test_hub_key(storage.data_dir()).await.unwrap();
         HubPipeline::initialise(&config, &storage).await.unwrap()
+    }
+
+    async fn init_pipeline(data_dir: &Path) -> HubPipeline {
+        init_pipeline_with_overrides(data_dir, HubConfigOverrides::default()).await
     }
 
     fn encode_envelope<T: Serialize>(schema: [u8; 32], body: T) -> Vec<u8> {
@@ -1862,6 +2021,100 @@ mod tests {
                 .authority_view
                 .active_record_at(realm, stream, record.ts)
                 .is_some());
+        });
+    }
+
+    #[test]
+    fn submit_rejects_when_hub_not_authorised() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let overrides = HubConfigOverrides {
+                capability_gating_enabled: Some(false),
+                ..HubConfigOverrides::default()
+            };
+            let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
+
+            let stream_label = "core/main";
+            let stream_id = cap_stream_id_from_label(stream_label).expect("stream id");
+            let realm = RealmId::derive("authority-realm");
+            let record = AuthorityRecord {
+                realm_id: realm,
+                stream_id,
+                primary_hub: HubId::new([0xAA; 32]),
+                replica_hubs: Vec::new(),
+                policy: AuthorityPolicy::SinglePrimary,
+                ts: current_unix_timestamp(),
+                ttl: 600,
+            };
+            let payload = encode_envelope(schema_fed_authority(), record);
+            pipeline.publish_authority(&payload).await.unwrap();
+
+            let request = SubmitRequest {
+                stream: stream_label.to_string(),
+                client_id: hex::encode([0x11; 32]),
+                payload: serde_json::json!({"text": "unauthorised"}),
+                attachments: None,
+                auth_ref: None,
+                expires_at: None,
+                schema: None,
+                idem: None,
+                pow_cookie: None,
+            };
+
+            let err = pipeline
+                .submit(request)
+                .await
+                .expect_err("submit should fail");
+            let capability_err = err.downcast::<CapabilityError>().expect("capability error");
+            match capability_err {
+                CapabilityError::NotAuthorisedForStream { policy, .. } => {
+                    assert_eq!(policy, "single-primary");
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn submit_accepts_for_multi_primary_replica() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let overrides = HubConfigOverrides {
+                capability_gating_enabled: Some(false),
+                ..HubConfigOverrides::default()
+            };
+            let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
+
+            let stream_label = "core/main";
+            let stream_id = cap_stream_id_from_label(stream_label).expect("stream id");
+            let realm = RealmId::derive("multi-realm");
+            let record = AuthorityRecord {
+                realm_id: realm,
+                stream_id,
+                primary_hub: HubId::new([0xAA; 32]),
+                replica_hubs: vec![pipeline.identity.hub_id],
+                policy: AuthorityPolicy::MultiPrimary,
+                ts: current_unix_timestamp(),
+                ttl: 600,
+            };
+            let payload = encode_envelope(schema_fed_authority(), record);
+            pipeline.publish_authority(&payload).await.unwrap();
+
+            let request = SubmitRequest {
+                stream: stream_label.to_string(),
+                client_id: hex::encode([0x22; 32]),
+                payload: serde_json::json!({"text": "multi-primary"}),
+                attachments: None,
+                auth_ref: None,
+                expires_at: None,
+                schema: None,
+                idem: None,
+                pow_cookie: None,
+            };
+
+            pipeline.submit(request).await.expect("submit to succeed");
         });
     }
 

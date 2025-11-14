@@ -168,6 +168,37 @@ impl AuthorityView {
         }
     }
 
+    fn best_realm_for_stream(&self, stream_id: StreamId, time: u64) -> Option<RealmId> {
+        self.records
+            .iter()
+            .filter_map(|(&(realm_id, record_stream), records)| {
+                if record_stream != stream_id {
+                    return None;
+                }
+                let active = records
+                    .iter()
+                    .filter(|record| record.is_active_at(time))
+                    .min_by(|a, b| record_precedence(a, b))?;
+                Some((realm_id, active))
+            })
+            .min_by(|(realm_a, record_a), (realm_b, record_b)| {
+                record_precedence(record_a, record_b)
+                    .then_with(|| realm_a.as_bytes().cmp(realm_b.as_bytes()))
+            })
+            .map(|(realm_id, _)| realm_id)
+    }
+
+    /// Computes the [`LabelAuthority`] for a stream identifier without requiring
+    /// an explicit realm mapping.
+    #[must_use]
+    pub fn label_authority_for_stream(&self, stream_id: StreamId, time: u64) -> LabelAuthority {
+        if let Some(realm_id) = self.best_realm_for_stream(stream_id, time) {
+            self.label_authority(stream_id, Some(realm_id), time)
+        } else {
+            self.label_authority(stream_id, None, time)
+        }
+    }
+
     /// Computes the [`LabelAuthority`] for a label using deployment-defined
     /// mapping functions.
     #[must_use]
@@ -443,6 +474,38 @@ mod tests {
         assert!(authority.allows_hub(primary));
         assert!(authority.allows_hub(replica));
         assert!(!authority.allows_hub(HubId::new([0x30; 32])));
+    }
+
+    #[test]
+    fn label_authority_for_stream_uses_best_realm() {
+        let realm_a = RealmId::derive("realm-a");
+        let realm_b = RealmId::derive("realm-b");
+        let stream = StreamId::new([0x55; 32]);
+        let mut view = AuthorityView::new();
+
+        view.insert(AuthorityRecord {
+            realm_id: realm_b,
+            stream_id: stream,
+            primary_hub: HubId::new([0x44; 32]),
+            replica_hubs: Vec::new(),
+            policy: AuthorityPolicy::SinglePrimary,
+            ts: 2_000,
+            ttl: 600,
+        });
+
+        view.insert(AuthorityRecord {
+            realm_id: realm_a,
+            stream_id: stream,
+            primary_hub: HubId::new([0x11; 32]),
+            replica_hubs: Vec::new(),
+            policy: AuthorityPolicy::SinglePrimary,
+            ts: 1_500,
+            ttl: 600,
+        });
+
+        let authority = view.label_authority_for_stream(stream, 1_600);
+        assert_eq!(authority.realm_id, Some(realm_a));
+        assert_eq!(authority.primary_hub, Some(HubId::new([0x11; 32])));
     }
 
     #[test]
