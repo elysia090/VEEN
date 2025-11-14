@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ use veen_core::revocation::{
     cap_token_hash, schema_revocation, RevocationKind, RevocationRecord, RevocationTarget,
     RevocationView,
 };
+use veen_core::wire::checkpoint::Checkpoint;
 use veen_core::wire::mmr::Mmr;
 use veen_core::wire::types::{AuthRef, ClientId, LeafHash, MmrRoot};
 use veen_core::{
@@ -531,6 +533,33 @@ impl HubPipeline {
         let guard = self.inner.lock().await;
         Ok(guard.anchors.clone())
     }
+
+    pub async fn latest_checkpoint(&self) -> Result<Option<Checkpoint>> {
+        let mut checkpoints = read_checkpoints(&self.storage).await?;
+        Ok(checkpoints.pop())
+    }
+
+    pub async fn checkpoint_range(
+        &self,
+        from_epoch: Option<u64>,
+        to_epoch: Option<u64>,
+    ) -> Result<Vec<Checkpoint>> {
+        let start = from_epoch.unwrap_or(0);
+        let end = to_epoch.unwrap_or(u64::MAX);
+        if start > end {
+            bail!(
+                "invalid checkpoint epoch range: start {} is after end {}",
+                start,
+                end
+            );
+        }
+
+        let checkpoints = read_checkpoints(&self.storage).await?;
+        Ok(checkpoints
+            .into_iter()
+            .filter(|checkpoint| checkpoint.epoch >= start && checkpoint.epoch <= end)
+            .collect())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -869,6 +898,34 @@ struct ReceiptRecord {
     leaf_hash: String,
     mmr_root: String,
     hub_ts: u64,
+}
+
+async fn read_checkpoints(storage: &HubStorage) -> Result<Vec<Checkpoint>> {
+    let path = storage.checkpoints_path();
+    if !fs::try_exists(&path)
+        .await
+        .with_context(|| format!("checking checkpoint log {}", path.display()))?
+    {
+        return Ok(Vec::new());
+    }
+
+    let data = fs::read(&path)
+        .await
+        .with_context(|| format!("reading checkpoint log from {}", path.display()))?;
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut cursor = Cursor::new(&data);
+    let mut checkpoints = Vec::new();
+    while (cursor.position() as usize) < data.len() {
+        let offset = cursor.position();
+        let checkpoint: Checkpoint = ciborium::de::from_reader(&mut cursor)
+            .with_context(|| format!("decoding checkpoint at offset {}", offset))?;
+        checkpoints.push(checkpoint);
+    }
+
+    Ok(checkpoints)
 }
 
 async fn persist_attachments(

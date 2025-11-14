@@ -2,11 +2,15 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use axum::extract::{Query, State};
-use axum::http::{header::RETRY_AFTER, HeaderValue, StatusCode};
-use axum::response::IntoResponse;
+use axum::http::{
+    header::{CONTENT_TYPE, RETRY_AFTER},
+    HeaderValue, StatusCode,
+};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{body::Bytes, Json, Router};
-use serde::Deserialize;
+use ciborium::ser::into_writer;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -38,6 +42,8 @@ impl HubServerHandle {
             .route("/revoke", post(handle_revoke))
             .route("/healthz", get(handle_health))
             .route("/metrics", get(handle_metrics))
+            .route("/checkpoint_latest", get(handle_checkpoint_latest))
+            .route("/checkpoint_range", get(handle_checkpoint_range))
             .with_state(pipeline);
 
         let server = axum::serve(listener, app.into_make_service()).with_graceful_shutdown(async {
@@ -72,6 +78,12 @@ struct StreamQuery {
 #[derive(Debug, Deserialize)]
 struct ResyncRequest {
     stream: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckpointRangeQuery {
+    from_epoch: Option<u64>,
+    to_epoch: Option<u64>,
 }
 
 async fn handle_submit(
@@ -200,4 +212,61 @@ async fn handle_health(State(pipeline): State<HubPipeline>) -> impl IntoResponse
 async fn handle_metrics(State(pipeline): State<HubPipeline>) -> impl IntoResponse {
     let report = pipeline.metrics_snapshot().await;
     (StatusCode::OK, Json(report)).into_response()
+}
+
+async fn handle_checkpoint_latest(State(pipeline): State<HubPipeline>) -> impl IntoResponse {
+    match pipeline.latest_checkpoint().await {
+        Ok(Some(checkpoint)) => match cbor_response(&checkpoint) {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(error = ?err, "serialising checkpoint response failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+            }
+        },
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            "no checkpoints available".to_string(),
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "fetching latest checkpoint failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+        }
+    }
+}
+
+async fn handle_checkpoint_range(
+    State(pipeline): State<HubPipeline>,
+    Query(query): Query<CheckpointRangeQuery>,
+) -> impl IntoResponse {
+    match pipeline
+        .checkpoint_range(query.from_epoch, query.to_epoch)
+        .await
+    {
+        Ok(checkpoints) => match cbor_response(&checkpoints) {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(error = ?err, "serialising checkpoint range failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+            }
+        },
+        Err(err) => {
+            tracing::warn!(error = ?err, "fetching checkpoint range failed");
+            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+        }
+    }
+}
+
+fn cbor_response<T>(value: &T) -> Result<Response>
+where
+    T: Serialize,
+{
+    let mut body = Vec::new();
+    into_writer(value, &mut body).context("serialising CBOR response body")?;
+    Ok((
+        StatusCode::OK,
+        [(CONTENT_TYPE, HeaderValue::from_static("application/cbor"))],
+        body,
+    )
+        .into_response())
 }
