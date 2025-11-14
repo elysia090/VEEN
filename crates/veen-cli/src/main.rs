@@ -9,7 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use ciborium::value::Value as CborValue;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use reqwest::{Client as HttpClient, Url};
@@ -27,10 +29,17 @@ use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use veen_core::CAP_TOKEN_VERSION;
 use veen_core::{
     cap_stream_id_from_label,
-    hub::HubId,
-    label::StreamId,
+    hub::{HubId, HUB_ID_LEN},
+    label::{Label, StreamId},
     wire::{checkpoint::CHECKPOINT_VERSION, Checkpoint, ClientId},
-    CapToken, CapTokenAllow, CapTokenRate, Profile,
+    AuthorityPolicy, AuthorityRecord, CapToken, CapTokenAllow, CapTokenRate, LabelClassRecord,
+    Profile, RealmId, RevocationKind, RevocationRecord, RevocationTarget, SchemaDescriptor,
+    SchemaId, SchemaOwner, TransferId, WalletId, WalletTransferEvent,
+};
+use veen_core::{h, ht};
+use veen_core::{
+    schema_fed_authority, schema_label_class, schema_meta_schema, schema_revocation,
+    schema_wallet_transfer, REVOCATION_TARGET_LEN, SCHEMA_ID_LEN, TRANSFER_ID_LEN, WALLET_ID_LEN,
 };
 use veen_hub::pipeline::{
     AttachmentUpload, AuthorizeResponse as RemoteAuthorizeResponse,
@@ -93,6 +102,21 @@ enum Command {
     /// Capability management.
     #[command(subcommand)]
     Cap(CapCommand),
+    /// Federation and authority helpers.
+    #[command(subcommand)]
+    Authority(AuthorityCommand),
+    /// Label classification helpers.
+    #[command(subcommand, name = "label-class")]
+    LabelClass(LabelClassCommand),
+    /// Schema registry helpers.
+    #[command(subcommand)]
+    Schema(SchemaCommand),
+    /// Wallet overlay helpers.
+    #[command(subcommand)]
+    Wallet(WalletCommand),
+    /// Revocation helpers.
+    #[command(subcommand)]
+    Revoke(RevokeCommand),
     /// Resynchronise durable state from the hub.
     Resync(ResyncArgs),
     /// Verify local state against hub checkpoints.
@@ -186,6 +210,40 @@ enum CrdtCommand {
     /// Grow-only counter helpers.
     #[command(subcommand)]
     Counter(CrdtCounterCommand),
+}
+
+#[derive(Subcommand)]
+enum AuthorityCommand {
+    /// Publish an authority record for a stream.
+    Set(AuthoritySetArgs),
+}
+
+#[derive(Subcommand)]
+enum LabelClassCommand {
+    /// Publish a label classification record.
+    Set(LabelClassSetArgs),
+}
+
+#[derive(Subcommand)]
+enum SchemaCommand {
+    /// Compute the canonical schema identifier for a name.
+    Id(SchemaIdArgs),
+    /// Register or update schema metadata.
+    Register(SchemaRegisterArgs),
+    /// Fetch schema descriptors from the hub.
+    List(SchemaListArgs),
+}
+
+#[derive(Subcommand)]
+enum WalletCommand {
+    /// Emit a wallet transfer event.
+    Transfer(WalletTransferArgs),
+}
+
+#[derive(Subcommand)]
+enum RevokeCommand {
+    /// Publish a revocation record.
+    Publish(RevokePublishArgs),
 }
 
 #[derive(Subcommand)]
@@ -412,6 +470,132 @@ struct CapAuthorizeArgs {
     hub: String,
     #[arg(long)]
     cap: PathBuf,
+}
+
+#[derive(Args)]
+struct AuthoritySetArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long)]
+    signer: PathBuf,
+    #[arg(long)]
+    realm: String,
+    #[arg(long)]
+    stream: String,
+    #[arg(long, value_enum, default_value_t = AuthorityPolicyValue::SinglePrimary)]
+    policy: AuthorityPolicyValue,
+    #[arg(long = "primary-hub")]
+    primary_hub: String,
+    #[arg(long = "replica-hub")]
+    replica_hubs: Vec<String>,
+    #[arg(long)]
+    ttl: Option<u64>,
+    #[arg(long)]
+    ts: Option<u64>,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum AuthorityPolicyValue {
+    SinglePrimary,
+    MultiPrimary,
+}
+
+#[derive(Args)]
+struct LabelClassSetArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long)]
+    signer: PathBuf,
+    #[arg(long)]
+    realm: String,
+    #[arg(long)]
+    label: String,
+    #[arg(long)]
+    class: String,
+    #[arg(long)]
+    sensitivity: Option<String>,
+    #[arg(long = "retention-hint")]
+    retention_hint: Option<u64>,
+}
+
+#[derive(Args)]
+struct SchemaIdArgs {
+    /// Schema name used for hashing.
+    name: String,
+}
+
+#[derive(Args)]
+struct SchemaRegisterArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long)]
+    signer: PathBuf,
+    #[arg(long = "schema-id")]
+    schema_id: String,
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    version: String,
+    #[arg(long = "doc-url")]
+    doc_url: Option<String>,
+    #[arg(long)]
+    owner: Option<String>,
+    #[arg(long)]
+    ts: Option<u64>,
+}
+
+#[derive(Args)]
+struct SchemaListArgs {
+    #[arg(long)]
+    hub: String,
+}
+
+#[derive(Args)]
+struct WalletTransferArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long)]
+    signer: PathBuf,
+    #[arg(long = "wallet-id")]
+    wallet_id: String,
+    #[arg(long = "to-wallet-id")]
+    to_wallet_id: String,
+    #[arg(long)]
+    amount: u64,
+    #[arg(long)]
+    ts: Option<u64>,
+    #[arg(long = "transfer-id")]
+    transfer_id: Option<String>,
+    #[arg(long)]
+    metadata: Option<String>,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum RevocationKindValue {
+    #[clap(name = "client-id")]
+    ClientId,
+    #[clap(name = "auth-ref")]
+    AuthRef,
+    #[clap(name = "cap-token")]
+    CapToken,
+}
+
+#[derive(Args)]
+struct RevokePublishArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long)]
+    signer: PathBuf,
+    #[arg(long, value_enum)]
+    kind: RevocationKindValue,
+    #[arg(long)]
+    target: String,
+    #[arg(long)]
+    reason: Option<String>,
+    #[arg(long)]
+    ttl: Option<u64>,
+    #[arg(long)]
+    ts: Option<u64>,
 }
 
 #[derive(Args)]
@@ -983,6 +1167,23 @@ async fn main() -> Result<()> {
         Command::Cap(cmd) => match cmd {
             CapCommand::Issue(args) => handle_cap_issue(args).await,
             CapCommand::Authorize(args) => handle_cap_authorize(args).await,
+        },
+        Command::Authority(cmd) => match cmd {
+            AuthorityCommand::Set(args) => handle_authority_set(args).await,
+        },
+        Command::LabelClass(cmd) => match cmd {
+            LabelClassCommand::Set(args) => handle_label_class_set(args).await,
+        },
+        Command::Schema(cmd) => match cmd {
+            SchemaCommand::Id(args) => handle_schema_id(args).await,
+            SchemaCommand::Register(args) => handle_schema_register(args).await,
+            SchemaCommand::List(args) => handle_schema_list(args).await,
+        },
+        Command::Wallet(cmd) => match cmd {
+            WalletCommand::Transfer(args) => handle_wallet_transfer(args).await,
+        },
+        Command::Revoke(cmd) => match cmd {
+            RevokeCommand::Publish(args) => handle_revoke_publish(args).await,
         },
         Command::Resync(args) => handle_resync(args).await,
         Command::VerifyState(args) => handle_verify_state(args).await,
@@ -1982,6 +2183,393 @@ async fn handle_cap_authorize_remote(client: HubHttpClient, args: CapAuthorizeAr
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SignedEnvelope<T> {
+    #[serde(with = "serde_bytes")]
+    schema: ByteBuf,
+    body: T,
+    #[serde(with = "serde_bytes")]
+    signature: ByteBuf,
+}
+
+const ADMIN_SIGNING_DOMAIN: &str = "veen/admin";
+const WALLET_TRANSFER_DOMAIN: &str = "veen/cli-wallet-transfer";
+
+async fn handle_authority_set(args: AuthoritySetArgs) -> Result<()> {
+    match parse_hub_reference(&args.hub)? {
+        HubReference::Remote(client) => handle_authority_set_remote(client, args).await,
+        HubReference::Local(_) => {
+            bail!("authority set requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    }
+}
+
+async fn handle_authority_set_remote(client: HubHttpClient, args: AuthoritySetArgs) -> Result<()> {
+    let signing_key = load_signing_key_from_dir(&args.signer).await?;
+    let realm_id = RealmId::derive(&args.realm);
+    let stream_id = cap_stream_id_from_label(&args.stream)
+        .with_context(|| format!("deriving stream identifier for {}", args.stream))?;
+    let primary_hub = parse_hub_id_hex(&args.primary_hub)?;
+    let mut replica_hubs = Vec::new();
+    for hub in &args.replica_hubs {
+        replica_hubs.push(parse_hub_id_hex(hub)?);
+    }
+
+    if matches!(args.policy, AuthorityPolicyValue::MultiPrimary) && replica_hubs.is_empty() {
+        bail!("multi-primary policy requires at least one replica hub");
+    }
+
+    let policy = match args.policy {
+        AuthorityPolicyValue::SinglePrimary => AuthorityPolicy::SinglePrimary,
+        AuthorityPolicyValue::MultiPrimary => AuthorityPolicy::MultiPrimary,
+    };
+
+    let ttl = args.ttl.unwrap_or(0);
+    let ts = args.ts.unwrap_or(current_unix_timestamp()?);
+
+    let record = AuthorityRecord {
+        realm_id,
+        stream_id,
+        primary_hub,
+        replica_hubs,
+        policy,
+        ts,
+        ttl,
+    };
+
+    let payload = encode_signed_envelope(schema_fed_authority(), &record, &signing_key)?;
+    submit_signed_payload(&client, "/authority", &payload).await?;
+
+    println!("published authority record");
+    println!("  realm: {}", args.realm);
+    println!("  stream: {}", args.stream);
+    println!("  policy: {:?}", args.policy);
+    println!("  ttl: {}", ttl);
+    Ok(())
+}
+
+fn encode_signed_envelope<T>(
+    schema: [u8; 32],
+    body: &T,
+    signing_key: &SigningKey,
+) -> Result<Vec<u8>>
+where
+    T: Serialize + Clone,
+{
+    let mut body_bytes = Vec::new();
+    ciborium::ser::into_writer(body, &mut body_bytes)
+        .map_err(|err| anyhow!("failed to encode payload body to CBOR: {err}"))?;
+
+    let mut signing_input = Vec::with_capacity(schema.len() + body_bytes.len());
+    signing_input.extend_from_slice(&schema);
+    signing_input.extend_from_slice(&body_bytes);
+    let digest = ht(ADMIN_SIGNING_DOMAIN, &signing_input);
+
+    let signature = signing_key.sign(digest.as_ref());
+    let envelope = SignedEnvelope {
+        schema: ByteBuf::from(schema.to_vec()),
+        body: body.clone(),
+        signature: ByteBuf::from(signature.to_bytes().to_vec()),
+    };
+
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&envelope, &mut encoded)
+        .map_err(|err| anyhow!("failed to encode signed envelope to CBOR: {err}"))?;
+    Ok(encoded)
+}
+
+async fn submit_signed_payload(client: &HubHttpClient, path: &str, payload: &[u8]) -> Result<()> {
+    client.post_cbor_unit(path, payload).await
+}
+
+async fn load_signing_key_from_dir(dir: &Path) -> Result<SigningKey> {
+    let keystore = dir.join("keystore.enc");
+    let secret: ClientSecretBundle = read_cbor_file(&keystore)
+        .await
+        .with_context(|| format!("reading signing key from {}", keystore.display()))?;
+    let signing_key_bytes: [u8; 32] = secret
+        .signing_key
+        .as_ref()
+        .try_into()
+        .map_err(|_| anyhow!("signing key has invalid length"))?;
+    Ok(SigningKey::from_bytes(&signing_key_bytes))
+}
+
+fn parse_hub_id_hex(input: &str) -> Result<HubId> {
+    let bytes = parse_hex_key::<{ HUB_ID_LEN }>(input)?;
+    Ok(HubId::from(bytes))
+}
+
+fn parse_schema_id_hex(input: &str) -> Result<SchemaId> {
+    let bytes = parse_hex_key::<{ SCHEMA_ID_LEN }>(input)?;
+    Ok(SchemaId::from(bytes))
+}
+
+fn parse_schema_owner(input: &str) -> Result<SchemaOwner> {
+    let data = if let Ok(contents) = std::fs::read_to_string(input) {
+        contents.trim().to_string()
+    } else {
+        input.to_string()
+    };
+    let bytes = parse_hex_key::<{ SCHEMA_ID_LEN }>(&data)?;
+    Ok(SchemaOwner::from(bytes))
+}
+
+fn parse_wallet_id_hex(input: &str) -> Result<WalletId> {
+    let bytes = parse_hex_key::<{ WALLET_ID_LEN }>(input)?;
+    Ok(WalletId::from(bytes))
+}
+
+fn parse_transfer_id_hex(input: &str) -> Result<TransferId> {
+    let bytes = parse_hex_key::<{ TRANSFER_ID_LEN }>(input)?;
+    Ok(TransferId::from(bytes))
+}
+
+fn parse_revocation_target_hex(input: &str) -> Result<RevocationTarget> {
+    let bytes = parse_hex_key::<{ REVOCATION_TARGET_LEN }>(input)?;
+    Ok(RevocationTarget::from(bytes))
+}
+
+fn parse_metadata_value(input: Option<String>) -> Result<Option<CborValue>> {
+    if let Some(raw) = input {
+        let json_value: serde_json::Value =
+            serde_json::from_str(&raw).with_context(|| "metadata must be valid JSON")?;
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&json_value, &mut buf)
+            .map_err(|err| anyhow!("failed to encode metadata to CBOR: {err}"))?;
+        let value = ciborium::de::from_reader(buf.as_slice())
+            .map_err(|err| anyhow!("failed to decode metadata CBOR value: {err}"))?;
+        Ok(Some(value))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn handle_label_class_set(args: LabelClassSetArgs) -> Result<()> {
+    match parse_hub_reference(&args.hub)? {
+        HubReference::Remote(client) => handle_label_class_set_remote(client, args).await,
+        HubReference::Local(_) => {
+            bail!("label-class set requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    }
+}
+
+async fn handle_label_class_set_remote(
+    client: HubHttpClient,
+    args: LabelClassSetArgs,
+) -> Result<()> {
+    let signing_key = load_signing_key_from_dir(&args.signer).await?;
+    let stream_id = cap_stream_id_from_label(&args.label)
+        .with_context(|| format!("deriving stream identifier for {}", args.label))?;
+    let label = Label::derive([], stream_id, 0);
+
+    let record = LabelClassRecord {
+        label,
+        class: args.class.clone(),
+        sensitivity: args.sensitivity.clone(),
+        retention_hint: args.retention_hint,
+    };
+
+    let payload = encode_signed_envelope(schema_label_class(), &record, &signing_key)?;
+    submit_signed_payload(&client, "/label-class", &payload).await?;
+
+    println!("published label class");
+    println!("  label: {}", args.label);
+    println!("  class: {}", args.class);
+    if let Some(sensitivity) = &args.sensitivity {
+        println!("  sensitivity: {sensitivity}");
+    }
+    if let Some(retention) = args.retention_hint {
+        println!("  retention_hint: {retention}");
+    }
+    Ok(())
+}
+
+async fn handle_schema_id(args: SchemaIdArgs) -> Result<()> {
+    let digest = compute_schema_identifier(&args.name);
+    println!("{}", hex::encode(digest));
+    Ok(())
+}
+
+async fn handle_schema_register(args: SchemaRegisterArgs) -> Result<()> {
+    match parse_hub_reference(&args.hub)? {
+        HubReference::Remote(client) => handle_schema_register_remote(client, args).await,
+        HubReference::Local(_) => {
+            bail!("schema register requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    }
+}
+
+async fn handle_schema_register_remote(
+    client: HubHttpClient,
+    args: SchemaRegisterArgs,
+) -> Result<()> {
+    let signing_key = load_signing_key_from_dir(&args.signer).await?;
+    let schema_id = parse_schema_id_hex(&args.schema_id)?;
+    let owner = match args.owner {
+        Some(ref value) => Some(parse_schema_owner(value)?),
+        None => None,
+    };
+    let ts = args.ts.unwrap_or(current_unix_timestamp()?);
+
+    let descriptor = SchemaDescriptor {
+        schema_id,
+        name: args.name.clone(),
+        version: args.version.clone(),
+        doc_url: args.doc_url.clone(),
+        owner,
+        ts,
+    };
+
+    let payload = encode_signed_envelope(schema_meta_schema(), &descriptor, &signing_key)?;
+    submit_signed_payload(&client, "/schema", &payload).await?;
+
+    println!("registered schema");
+    println!("  schema_id: {}", args.schema_id);
+    println!("  name: {}", args.name);
+    println!("  version: {}", args.version);
+    Ok(())
+}
+
+async fn handle_schema_list(args: SchemaListArgs) -> Result<()> {
+    match parse_hub_reference(&args.hub)? {
+        HubReference::Remote(client) => handle_schema_list_remote(client).await,
+        HubReference::Local(_) => {
+            bail!("schema list requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    }
+}
+
+async fn handle_schema_list_remote(client: HubHttpClient) -> Result<()> {
+    let descriptors = fetch_schema_descriptors(&client).await?;
+
+    if descriptors.is_empty() {
+        println!("no schemas registered");
+    } else {
+        for descriptor in descriptors {
+            println!(
+                "schema_id: {}",
+                hex::encode(descriptor.schema_id.as_bytes())
+            );
+            println!("  name: {}", descriptor.name);
+            println!("  version: {}", descriptor.version);
+            if let Some(doc_url) = descriptor.doc_url.as_deref() {
+                println!("  doc_url: {doc_url}");
+            }
+            if let Some(owner) = descriptor.owner {
+                println!("  owner: {}", hex::encode(owner.as_bytes()));
+            }
+            println!("  ts: {}", descriptor.ts);
+        }
+    }
+    Ok(())
+}
+
+fn compute_schema_identifier(name: &str) -> [u8; 32] {
+    h(name.as_bytes())
+}
+
+async fn fetch_schema_descriptors(client: &HubHttpClient) -> Result<Vec<SchemaDescriptor>> {
+    client
+        .get_json("/schema", &[])
+        .await
+        .context("fetching schema descriptors from hub")
+}
+
+async fn handle_wallet_transfer(args: WalletTransferArgs) -> Result<()> {
+    match parse_hub_reference(&args.hub)? {
+        HubReference::Remote(client) => handle_wallet_transfer_remote(client, args).await,
+        HubReference::Local(_) => {
+            bail!("wallet transfer requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    }
+}
+
+async fn handle_wallet_transfer_remote(
+    client: HubHttpClient,
+    args: WalletTransferArgs,
+) -> Result<()> {
+    let signing_key = load_signing_key_from_dir(&args.signer).await?;
+    let wallet_id = parse_wallet_id_hex(&args.wallet_id)?;
+    let to_wallet_id = parse_wallet_id_hex(&args.to_wallet_id)?;
+    let ts = args.ts.unwrap_or(current_unix_timestamp()?);
+    let metadata = parse_metadata_value(args.metadata.clone())?;
+    let transfer_id = if let Some(ref explicit) = args.transfer_id {
+        parse_transfer_id_hex(explicit)?
+    } else {
+        let mut seed = Vec::new();
+        seed.extend_from_slice(wallet_id.as_bytes());
+        seed.extend_from_slice(to_wallet_id.as_bytes());
+        seed.extend_from_slice(&args.amount.to_be_bytes());
+        seed.extend_from_slice(&ts.to_be_bytes());
+        TransferId::from(ht(WALLET_TRANSFER_DOMAIN, &seed))
+    };
+
+    let record = WalletTransferEvent {
+        wallet_id,
+        to_wallet_id,
+        amount: args.amount,
+        ts,
+        transfer_id,
+        metadata,
+    };
+
+    let payload = encode_signed_envelope(schema_wallet_transfer(), &record, &signing_key)?;
+    submit_signed_payload(&client, "/wallet/transfer", &payload).await?;
+
+    println!("submitted wallet transfer");
+    println!("  wallet_id: {}", args.wallet_id);
+    println!("  to_wallet_id: {}", args.to_wallet_id);
+    println!("  amount: {}", args.amount);
+    println!("  transfer_id: {}", hex::encode(transfer_id.as_bytes()));
+    Ok(())
+}
+
+async fn handle_revoke_publish(args: RevokePublishArgs) -> Result<()> {
+    match parse_hub_reference(&args.hub)? {
+        HubReference::Remote(client) => handle_revoke_publish_remote(client, args).await,
+        HubReference::Local(_) => {
+            bail!("revoke publish requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    }
+}
+
+async fn handle_revoke_publish_remote(
+    client: HubHttpClient,
+    args: RevokePublishArgs,
+) -> Result<()> {
+    let signing_key = load_signing_key_from_dir(&args.signer).await?;
+    let target = parse_revocation_target_hex(&args.target)?;
+    let kind = match args.kind {
+        RevocationKindValue::ClientId => RevocationKind::ClientId,
+        RevocationKindValue::AuthRef => RevocationKind::AuthRef,
+        RevocationKindValue::CapToken => RevocationKind::CapToken,
+    };
+    let ts = args.ts.unwrap_or(current_unix_timestamp()?);
+
+    let record = RevocationRecord {
+        kind,
+        target,
+        reason: args.reason.clone(),
+        ts,
+        ttl: args.ttl,
+    };
+
+    let payload = encode_signed_envelope(schema_revocation(), &record, &signing_key)?;
+    submit_signed_payload(&client, "/revoke", &payload).await?;
+
+    println!("published revocation");
+    println!("  kind: {:?}", args.kind);
+    println!("  target: {}", args.target);
+    if let Some(reason) = &args.reason {
+        println!("  reason: {reason}");
+    }
+    if let Some(ttl) = args.ttl {
+        println!("  ttl: {ttl}");
+    }
+    Ok(())
+}
+
 async fn handle_resync(args: ResyncArgs) -> Result<()> {
     match parse_hub_reference(&args.hub)? {
         HubReference::Local(data_dir) => handle_resync_local(data_dir, args).await,
@@ -2758,14 +3346,116 @@ enum HubReference {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ciborium::de::from_reader;
+    use ed25519_dalek::{Signature, Verifier};
+    use hyper::body::to_bytes;
+    use hyper::service::{make_service_fn, service_fn};
+    use hyper::{Body, Request as HyperRequest, Response as HyperResponse, Server, StatusCode};
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
+    use std::convert::Infallible;
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+    use std::sync::Arc;
     use std::time::Duration;
     use tempfile::tempdir;
+    use tokio::sync::mpsc;
     use tokio::time::sleep;
     use veen_hub::config::{HubRole, HubRuntimeConfig};
     use veen_hub::runtime::HubRuntime;
+
+    async fn spawn_cbor_capture_server(
+        path: &'static str,
+    ) -> anyhow::Result<(String, mpsc::Receiver<Vec<u8>>, tokio::task::JoinHandle<()>)> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let (tx, rx) = mpsc::channel(1);
+        let service = make_service_fn(move |_| {
+            let tx = tx.clone();
+            async move {
+                Ok::<_, Infallible>(service_fn(move |mut req: HyperRequest<Body>| {
+                    let tx = tx.clone();
+                    async move {
+                        assert_eq!(req.uri().path(), path);
+                        let body = to_bytes(req.body_mut()).await.unwrap().to_vec();
+                        tx.send(body).await.unwrap();
+                        Ok::<_, Infallible>(
+                            HyperResponse::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from("null"))
+                                .unwrap(),
+                        )
+                    }
+                }))
+            }
+        });
+        let server = Server::from_tcp(listener)?.serve(service);
+        let handle = tokio::spawn(async move {
+            if let Err(err) = server.await {
+                eprintln!("capture server error: {err}");
+            }
+        });
+        Ok((format!("http://{}", addr), rx, handle))
+    }
+
+    async fn spawn_fixed_response_server(
+        path: &'static str,
+        body: Vec<u8>,
+    ) -> anyhow::Result<(String, tokio::task::JoinHandle<()>)> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let body = Arc::new(body);
+        let service = make_service_fn(move |_| {
+            let body = body.clone();
+            async move {
+                Ok::<_, Infallible>(service_fn(move |req: HyperRequest<Body>| {
+                    let body = body.clone();
+                    async move {
+                        assert_eq!(req.uri().path(), path);
+                        Ok::<_, Infallible>(
+                            HyperResponse::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(body.as_ref().clone()))
+                                .unwrap(),
+                        )
+                    }
+                }))
+            }
+        });
+        let server = Server::from_tcp(listener)?.serve(service);
+        let handle = tokio::spawn(async move {
+            if let Err(err) = server.await {
+                eprintln!("fixed response server error: {err}");
+            }
+        });
+        Ok((format!("http://{}", addr), handle))
+    }
+
+    fn verify_envelope_signature<T>(
+        envelope: &SignedEnvelope<T>,
+        schema: [u8; 32],
+        signing_key: &SigningKey,
+    ) -> anyhow::Result<()>
+    where
+        T: Serialize,
+    {
+        let verifying_key = signing_key.verifying_key();
+        let mut body_bytes = Vec::new();
+        ciborium::ser::into_writer(&envelope.body, &mut body_bytes)?;
+        let mut signing_input = Vec::with_capacity(schema.len() + body_bytes.len());
+        signing_input.extend_from_slice(&schema);
+        signing_input.extend_from_slice(&body_bytes);
+        let digest = ht(ADMIN_SIGNING_DOMAIN, &signing_input);
+        let signature_bytes: [u8; 64] = envelope
+            .signature
+            .as_ref()
+            .try_into()
+            .map_err(|_| anyhow!("invalid signature length"))?;
+        let signature = Signature::from_bytes(&signature_bytes);
+        verifying_key
+            .verify(digest.as_ref(), &signature)
+            .map_err(|err| anyhow!("signature verification failed: {err}"))?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn http_send_stream_and_resync() -> anyhow::Result<()> {
@@ -2861,6 +3551,261 @@ mod tests {
         assert_eq!(roundtrip, payload);
         Ok(())
     }
+
+    #[tokio::test]
+    async fn authority_set_produces_signed_payload() -> anyhow::Result<()> {
+        let signer_dir = tempdir()?;
+        handle_keygen(KeygenArgs {
+            out: signer_dir.path().to_path_buf(),
+        })
+        .await?;
+
+        let (url, mut body_rx, server) = spawn_cbor_capture_server("/authority").await?;
+        let client = HubHttpClient::new(Url::parse(&url)?, HttpClient::builder().build()?);
+        let primary_hex = hex::encode([0x11u8; HUB_ID_LEN]);
+        let replica_hex = hex::encode([0x22u8; HUB_ID_LEN]);
+        let args = AuthoritySetArgs {
+            hub: url.clone(),
+            signer: signer_dir.path().to_path_buf(),
+            realm: "default".to_string(),
+            stream: "fed/chat".to_string(),
+            policy: AuthorityPolicyValue::SinglePrimary,
+            primary_hub: primary_hex.clone(),
+            replica_hubs: vec![replica_hex.clone()],
+            ttl: Some(3_600),
+            ts: Some(1_234_567),
+        };
+
+        handle_authority_set_remote(client, args).await?;
+        let body = body_rx.recv().await.expect("payload captured");
+        server.abort();
+
+        let envelope: SignedEnvelope<AuthorityRecord> = from_reader(body.as_slice())?;
+        assert_eq!(envelope.schema.as_ref(), schema_fed_authority().as_slice());
+        assert_eq!(envelope.body.primary_hub, parse_hub_id_hex(&primary_hex)?);
+        assert_eq!(envelope.body.replica_hubs.len(), 1);
+        assert_eq!(
+            envelope.body.replica_hubs[0],
+            parse_hub_id_hex(&replica_hex)?
+        );
+        assert_eq!(envelope.body.policy, AuthorityPolicy::SinglePrimary);
+        assert_eq!(envelope.body.ttl, 3_600);
+        assert_eq!(envelope.body.ts, 1_234_567);
+
+        let keystore = signer_dir.path().join("keystore.enc");
+        let secret: ClientSecretBundle = read_cbor_file(&keystore).await?;
+        let signing_key_bytes: [u8; 32] = secret.signing_key.as_ref().try_into().unwrap();
+        let signing_key = SigningKey::from_bytes(&signing_key_bytes);
+        verify_envelope_signature(&envelope, schema_fed_authority(), &signing_key)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn label_class_set_produces_signed_payload() -> anyhow::Result<()> {
+        let signer_dir = tempdir()?;
+        handle_keygen(KeygenArgs {
+            out: signer_dir.path().to_path_buf(),
+        })
+        .await?;
+
+        let (url, mut body_rx, server) = spawn_cbor_capture_server("/label-class").await?;
+        let client = HubHttpClient::new(Url::parse(&url)?, HttpClient::builder().build()?);
+        let args = LabelClassSetArgs {
+            hub: url.clone(),
+            signer: signer_dir.path().to_path_buf(),
+            realm: "default".to_string(),
+            label: "chat/general".to_string(),
+            class: "user".to_string(),
+            sensitivity: Some("medium".to_string()),
+            retention_hint: Some(86_400),
+        };
+
+        handle_label_class_set_remote(client, args).await?;
+        let body = body_rx.recv().await.expect("payload captured");
+        server.abort();
+
+        let envelope: SignedEnvelope<LabelClassRecord> = from_reader(body.as_slice())?;
+        assert_eq!(envelope.schema.as_ref(), schema_label_class().as_slice());
+        assert_eq!(envelope.body.class, "user");
+        assert_eq!(envelope.body.sensitivity.as_deref(), Some("medium"));
+        assert_eq!(envelope.body.retention_hint, Some(86_400));
+        let stream_id = cap_stream_id_from_label("chat/general")?;
+        let expected_label = Label::derive([], stream_id, 0);
+        assert_eq!(envelope.body.label, expected_label);
+
+        let keystore = signer_dir.path().join("keystore.enc");
+        let secret: ClientSecretBundle = read_cbor_file(&keystore).await?;
+        let signing_key_bytes: [u8; 32] = secret.signing_key.as_ref().try_into().unwrap();
+        let signing_key = SigningKey::from_bytes(&signing_key_bytes);
+        verify_envelope_signature(&envelope, schema_label_class(), &signing_key)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn schema_register_produces_signed_payload() -> anyhow::Result<()> {
+        let signer_dir = tempdir()?;
+        handle_keygen(KeygenArgs {
+            out: signer_dir.path().to_path_buf(),
+        })
+        .await?;
+
+        let (url, mut body_rx, server) = spawn_cbor_capture_server("/schema").await?;
+        let client = HubHttpClient::new(Url::parse(&url)?, HttpClient::builder().build()?);
+        let schema_id_hex = hex::encode([0xAAu8; SCHEMA_ID_LEN]);
+        let args = SchemaRegisterArgs {
+            hub: url.clone(),
+            signer: signer_dir.path().to_path_buf(),
+            schema_id: schema_id_hex.clone(),
+            name: "wallet.transfer.v1".to_string(),
+            version: "v1".to_string(),
+            doc_url: Some("https://example.com".to_string()),
+            owner: None,
+            ts: Some(99),
+        };
+
+        handle_schema_register_remote(client, args).await?;
+        let body = body_rx.recv().await.expect("payload captured");
+        server.abort();
+
+        let envelope: SignedEnvelope<SchemaDescriptor> = from_reader(body.as_slice())?;
+        assert_eq!(envelope.schema.as_ref(), schema_meta_schema().as_slice());
+        assert_eq!(
+            hex::encode(envelope.body.schema_id.as_bytes()),
+            schema_id_hex
+        );
+        assert_eq!(envelope.body.name, "wallet.transfer.v1");
+        assert_eq!(envelope.body.version, "v1");
+        assert_eq!(
+            envelope.body.doc_url.as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(envelope.body.owner, None);
+        assert_eq!(envelope.body.ts, 99);
+
+        let keystore = signer_dir.path().join("keystore.enc");
+        let secret: ClientSecretBundle = read_cbor_file(&keystore).await?;
+        let signing_key_bytes: [u8; 32] = secret.signing_key.as_ref().try_into().unwrap();
+        let signing_key = SigningKey::from_bytes(&signing_key_bytes);
+        verify_envelope_signature(&envelope, schema_meta_schema(), &signing_key)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn wallet_transfer_produces_signed_payload() -> anyhow::Result<()> {
+        let signer_dir = tempdir()?;
+        handle_keygen(KeygenArgs {
+            out: signer_dir.path().to_path_buf(),
+        })
+        .await?;
+
+        let (url, mut body_rx, server) = spawn_cbor_capture_server("/wallet/transfer").await?;
+        let client = HubHttpClient::new(Url::parse(&url)?, HttpClient::builder().build()?);
+        let wallet_hex = hex::encode([0x55u8; WALLET_ID_LEN]);
+        let to_wallet_hex = hex::encode([0x66u8; WALLET_ID_LEN]);
+        let args = WalletTransferArgs {
+            hub: url.clone(),
+            signer: signer_dir.path().to_path_buf(),
+            wallet_id: wallet_hex.clone(),
+            to_wallet_id: to_wallet_hex.clone(),
+            amount: 123,
+            ts: Some(777),
+            transfer_id: None,
+            metadata: Some("{\"note\":\"hello\"}".to_string()),
+        };
+
+        handle_wallet_transfer_remote(client, args).await?;
+        let body = body_rx.recv().await.expect("payload captured");
+        server.abort();
+
+        let envelope: SignedEnvelope<WalletTransferEvent> = from_reader(body.as_slice())?;
+        assert_eq!(hex::encode(envelope.body.wallet_id.as_bytes()), wallet_hex);
+        assert_eq!(
+            hex::encode(envelope.body.to_wallet_id.as_bytes()),
+            to_wallet_hex
+        );
+        assert_eq!(envelope.body.amount, 123);
+        assert_eq!(envelope.body.ts, 777);
+        assert!(matches!(envelope.body.metadata, Some(CborValue::Map(_))));
+
+        let keystore = signer_dir.path().join("keystore.enc");
+        let secret: ClientSecretBundle = read_cbor_file(&keystore).await?;
+        let signing_key_bytes: [u8; 32] = secret.signing_key.as_ref().try_into().unwrap();
+        let signing_key = SigningKey::from_bytes(&signing_key_bytes);
+        verify_envelope_signature(&envelope, schema_wallet_transfer(), &signing_key)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn revoke_publish_produces_signed_payload() -> anyhow::Result<()> {
+        let signer_dir = tempdir()?;
+        handle_keygen(KeygenArgs {
+            out: signer_dir.path().to_path_buf(),
+        })
+        .await?;
+
+        let (url, mut body_rx, server) = spawn_cbor_capture_server("/revoke").await?;
+        let client = HubHttpClient::new(Url::parse(&url)?, HttpClient::builder().build()?);
+        let target_hex = hex::encode([0x77u8; REVOCATION_TARGET_LEN]);
+        let args = RevokePublishArgs {
+            hub: url.clone(),
+            signer: signer_dir.path().to_path_buf(),
+            kind: RevocationKindValue::ClientId,
+            target: target_hex.clone(),
+            reason: Some("compromised".to_string()),
+            ttl: Some(1_000),
+            ts: Some(55),
+        };
+
+        handle_revoke_publish_remote(client, args).await?;
+        let body = body_rx.recv().await.expect("payload captured");
+        server.abort();
+
+        let envelope: SignedEnvelope<RevocationRecord> = from_reader(body.as_slice())?;
+        assert_eq!(envelope.schema.as_ref(), schema_revocation().as_slice());
+        assert_eq!(envelope.body.kind, RevocationKind::ClientId);
+        assert_eq!(hex::encode(envelope.body.target.as_bytes()), target_hex);
+        assert_eq!(envelope.body.reason.as_deref(), Some("compromised"));
+        assert_eq!(envelope.body.ttl, Some(1_000));
+        assert_eq!(envelope.body.ts, 55);
+
+        let keystore = signer_dir.path().join("keystore.enc");
+        let secret: ClientSecretBundle = read_cbor_file(&keystore).await?;
+        let signing_key_bytes: [u8; 32] = secret.signing_key.as_ref().try_into().unwrap();
+        let signing_key = SigningKey::from_bytes(&signing_key_bytes);
+        verify_envelope_signature(&envelope, schema_revocation(), &signing_key)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn schema_identifier_matches_hash() {
+        let expected = h(b"wallet.transfer.v1");
+        assert_eq!(compute_schema_identifier("wallet.transfer.v1"), expected);
+    }
+
+    #[tokio::test]
+    async fn schema_list_fetches_descriptors() -> anyhow::Result<()> {
+        let schema_id_bytes = [0x12; SCHEMA_ID_LEN];
+        let descriptor = SchemaDescriptor {
+            schema_id: SchemaId::from(schema_id_bytes),
+            name: "example".to_string(),
+            version: "1".to_string(),
+            doc_url: Some("https://schemas".to_string()),
+            owner: None,
+            ts: 42,
+        };
+        let body_bytes = serde_json::to_vec(&vec![descriptor.clone()])?;
+        let (url, server) = spawn_fixed_response_server("/schema", body_bytes).await?;
+        let client = HubHttpClient::new(Url::parse(&url)?, HttpClient::builder().build()?);
+        let fetched = fetch_schema_descriptors(&client).await?;
+        server.abort();
+        assert_eq!(fetched, vec![descriptor]);
+        Ok(())
+    }
 }
 
 impl HubReference {
@@ -2945,6 +3890,27 @@ impl HubHttpClient {
             .json::<R>()
             .await
             .context("decoding hub response body")
+    }
+
+    async fn post_cbor_unit(&self, path: &str, body: &[u8]) -> Result<()> {
+        let url = self.url(path)?;
+        let response = self
+            .http
+            .post(url)
+            .header("Content-Type", "application/cbor")
+            .body(body.to_vec())
+            .send()
+            .await
+            .context("performing hub POST request")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to decode response>".to_string());
+            bail!("hub POST {path} failed with {status}: {body}");
+        }
+        Ok(())
     }
 
     async fn post_cbor<R>(&self, path: &str, body: &[u8]) -> Result<R>
