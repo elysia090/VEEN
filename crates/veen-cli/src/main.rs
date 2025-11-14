@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto;
+use std::env;
 use std::fmt;
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{self, Command as StdCommand, Stdio};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -24,6 +25,7 @@ use sha2::{Digest, Sha256};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::signal;
+use tokio::time::sleep;
 use tracing_subscriber::EnvFilter;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
@@ -48,6 +50,19 @@ use veen_core::{
     schema_fed_authority, schema_label_class, schema_meta_schema, schema_revocation,
     schema_wallet_transfer, REVOCATION_TARGET_LEN, SCHEMA_ID_LEN, TRANSFER_ID_LEN, WALLET_ID_LEN,
 };
+use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
+use veen_hub::runtime::HubRuntime;
+
+#[cfg(unix)]
+use nix::errno::Errno;
+#[cfg(unix)]
+use nix::sys::signal::{kill, Signal};
+#[cfg(unix)]
+use nix::unistd::Pid;
+#[cfg(unix)]
+use std::time::Instant;
+#[cfg(unix)]
+use tokio::signal::unix::{signal as unix_signal, SignalKind};
 use veen_hub::pipeline::{
     AttachmentUpload, AuthorizeResponse as RemoteAuthorizeResponse,
     HubStreamState as RemoteHubStreamState, PowCookieEnvelope,
@@ -345,7 +360,7 @@ impl fmt::Display for HubLogLevel {
     }
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct HubStartArgs {
     #[arg(long, value_parser = clap::value_parser!(SocketAddr))]
     listen: SocketAddr,
@@ -1315,6 +1330,15 @@ fn init_tracing() {
 }
 
 async fn handle_hub_start(args: HubStartArgs) -> Result<()> {
+    if !args.foreground && env::var_os("VEEN_CLI_BACKGROUND").is_none() {
+        spawn_background_hub(&args).await?;
+        return Ok(());
+    }
+
+    run_hub_foreground(args).await
+}
+
+async fn run_hub_foreground(args: HubStartArgs) -> Result<()> {
     if let Some(ref config) = args.config {
         if !fs::try_exists(config)
             .await
@@ -1326,69 +1350,216 @@ async fn handle_hub_start(args: HubStartArgs) -> Result<()> {
 
     ensure_data_dir_layout(&args.data_dir).await?;
 
-    let profile_id = resolve_profile_id(args.profile_id)?;
-    let log_level = args.log_level.as_ref().map(ToString::to_string);
+    let HubStartArgs {
+        listen,
+        data_dir,
+        config,
+        profile_id,
+        foreground,
+        log_level,
+    } = args;
 
-    let key_info = ensure_hub_key_material(&args.data_dir).await?;
+    let profile_id = resolve_profile_id(profile_id)?;
+    let log_level_str = log_level.as_ref().map(ToString::to_string);
 
-    let mut state = load_hub_state(&args.data_dir).await?;
+    let key_info = ensure_hub_key_material(&data_dir).await?;
+
+    let overrides = HubConfigOverrides {
+        profile_id: Some(profile_id.clone()),
+        ..HubConfigOverrides::default()
+    };
+    let runtime_config = HubRuntimeConfig::from_sources(
+        listen,
+        data_dir.clone(),
+        config.clone(),
+        HubRole::Primary,
+        overrides,
+    )
+    .await?;
+    let runtime = HubRuntime::start(runtime_config).await?;
+    let actual_listen = runtime.listen_addr();
+
+    let mut state = load_hub_state(&data_dir).await?;
     let now = current_unix_timestamp()?;
+    let launched_in_background = env::var_os("VEEN_CLI_BACKGROUND").is_some();
     state
         .record_start(HubStartContext {
-            data_dir: &args.data_dir,
-            listen: args.listen,
+            data_dir: &data_dir,
+            listen: actual_listen,
             profile_id: profile_id.clone(),
             hub_id: key_info.hub_id_hex.clone(),
-            log_level: log_level.clone(),
+            log_level: log_level_str.clone(),
             now,
             pid: process::id(),
-            foreground: args.foreground,
+            foreground: foreground && !launched_in_background,
         })
-        .with_context(|| format!("updating hub state in {}", args.data_dir.display()))?;
+        .with_context(|| format!("updating hub state in {}", data_dir.display()))?;
 
-    save_hub_state(&args.data_dir, &state).await?;
-    write_pid_file(&args.data_dir, process::id()).await?;
-    ensure_tls_info(&args.data_dir).await?;
+    save_hub_state(&data_dir, &state).await?;
+    write_pid_file(&data_dir, process::id()).await?;
+    ensure_tls_info(&data_dir).await?;
 
     tracing::info!(
-        listen = %args.listen,
-        data_dir = %args.data_dir.display(),
+        listen = %actual_listen,
+        data_dir = %data_dir.display(),
         profile_id,
         hub_id = %key_info.hub_id_hex,
-        "started VEEN hub metadata runtime"
+        "started VEEN hub runtime",
     );
 
-    println!("hub_id: {}", key_info.hub_id_hex);
-    println!("listen: {}", args.listen);
-    println!("profile_id: {}", profile_id);
-    println!("data_dir: {}", args.data_dir.display());
-    if let Some(level) = log_level {
-        println!("log_level: {level}");
+    if launched_in_background {
+        tracing::info!("hub running in background; awaiting shutdown signal");
+    } else {
+        println!("hub_id: {}", key_info.hub_id_hex);
+        println!("listen: {}", actual_listen);
+        println!("profile_id: {}", profile_id);
+        println!("data_dir: {}", data_dir.display());
+        if let Some(level) = &log_level_str {
+            println!("log_level: {level}");
+        }
+        println!("running hub in foreground; press Ctrl+C to stop");
     }
 
-    if args.foreground {
-        println!("running hub in foreground; press Ctrl+C to stop");
+    wait_for_shutdown_signal().await?;
+    println!("shutdown signal received; stopping hub");
+    runtime.shutdown().await?;
+
+    let stop_ts = current_unix_timestamp()?;
+    state.record_stop(stop_ts);
+    save_hub_state(&data_dir, &state).await?;
+    remove_pid_file(&data_dir).await?;
+    println!("hub stopped. uptime_sec={}", state.uptime(stop_ts));
+    Ok(())
+}
+
+async fn spawn_background_hub(args: &HubStartArgs) -> Result<()> {
+    let exe = env::current_exe().context("locating veen executable")?;
+    let mut command = StdCommand::new(exe);
+    command.arg("hub").arg("start");
+    command.arg("--listen").arg(args.listen.to_string());
+    command.arg("--data-dir").arg(&args.data_dir);
+    if let Some(ref config) = args.config {
+        command.arg("--config").arg(config);
+    }
+    if let Some(ref profile_id) = args.profile_id {
+        command.arg("--profile-id").arg(profile_id);
+    }
+    if let Some(ref level) = args.log_level {
+        command.arg("--log-level").arg(level.to_string());
+        command.env("RUST_LOG", format!("veen_hub={level}"));
+    }
+    command.arg("--foreground");
+    command.env("VEEN_CLI_BACKGROUND", "1");
+    command.stdin(Stdio::null());
+
+    let mut child = command
+        .spawn()
+        .context("spawning VEEN hub background process")?;
+    let pid = child.id();
+    if let Some(status) = child
+        .try_wait()
+        .context("checking hub process status after spawn")?
+    {
+        bail!("hub process exited immediately with status {status}");
+    }
+    drop(child);
+
+    let ready_state = wait_for_hub_ready(&args.data_dir).await?;
+
+    if let Some(ref hub_id) = ready_state.hub_id {
+        println!("hub_id: {hub_id}");
+    }
+    if let Some(ref listen) = ready_state.listen {
+        println!("listen: {listen}");
+    }
+    if let Some(ref profile) = ready_state.profile_id {
+        println!("profile_id: {profile}");
+    }
+    println!("data_dir: {}", ready_state.data_dir);
+    println!("hub running in background with pid={pid}");
+    println!(
+        "use `veen hub stop --data-dir {}` to stop the hub",
+        args.data_dir.display()
+    );
+
+    Ok(())
+}
+
+async fn wait_for_hub_ready(data_dir: &Path) -> Result<HubRuntimeState> {
+    const ATTEMPTS: u32 = 100;
+    for attempt in 0..ATTEMPTS {
+        let state = load_hub_state(data_dir).await?;
+        if state.running && state.hub_id.is_some() && state.listen.is_some() {
+            return Ok(state);
+        }
+        if attempt == ATTEMPTS - 1 {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    bail!(
+        "hub process in {} did not report ready state within timeout",
+        data_dir.display()
+    );
+}
+
+async fn wait_for_shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            unix_signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
+        tokio::select! {
+            res = signal::ctrl_c() => res.context("waiting for shutdown signal"),
+            res = async {
+                terminate.recv().await;
+                Ok::<(), anyhow::Error>(())
+            } => res,
+        }
+    }
+    #[cfg(not(unix))]
+    {
         signal::ctrl_c()
             .await
-            .context("waiting for Ctrl+C to stop the hub")?;
-        println!("received Ctrl+C; stopping hub");
-        let stop_ts = current_unix_timestamp()?;
-        state.record_stop(stop_ts);
-        save_hub_state(&args.data_dir, &state).await?;
-        remove_pid_file(&args.data_dir).await?;
-        println!("hub stopped at {stop_ts}");
-    } else {
-        println!(
-            "hub metadata recorded. use `veen hub stop --data-dir {}` to mark it stopped.",
-            args.data_dir.display()
-        );
+            .context("waiting for shutdown signal")?;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+async fn signal_and_wait_for_exit(pid: u32) -> Result<()> {
+    let raw_pid = pid as i32;
+    let pid = Pid::from_raw(raw_pid);
+    kill(pid, Signal::SIGINT)
+        .map_err(|err| anyhow!("failed to signal hub process {raw_pid}: {err}"))?;
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match kill(pid, None) {
+            Ok(()) => {
+                if Instant::now() >= deadline {
+                    bail!("hub process {raw_pid} did not exit within 30 seconds");
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+            Err(Errno::ESRCH) => break,
+            Err(err) => {
+                return Err(anyhow!(
+                    "failed to check hub process {raw_pid} status: {err}"
+                ));
+            }
+        }
     }
 
     Ok(())
 }
 
+#[cfg(not(unix))]
+async fn signal_and_wait_for_exit(_pid: u32) -> Result<()> {
+    bail!("hub stop is not supported on this platform");
+}
+
 async fn handle_hub_stop(args: HubStopArgs) -> Result<()> {
-    let mut state = load_hub_state(&args.data_dir).await?;
+    let state = load_hub_state(&args.data_dir).await?;
     if !state.running {
         bail!(
             "hub in {} is not marked as running",
@@ -1396,14 +1567,29 @@ async fn handle_hub_stop(args: HubStopArgs) -> Result<()> {
         );
     }
 
+    let pid = state.pid.with_context(|| {
+        format!(
+            "hub in {} does not have an active pid",
+            args.data_dir.display()
+        )
+    })?;
+
+    signal_and_wait_for_exit(pid).await?;
+
     flush_hub_storage(&args.data_dir).await?;
 
+    let mut refreshed_state = load_hub_state(&args.data_dir).await?;
     let stop_ts = current_unix_timestamp()?;
-    state.record_stop(stop_ts);
-    save_hub_state(&args.data_dir, &state).await?;
+    if refreshed_state.running {
+        refreshed_state.record_stop(stop_ts);
+        save_hub_state(&args.data_dir, &refreshed_state).await?;
+    }
     remove_pid_file(&args.data_dir).await?;
 
-    println!("hub stopped. uptime_sec={}", state.uptime(stop_ts));
+    println!(
+        "hub stopped. uptime_sec={}",
+        refreshed_state.uptime(stop_ts)
+    );
     Ok(())
 }
 
