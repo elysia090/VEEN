@@ -173,6 +173,13 @@ fn emit_cli_error(code: &str, detail: Option<&str>, use_json: bool) {
     }
 }
 
+fn log_cli_goal(goal: &str) {
+    if global_options().quiet {
+        return;
+    }
+    eprintln!("goal: {goal}");
+}
+
 #[cfg(test)]
 fn json_output_enabled_with(explicit: bool, global: &GlobalOptions) -> bool {
     explicit || global.json
@@ -2757,8 +2764,6 @@ async fn handle_hub_health(args: HubHealthArgs) -> Result<()> {
             if let Some(ref hub_id) = state.hub_id {
                 println!("hub_id: {hub_id}");
             }
-
-            Ok(())
         }
         HubReference::Remote(client) => {
             let health: RemoteHealthStatus = client.get_json("/healthz", &[]).await?;
@@ -2801,9 +2806,11 @@ async fn handle_hub_health(args: HubHealthArgs) -> Result<()> {
                 }
             }
             println!("data_dir: {}", health.data_dir);
-            Ok(())
         }
     }
+
+    log_cli_goal("CLI.OBS0.HEALTH");
+    Ok(())
 }
 
 async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
@@ -2817,8 +2824,6 @@ async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
             } else {
                 print_metrics_summary(&metrics);
             }
-
-            Ok(())
         }
         HubReference::Remote(client) => {
             let report: RemoteObservabilityReport = client.get_json("/metrics", &[]).await?;
@@ -2828,9 +2833,11 @@ async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
             } else {
                 print_metrics_summary(&metrics);
             }
-            Ok(())
         }
     }
+
+    log_cli_goal("CLI.OBS0.METRICS");
+    Ok(())
 }
 
 async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
@@ -2906,6 +2913,7 @@ async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
         println!("  meta0_plus: {}", features.meta0_plus);
     }
 
+    log_cli_goal("CLI.V0_0_1_PP.PROFILE");
     Ok(())
 }
 
@@ -4062,6 +4070,7 @@ async fn handle_label_class_set_remote(
     if let Some(retention) = args.retention_hint {
         println!("  retention_hint: {retention}");
     }
+    log_cli_goal("CLI.LCLASS0.SET");
     Ok(())
 }
 
@@ -4108,6 +4117,7 @@ async fn handle_schema_register_remote(
     println!("  schema_id: {}", args.schema_id);
     println!("  name: {}", args.name);
     println!("  version: {}", args.version);
+    log_cli_goal("CLI.META0_PLUS.SCHEMA_REGISTER");
     Ok(())
 }
 
@@ -4142,6 +4152,7 @@ async fn handle_schema_list_remote(client: HubHttpClient) -> Result<()> {
             println!("  ts: {}", descriptor.ts);
         }
     }
+    log_cli_goal("CLI.META0_PLUS.SCHEMA_LIST");
     Ok(())
 }
 
@@ -4264,9 +4275,16 @@ async fn handle_revoke_publish_remote(
 
 async fn handle_resync(args: ResyncArgs) -> Result<()> {
     match parse_hub_reference(&args.hub)? {
-        HubReference::Local(data_dir) => handle_resync_local(data_dir, args).await,
-        HubReference::Remote(client) => handle_resync_remote(client, args).await,
+        HubReference::Local(data_dir) => {
+            handle_resync_local(data_dir, args).await?;
+        }
+        HubReference::Remote(client) => {
+            handle_resync_remote(client, args).await?;
+        }
     }
+
+    log_cli_goal("CLI.RESYNC0.RESYNC");
+    Ok(())
 }
 
 async fn handle_resync_local(data_dir: PathBuf, args: ResyncArgs) -> Result<()> {
@@ -4356,6 +4374,7 @@ async fn handle_verify_state(args: VerifyStateArgs) -> Result<()> {
     println!("hub seq: {hub_seq}");
     println!("client seq: {client_seq}");
     println!("state verified: client is synchronised with hub");
+    log_cli_goal("CLI.RESYNC0.VERIFY_STATE");
     Ok(())
 }
 
@@ -4377,6 +4396,7 @@ async fn handle_explain_error(args: ExplainErrorArgs) -> Result<()> {
     };
 
     println!("{code}: {description}");
+    log_cli_goal("CLI.CORE.EXPLAIN_ERROR");
     Ok(())
 }
 
@@ -4413,7 +4433,11 @@ async fn handle_rpc_call(args: RpcCallArgs) -> Result<()> {
         pow_challenge: None,
     };
 
-    handle_send(send_args).await
+    let result = handle_send(send_args).await;
+    if result.is_ok() {
+        log_cli_goal("CLI.RPC0.CALL");
+    }
+    result
 }
 
 async fn handle_crdt_lww_set(args: CrdtLwwSetArgs) -> Result<()> {
@@ -4436,6 +4460,7 @@ async fn handle_crdt_lww_set(args: CrdtLwwSetArgs) -> Result<()> {
         "lww set stream={} key={} value={} ts={}",
         args.stream, args.key, args.value, timestamp
     );
+    log_cli_goal("CLI.CRDT0.LWW_SET");
     Ok(())
 }
 
@@ -4449,6 +4474,7 @@ async fn handle_crdt_lww_get(args: CrdtLwwGetArgs) -> Result<()> {
     } else {
         println!("value: (none)");
     }
+    log_cli_goal("CLI.CRDT0.LWW_GET");
     Ok(())
 }
 
@@ -4468,6 +4494,7 @@ async fn handle_crdt_orset_add(args: CrdtOrsetAddArgs) -> Result<()> {
         "orset add stream={} elem={} ts={}",
         args.stream, args.elem, now
     );
+    log_cli_goal("CLI.CRDT0.ORSET_ADD");
     Ok(())
 }
 
@@ -4492,6 +4519,7 @@ async fn handle_crdt_orset_remove(args: CrdtOrsetRemoveArgs) -> Result<()> {
         "orset removed stream={} elem={} ts={}",
         args.stream, args.elem, now
     );
+    log_cli_goal("CLI.CRDT0.ORSET_REMOVE");
     Ok(())
 }
 
@@ -4513,6 +4541,7 @@ async fn handle_crdt_orset_list(args: CrdtOrsetListArgs) -> Result<()> {
             println!("  {value}");
         }
     }
+    log_cli_goal("CLI.CRDT0.ORSET_LIST");
     Ok(())
 }
 
@@ -4524,6 +4553,7 @@ async fn handle_crdt_counter_add(args: CrdtCounterAddArgs) -> Result<()> {
     state.value = state.value.saturating_add(args.delta);
     save_counter_state(&data_dir, &args.stream, &state).await?;
     println!("counter value={} after adding {}", state.value, args.delta);
+    log_cli_goal("CLI.CRDT0.COUNTER_ADD");
     Ok(())
 }
 
@@ -4532,6 +4562,7 @@ async fn handle_crdt_counter_get(args: CrdtCounterGetArgs) -> Result<()> {
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let state = load_counter_state(&data_dir, &args.stream).await?;
     println!("counter value={}", state.value);
+    log_cli_goal("CLI.CRDT0.COUNTER_GET");
     Ok(())
 }
 
@@ -4562,7 +4593,6 @@ async fn handle_anchor_publish(args: AnchorPublishArgs) -> Result<()> {
                 "queued anchor publication for stream {} mmr_root {} at ts {}",
                 args.stream, mmr_root, ts
             );
-            Ok(())
         }
         HubReference::Remote(client) => {
             let report: RemoteObservabilityReport = client.get_json("/metrics", &[]).await?;
@@ -4582,9 +4612,11 @@ async fn handle_anchor_publish(args: AnchorPublishArgs) -> Result<()> {
                 "requested anchor publication for stream {} mmr_root {}",
                 args.stream, mmr_root
             );
-            Ok(())
         }
     }
+
+    log_cli_goal("CLI.ANCHOR0.PUBLISH");
+    Ok(())
 }
 
 async fn handle_anchor_verify(args: AnchorVerifyArgs) -> Result<()> {
@@ -4623,6 +4655,7 @@ async fn handle_anchor_verify(args: AnchorVerifyArgs) -> Result<()> {
             .unwrap_or(0)
     );
     println!("anchor verification complete (signature validation requires hub public key)");
+    log_cli_goal("CLI.ANCHOR0.VERIFY");
     Ok(())
 }
 
