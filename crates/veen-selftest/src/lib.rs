@@ -1,17 +1,23 @@
+use std::collections::HashSet;
+
 use anyhow::{anyhow, ensure, Context, Result};
+use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
-use rand::rngs::OsRng;
+use rand::rngs::{OsRng, StdRng};
+use rand::{Rng, SeedableRng};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde_bytes::ByteBuf;
 
 use veen_core::meta::SchemaRegistry;
 use veen_core::wire::message::MSG_VERSION;
 use veen_core::wire::receipt::RECEIPT_VERSION;
 use veen_core::{
-    h, AttachmentRoot, ClientId, ClientObservationIndex, ClientUsage, ClientUsageConfig, Label,
-    LabelClassRecord, LeafHash, Mmr, MmrRoot, Msg, PayloadHeader, Profile, Receipt,
-    SchemaDescriptor, SchemaId, SchemaOwner, StreamId, TransferId, WalletDepositEvent, WalletId,
-    WalletOpenEvent, WalletState, WalletTransferEvent,
+    h, AttachmentRoot, ClientId, ClientObservationIndex, ClientUsage, ClientUsageConfig, ContextId,
+    Label, LabelClassRecord, LeafHash, Mmr, MmrRoot, Msg, PayloadHeader, Profile, ProfileId,
+    RealmId, Receipt, SchemaDescriptor, SchemaId, SchemaOwner, StreamId, TransferId,
+    WalletDepositEvent, WalletId, WalletOpenEvent, WalletState, WalletTransferEvent, REALM_ID_LEN,
+    TRANSFER_ID_LEN, WALLET_ID_LEN,
 };
 
 mod overlays;
@@ -114,6 +120,104 @@ impl SampleData {
     }
 }
 
+struct SequenceHarness {
+    client_signing: SigningKey,
+    hub_signing: SigningKey,
+    profile_id: ProfileId,
+    label: Label,
+    client_id: ClientId,
+    hub_public: [u8; 32],
+}
+
+impl SequenceHarness {
+    fn new() -> Result<Self> {
+        let mut rng = OsRng;
+        let client_signing = SigningKey::generate(&mut rng);
+        let hub_signing = SigningKey::generate(&mut rng);
+
+        let profile = Profile::default();
+        let profile_id = profile
+            .id()
+            .context("computing canonical profile identifier for sequence harness")?;
+
+        let stream_id = StreamId::from(h(b"selftest/core/sequence"));
+        let label = Label::derive(b"selftest-seq", stream_id, 0);
+        let client_id = ClientId::from(*client_signing.verifying_key().as_bytes());
+        let hub_public = *hub_signing.verifying_key().as_bytes();
+
+        Ok(Self {
+            client_signing,
+            hub_signing,
+            profile_id,
+            label,
+            client_id,
+            hub_public,
+        })
+    }
+
+    fn make_message(
+        &self,
+        mmr: &mut Mmr,
+        client_seq: u64,
+        prev_ack: u64,
+    ) -> Result<(Msg, Receipt, u64, MmrRoot)> {
+        let ciphertext = format!("selftest-seq-{client_seq}-ack-{prev_ack}").into_bytes();
+        let ct_hash = veen_core::CtHash::compute(&ciphertext);
+
+        let mut msg = Msg {
+            ver: veen_core::wire::message::MSG_VERSION,
+            profile_id: self.profile_id,
+            label: self.label,
+            client_id: self.client_id,
+            client_seq,
+            prev_ack,
+            auth_ref: None,
+            ct_hash,
+            ciphertext,
+            sig: veen_core::Signature64::new([0u8; 64]),
+        };
+
+        let msg_digest = msg
+            .signing_tagged_hash()
+            .context("computing signing digest for harness message")?;
+        let signature = self.client_signing.sign(msg_digest.as_ref());
+        msg.sig = veen_core::Signature64::from(signature.to_bytes());
+
+        let leaf = msg.leaf_hash();
+        let (stream_seq, mmr_root) = mmr.append(leaf);
+
+        let mut receipt = Receipt {
+            ver: veen_core::wire::receipt::RECEIPT_VERSION,
+            label: self.label,
+            stream_seq,
+            leaf_hash: leaf,
+            mmr_root,
+            hub_ts: 1_800_000_000,
+            hub_sig: veen_core::Signature64::new([0u8; 64]),
+        };
+
+        let receipt_digest = receipt
+            .signing_tagged_hash()
+            .context("computing signing digest for harness receipt")?;
+        let hub_signature = self.hub_signing.sign(receipt_digest.as_ref());
+        receipt.hub_sig = veen_core::Signature64::from(hub_signature.to_bytes());
+
+        Ok((msg, receipt, stream_seq, mmr_root))
+    }
+
+    fn hub_public(&self) -> &[u8; 32] {
+        &self.hub_public
+    }
+
+    fn label(&self) -> &Label {
+        &self.label
+    }
+
+    fn client_id(&self) -> ClientId {
+        self.client_id
+    }
+}
+
 /// Execute the core protocol self-test invariants described in the CLI goal.
 pub async fn run_core() -> Result<()> {
     let data = SampleData::generate()?;
@@ -192,6 +296,10 @@ pub async fn run_core() -> Result<()> {
 
 /// Execute property-style checks over deterministic scenarios.
 pub fn run_props() -> Result<()> {
+    check_prev_ack_within_stream_bounds()?;
+    check_client_sequence_uniqueness_and_increment()?;
+    check_mmr_index_consistency_under_resync()?;
+    check_cbor_determinism_suite()?;
     check_mmr_fold_invariance()?;
     check_attachment_root_stability()?;
     check_schema_registry_precedence()?;
@@ -208,6 +316,7 @@ pub fn run_fuzz() -> Result<()> {
     fuzz_truncated_cbor(&data.msg, "MSG")?;
     fuzz_truncated_cbor(&data.receipt, "RECEIPT")?;
     fuzz_signature_validations(&data)?;
+    fuzz_nonce_uniqueness()?;
 
     tracing::info!("fuzz-style VEEN self-tests completed");
     Ok(())
@@ -219,6 +328,330 @@ pub async fn run_all() -> Result<()> {
     run_props()?;
     run_fuzz()?;
     tracing::info!("all VEEN self-test suites completed successfully");
+    Ok(())
+}
+
+fn check_prev_ack_within_stream_bounds() -> Result<()> {
+    let harness = SequenceHarness::new()?;
+    let mut mmr = Mmr::new();
+    let mut last_stream_seq = 0u64;
+
+    for client_seq in 1..=12 {
+        let prev_ack = if client_seq % 3 == 0 && last_stream_seq > 0 {
+            last_stream_seq - 1
+        } else {
+            last_stream_seq
+        };
+        let (msg, receipt, stream_seq, _) = harness
+            .make_message(&mut mmr, client_seq, prev_ack)
+            .with_context(|| format!("building message {client_seq} for I6"))?;
+
+        ensure!(
+            msg.prev_ack <= last_stream_seq,
+            "prev_ack must not exceed the last observed stream_seq",
+        );
+        ensure!(
+            receipt.stream_seq == stream_seq,
+            "receipt stream_seq must equal the position returned by the MMR",
+        );
+
+        last_stream_seq = stream_seq;
+    }
+
+    Ok(())
+}
+
+fn check_client_sequence_uniqueness_and_increment() -> Result<()> {
+    let harness = SequenceHarness::new()?;
+    let mut mmr = Mmr::new();
+    let mut seen_pairs: HashSet<(ClientId, u64)> = HashSet::new();
+    let mut expected_client_seq = 0u64;
+    let mut last_stream_seq = 0u64;
+
+    for _ in 0..8 {
+        let next_seq = expected_client_seq + 1;
+        let (msg, receipt, stream_seq, _) = harness
+            .make_message(&mut mmr, next_seq, last_stream_seq)
+            .with_context(|| format!("building message {next_seq} for I8/I9"))?;
+
+        ensure!(
+            msg.client_seq == expected_client_seq + 1,
+            "client_seq must increment by exactly one per label",
+        );
+        ensure!(
+            stream_seq == last_stream_seq + 1,
+            "stream_seq must advance contiguously without gaps",
+        );
+        ensure!(
+            receipt.stream_seq == stream_seq,
+            "receipt stream_seq must align with append index",
+        );
+        ensure!(
+            seen_pairs.insert((msg.client_id, msg.client_seq)),
+            "duplicate (client_id, client_seq) pair detected",
+        );
+
+        expected_client_seq = msg.client_seq;
+        last_stream_seq = stream_seq;
+    }
+
+    let duplicate_pair = (harness.client_id(), expected_client_seq);
+    ensure!(
+        !seen_pairs.insert(duplicate_pair),
+        "duplicate (client_id, client_seq) must be rejected",
+    );
+
+    Ok(())
+}
+
+fn check_mmr_index_consistency_under_resync() -> Result<()> {
+    let harness = SequenceHarness::new()?;
+    let mut mmr = Mmr::new();
+    let mut leaves = Vec::new();
+    let mut last_stream_seq = 0u64;
+
+    for client_seq in 1..=6 {
+        let (msg, receipt, stream_seq, _) = harness
+            .make_message(&mut mmr, client_seq, last_stream_seq)
+            .with_context(|| format!("building message {client_seq} for I12"))?;
+        ensure!(
+            stream_seq == last_stream_seq + 1,
+            "stream_seq must increase contiguously",
+        );
+        ensure!(
+            receipt.stream_seq == stream_seq,
+            "receipt stream_seq must equal the MMR leaf index",
+        );
+        leaves.push(msg.leaf_hash());
+        last_stream_seq = stream_seq;
+    }
+
+    let mut rebuilt = Mmr::new();
+    for (index, leaf) in leaves.iter().enumerate() {
+        let (stream_seq, _) = rebuilt.append(*leaf);
+        ensure!(
+            stream_seq == (index as u64) + 1,
+            "rebuilt MMR stream_seq must match stored leaf index",
+        );
+    }
+
+    ensure!(
+        rebuilt.root() == mmr.root(),
+        "rebuilt MMR root must match live MMR root after resync",
+    );
+
+    Ok(())
+}
+
+fn check_cbor_determinism_suite() -> Result<()> {
+    let harness = SequenceHarness::new()?;
+    let mut mmr = Mmr::new();
+    let (msg, receipt, _, _) = harness
+        .make_message(&mut mmr, 1, 0)
+        .context("building baseline message for CBOR determinism")?;
+
+    assert_cbor_determinism(&msg, "MSG")?;
+    assert_cbor_determinism(&receipt, "RECEIPT")?;
+
+    let attachments = vec![
+        b"deterministic attachment 1".to_vec(),
+        b"deterministic attachment 2".to_vec(),
+    ];
+    let att_root = AttachmentRoot::from_ciphertexts(attachments.iter().map(Vec::as_slice))
+        .ok_or_else(|| anyhow!("expected attachment root for determinism suite"))?;
+    let payload_header = PayloadHeader {
+        schema: SchemaId::from(veen_core::schema_wallet_transfer()),
+        parent_id: Some(msg.leaf_hash()),
+        att_root: Some(att_root),
+        cap_ref: None,
+        expires_at: Some(1_900_000_000),
+    };
+    assert_cbor_determinism(&payload_header, "PayloadHeader")?;
+
+    let wallet_id = WalletId::new([0x11; WALLET_ID_LEN]);
+    let realm_id = RealmId::new([0x22; REALM_ID_LEN]);
+    let ctx_id = ContextId::new([0x33; 32]);
+    let open_event = WalletOpenEvent {
+        wallet_id,
+        realm_id,
+        ctx_id,
+        currency: "USD".into(),
+        created_at: 1_700_000_000,
+    };
+    assert_cbor_determinism(&open_event, "WalletOpenEvent")?;
+
+    let transfer_id = TransferId::from([0x44; TRANSFER_ID_LEN]);
+    let transfer_event = WalletTransferEvent {
+        wallet_id,
+        to_wallet_id: WalletId::new([0x55; WALLET_ID_LEN]),
+        amount: 250,
+        ts: 1_700_000_100,
+        transfer_id,
+        metadata: Some(Value::Map(vec![
+            (Value::Text("count".into()), Value::Integer(2u64.into())),
+            (
+                Value::Text("note".into()),
+                Value::Text("deterministic".into()),
+            ),
+        ])),
+    };
+    assert_cbor_determinism(&transfer_event, "WalletTransferEvent")?;
+
+    let deposit_event = WalletDepositEvent {
+        wallet_id,
+        amount: 500,
+        ts: 1_700_000_200,
+        reference: Some(ByteBuf::from(b"deterministic-ref".as_slice())),
+    };
+    assert_cbor_determinism(&deposit_event, "WalletDepositEvent")?;
+
+    let schema_owner = SchemaOwner::from_slice(harness.hub_public())
+        .context("constructing schema owner for determinism")?;
+    let descriptor = SchemaDescriptor {
+        schema_id: SchemaId::from(veen_core::schema_wallet_transfer()),
+        name: "wallet.transfer".into(),
+        version: "v1".into(),
+        doc_url: Some("https://example.com/wallet-transfer".into()),
+        owner: Some(schema_owner),
+        ts: 1_700_000_300,
+    };
+    assert_cbor_determinism(&descriptor, "SchemaDescriptor")?;
+
+    let label_class = LabelClassRecord {
+        label: *harness.label(),
+        class: "selftest".into(),
+        sensitivity: Some("medium".into()),
+        retention_hint: Some(86_400),
+    };
+    assert_cbor_determinism(&label_class, "LabelClassRecord")?;
+
+    Ok(())
+}
+
+fn assert_cbor_determinism<T>(value: &T, label: &str) -> Result<()>
+where
+    T: Serialize + DeserializeOwned + PartialEq,
+{
+    let mut baseline = Vec::new();
+    ciborium::ser::into_writer(value, &mut baseline)
+        .with_context(|| format!("serializing {label} baseline"))?;
+
+    let view: Value = ciborium::de::from_reader(baseline.as_slice())
+        .with_context(|| format!("decoding {label} baseline"))?;
+    enforce_canonical_maps(&view, label)?;
+
+    let roundtrip: T = ciborium::de::from_reader(baseline.as_slice())
+        .with_context(|| format!("round-tripping {label} baseline"))?;
+    ensure!(roundtrip == *value, "{label} round-trip mismatch");
+
+    for iter in 0..3 {
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(value, &mut buf)
+            .with_context(|| format!("serializing {label} iteration {iter}"))?;
+        ensure!(
+            buf == baseline,
+            "{label} serialization diverged on iteration {iter}",
+        );
+        let decoded: Value = ciborium::de::from_reader(buf.as_slice())
+            .with_context(|| format!("decoding {label} iteration {iter}"))?;
+        enforce_canonical_maps(&decoded, label)?;
+    }
+
+    Ok(())
+}
+
+fn enforce_canonical_maps(value: &Value, label: &str) -> Result<()> {
+    match value {
+        Value::Map(entries) => {
+            let mut prev_key: Option<Vec<u8>> = None;
+            let mut seen = HashSet::new();
+            for (index, (key, val)) in entries.iter().enumerate() {
+                let key_bytes = encode_value(key)
+                    .with_context(|| format!("serializing {label} key {index}"))?;
+                ensure!(
+                    seen.insert(key_bytes.clone()),
+                    "{label} contains duplicate CBOR map keys",
+                );
+                if let Some(prev) = prev_key {
+                    ensure!(
+                        prev <= key_bytes,
+                        "{label} CBOR keys out of canonical order at index {index}",
+                    );
+                }
+                prev_key = Some(key_bytes);
+                enforce_canonical_maps(val, label)?;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                enforce_canonical_maps(item, label)?;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn encode_value(value: &Value) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(value, &mut buf)?;
+    Ok(buf)
+}
+
+fn fuzz_nonce_uniqueness() -> Result<()> {
+    let harness = SequenceHarness::new()?;
+    let mut rng = StdRng::seed_from_u64(0x5354_4655_5A5Au64);
+    let mut seen_pairs = HashSet::new();
+    let mut seen_nonces = HashSet::new();
+    let mut last_stream_seq = 0u64;
+
+    for client_seq in 1..=512 {
+        let prev_ack = if last_stream_seq == 0 {
+            0
+        } else {
+            rng.gen_range(0..=last_stream_seq)
+        };
+        ensure!(
+            prev_ack <= last_stream_seq,
+            "prev_ack fuzz input exceeded last observed stream sequence",
+        );
+        let pair = (prev_ack, client_seq);
+        ensure!(
+            seen_pairs.insert(pair),
+            "duplicate (prev_ack, client_seq) pair generated during fuzz",
+        );
+        let nonce =
+            Msg::derive_body_nonce(harness.label(), prev_ack, &harness.client_id(), client_seq);
+        ensure!(
+            seen_nonces.insert(nonce),
+            "AEAD body nonce repeated for unique (prev_ack, client_seq) pair",
+        );
+        last_stream_seq += 1;
+    }
+
+    let duplicate_pair = (last_stream_seq, last_stream_seq);
+    let nonce_first = Msg::derive_body_nonce(
+        harness.label(),
+        duplicate_pair.0,
+        &harness.client_id(),
+        duplicate_pair.1,
+    );
+    let nonce_second = Msg::derive_body_nonce(
+        harness.label(),
+        duplicate_pair.0,
+        &harness.client_id(),
+        duplicate_pair.1,
+    );
+    ensure!(
+        nonce_first == nonce_second,
+        "nonce derivation must be stable for identical parameters",
+    );
+    ensure!(
+        !seen_nonces.insert(nonce_first),
+        "duplicate nonce should not be accepted when parameters repeat",
+    );
+
     Ok(())
 }
 
