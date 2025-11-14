@@ -48,7 +48,8 @@ use veen_core::{
 use veen_core::{h, ht};
 use veen_core::{
     schema_fed_authority, schema_label_class, schema_meta_schema, schema_revocation,
-    schema_wallet_transfer, REVOCATION_TARGET_LEN, SCHEMA_ID_LEN, TRANSFER_ID_LEN, WALLET_ID_LEN,
+    schema_wallet_transfer, REALM_ID_LEN, REVOCATION_TARGET_LEN, SCHEMA_ID_LEN, TRANSFER_ID_LEN,
+    WALLET_ID_LEN,
 };
 use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::runtime::HubRuntime;
@@ -196,6 +197,10 @@ enum HubCommand {
     Health(HubHealthArgs),
     /// Fetch hub metrics.
     Metrics(HubMetricsArgs),
+    /// Fetch hub capability profile details.
+    Profile(HubProfileArgs),
+    /// Inspect hub role information.
+    Role(HubRoleArgs),
     /// Fetch the latest checkpoint from a hub.
     #[command(name = "checkpoint-latest")]
     CheckpointLatest(HubCheckpointLatestArgs),
@@ -506,6 +511,26 @@ struct HubMetricsArgs {
     hub: String,
     #[arg(long)]
     raw: bool,
+}
+
+#[derive(Args)]
+struct HubProfileArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct HubRoleArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long, value_name = "HEX32")]
+    realm: Option<String>,
+    #[arg(long)]
+    stream: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -1123,6 +1148,44 @@ struct RemoteObservabilityReport {
 }
 
 #[derive(Debug, Deserialize)]
+struct RemoteHubProfileDescriptor {
+    ok: bool,
+    version: String,
+    profile_id: Option<String>,
+    hub_id: String,
+    features: RemoteHubProfileFeatures,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteHubProfileFeatures {
+    core: bool,
+    fed1: bool,
+    auth1: bool,
+    kex1_plus: bool,
+    sh1_plus: bool,
+    lclass0: bool,
+    meta0_plus: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteHubRoleDescriptor {
+    ok: bool,
+    hub_id: String,
+    role: String,
+    stream: Option<RemoteHubRoleStream>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteHubRoleStream {
+    realm_id: Option<String>,
+    stream_id: String,
+    label: String,
+    policy: String,
+    primary_hub: Option<String>,
+    local_is_primary: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct RemoteHealthStatus {
     ok: bool,
     #[serde(with = "humantime_serde")]
@@ -1375,6 +1438,8 @@ async fn main() -> Result<()> {
             HubCommand::VerifyRotation(args) => handle_hub_verify_rotation(args).await,
             HubCommand::Health(args) => handle_hub_health(args).await,
             HubCommand::Metrics(args) => handle_hub_metrics(args).await,
+            HubCommand::Profile(args) => handle_hub_profile(args).await,
+            HubCommand::Role(args) => handle_hub_role(args).await,
             HubCommand::CheckpointLatest(args) => {
                 handle_hub_checkpoint_latest(args).await.map(|_| ())
             }
@@ -2642,6 +2707,180 @@ async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
     }
 }
 
+async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
+    let client = match parse_hub_reference(&args.hub)? {
+        HubReference::Local(_) => {
+            bail!("hub profile requires an HTTP hub endpoint (e.g. http://host:port)");
+        }
+        HubReference::Remote(client) => client,
+    };
+
+    let descriptor: RemoteHubProfileDescriptor = client.get_json("/profile", &[]).await?;
+    let RemoteHubProfileDescriptor {
+        ok,
+        version,
+        profile_id,
+        hub_id,
+        features,
+    } = descriptor;
+
+    if args.json {
+        let mut root = JsonMap::new();
+        root.insert("ok".to_string(), JsonValue::Bool(ok));
+        root.insert("version".to_string(), JsonValue::String(version));
+        match profile_id {
+            Some(value) => {
+                root.insert("profile_id".to_string(), JsonValue::String(value));
+            }
+            None => {
+                root.insert("profile_id".to_string(), JsonValue::Null);
+            }
+        }
+        root.insert("hub_id".to_string(), JsonValue::String(hub_id));
+        let mut feature_map = JsonMap::new();
+        feature_map.insert("core".to_string(), JsonValue::Bool(features.core));
+        feature_map.insert("fed1".to_string(), JsonValue::Bool(features.fed1));
+        feature_map.insert("auth1".to_string(), JsonValue::Bool(features.auth1));
+        feature_map.insert("kex1_plus".to_string(), JsonValue::Bool(features.kex1_plus));
+        feature_map.insert("sh1_plus".to_string(), JsonValue::Bool(features.sh1_plus));
+        feature_map.insert("lclass0".to_string(), JsonValue::Bool(features.lclass0));
+        feature_map.insert(
+            "meta0_plus".to_string(),
+            JsonValue::Bool(features.meta0_plus),
+        );
+        root.insert("features".to_string(), JsonValue::Object(feature_map));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&JsonValue::Object(root))?
+        );
+    } else {
+        println!("version: {version}");
+        match profile_id {
+            Some(value) => println!("profile_id: {value}"),
+            None => println!("profile_id: (none)"),
+        }
+        println!("hub_id: {hub_id}");
+        println!("features:");
+        println!("  core: {}", features.core);
+        println!("  fed1: {}", features.fed1);
+        println!("  auth1: {}", features.auth1);
+        println!("  kex1_plus: {}", features.kex1_plus);
+        println!("  sh1_plus: {}", features.sh1_plus);
+        println!("  lclass0: {}", features.lclass0);
+        println!("  meta0_plus: {}", features.meta0_plus);
+    }
+
+    Ok(())
+}
+
+async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
+    let HubRoleArgs {
+        hub,
+        realm,
+        stream,
+        json,
+    } = args;
+
+    let client = match parse_hub_reference(&hub)? {
+        HubReference::Local(_) => {
+            bail!("hub role requires an HTTP hub endpoint (e.g. http://host:port)");
+        }
+        HubReference::Remote(client) => client,
+    };
+
+    let realm_id = match realm {
+        Some(value) => Some(parse_realm_id_hex(&value)?),
+        None => None,
+    };
+
+    let stream_id = match stream {
+        Some(ref value) => Some(
+            cap_stream_id_from_label(value)
+                .with_context(|| format!("deriving stream identifier for {value}"))?,
+        ),
+        None => None,
+    };
+
+    let mut query = Vec::new();
+    if let Some(ref stream_id) = stream_id {
+        query.push(("stream_id", hex::encode(stream_id.as_ref())));
+    }
+    if let Some(ref realm_id) = realm_id {
+        query.push(("realm_id", hex::encode(realm_id.as_ref())));
+    }
+
+    let response: RemoteHubRoleDescriptor = client.get_json("/role", &query).await?;
+    let RemoteHubRoleDescriptor {
+        ok,
+        hub_id,
+        role,
+        stream: stream_info,
+    } = response;
+
+    if stream_id.is_some() && stream_info.is_none() {
+        bail!("hub did not return role information for the requested stream");
+    }
+
+    if json {
+        let mut root = JsonMap::new();
+        root.insert("ok".to_string(), JsonValue::Bool(ok));
+        root.insert("hub_id".to_string(), JsonValue::String(hub_id.clone()));
+        root.insert("role".to_string(), JsonValue::String(role.clone()));
+        if let Some(ref stream) = stream_info {
+            let mut stream_map = JsonMap::new();
+            if let Some(ref value) = stream.realm_id {
+                stream_map.insert("realm_id".to_string(), JsonValue::String(value.clone()));
+            } else {
+                stream_map.insert("realm_id".to_string(), JsonValue::Null);
+            }
+            stream_map.insert(
+                "stream_id".to_string(),
+                JsonValue::String(stream.stream_id.clone()),
+            );
+            stream_map.insert("label".to_string(), JsonValue::String(stream.label.clone()));
+            stream_map.insert(
+                "policy".to_string(),
+                JsonValue::String(stream.policy.clone()),
+            );
+            if let Some(ref value) = stream.primary_hub {
+                stream_map.insert("primary_hub".to_string(), JsonValue::String(value.clone()));
+            } else {
+                stream_map.insert("primary_hub".to_string(), JsonValue::Null);
+            }
+            stream_map.insert(
+                "local_is_primary".to_string(),
+                JsonValue::Bool(stream.local_is_primary),
+            );
+            root.insert("stream".to_string(), JsonValue::Object(stream_map));
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&JsonValue::Object(root))?
+        );
+    } else {
+        println!("role: {role}");
+        println!("hub_id: {hub_id}");
+        if let Some(ref stream) = stream_info {
+            let realm_out = stream
+                .realm_id
+                .clone()
+                .unwrap_or_else(|| "none".to_string());
+            println!("realm_id: {realm_out}");
+            println!("stream_id: {}", stream.stream_id);
+            println!("label: {}", stream.label);
+            println!("policy: {}", stream.policy);
+            let primary = stream
+                .primary_hub
+                .clone()
+                .unwrap_or_else(|| "none".to_string());
+            println!("primary_hub: {primary}");
+            println!("local_is_primary: {}", stream.local_is_primary);
+        }
+    }
+
+    Ok(())
+}
+
 async fn handle_hub_checkpoint_latest(args: HubCheckpointLatestArgs) -> Result<Checkpoint> {
     let client = match parse_hub_reference(&args.hub)? {
         HubReference::Local(_) => {
@@ -3582,6 +3821,11 @@ async fn load_signing_key_from_dir(dir: &Path) -> Result<SigningKey> {
 fn parse_hub_id_hex(input: &str) -> Result<HubId> {
     let bytes = parse_hex_key::<{ HUB_ID_LEN }>(input)?;
     Ok(HubId::from(bytes))
+}
+
+fn parse_realm_id_hex(input: &str) -> Result<RealmId> {
+    let bytes = parse_hex_key::<{ REALM_ID_LEN }>(input)?;
+    Ok(RealmId::from(bytes))
 }
 
 fn parse_schema_id_hex(input: &str) -> Result<SchemaId> {

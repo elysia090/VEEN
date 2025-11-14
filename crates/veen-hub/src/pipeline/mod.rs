@@ -33,7 +33,8 @@ use veen_core::wire::{
 use veen_core::{
     cap_stream_id_from_label, cap_token_from_cbor, schema_fed_authority, schema_label_class,
     schema_meta_schema, AuthorityRecord, AuthorityView, CapTokenRate, Label, LabelClassRecord,
-    LabelPolicy, PowCookie, SchemaDescriptor, StreamIdParseError, CAP_TOKEN_VERSION,
+    LabelPolicy, PowCookie, RealmId, SchemaDescriptor, StreamId, StreamIdParseError,
+    CAP_TOKEN_VERSION,
 };
 
 use thiserror::Error;
@@ -761,6 +762,93 @@ impl HubPipeline {
         }
     }
 
+    pub async fn profile_descriptor(&self) -> HubProfileDescriptor {
+        let guard = self.inner.lock().await;
+        let features = HubProfileFeatures {
+            core: true,
+            fed1: matches!(self.role, HubRole::Replica)
+                || !self.federation.replica_targets.is_empty()
+                || !guard.authority_records.is_empty(),
+            auth1: !guard.authority_records.is_empty(),
+            kex1_plus: guard
+                .capabilities
+                .records
+                .values()
+                .any(|record| record.rate.is_some())
+                || self.admission.pow_difficulty.is_some(),
+            sh1_plus: self.admission.capability_gating_enabled,
+            lclass0: !guard.label_class_records.is_empty(),
+            meta0_plus: !guard.schema_descriptors.is_empty(),
+        };
+        HubProfileDescriptor {
+            ok: true,
+            version: "veen-0.0.1+".to_string(),
+            profile_id: self.profile_id.clone(),
+            hub_id: self.identity.hub_id_hex.clone(),
+            features,
+        }
+    }
+
+    pub async fn role_descriptor(
+        &self,
+        realm_id: Option<RealmId>,
+        stream_id: Option<StreamId>,
+    ) -> HubRoleDescriptor {
+        let role = match self.role {
+            HubRole::Primary => {
+                if self.federation.replica_targets.is_empty() {
+                    "standalone"
+                } else {
+                    "federated-primary"
+                }
+            }
+            HubRole::Replica => "federated-replica",
+        }
+        .to_string();
+
+        if let Some(stream_id) = stream_id {
+            let guard = self.inner.lock().await;
+            let now = current_unix_timestamp();
+            let authority = guard
+                .authority_view
+                .label_authority(stream_id, realm_id, now);
+            let realm_hex = authority.realm_id.map(|realm| hex::encode(realm.as_ref()));
+            let stream_hex = hex::encode(stream_id.as_ref());
+            let label_hex = hex::encode(Label::derive([], stream_id, 0).as_ref());
+            let policy = match authority.policy {
+                LabelPolicy::SinglePrimary => "single-primary",
+                LabelPolicy::MultiPrimary => "multi-primary",
+                LabelPolicy::Unspecified => "unspecified",
+            }
+            .to_string();
+            let primary_hex = authority.primary_hub.map(|hub| hex::encode(hub.as_ref()));
+            let local_is_primary = authority
+                .primary_hub
+                .map_or(false, |hub| hub == self.identity.hub_id);
+
+            HubRoleDescriptor {
+                ok: true,
+                hub_id: self.identity.hub_id_hex.clone(),
+                role,
+                stream: Some(HubRoleStreamDescriptor {
+                    realm_id: realm_hex,
+                    stream_id: stream_hex,
+                    label: label_hex,
+                    policy,
+                    primary_hub: primary_hex,
+                    local_is_primary,
+                }),
+            }
+        } else {
+            HubRoleDescriptor {
+                ok: true,
+                hub_id: self.identity.hub_id_hex.clone(),
+                role,
+                stream: None,
+            }
+        }
+    }
+
     pub async fn anchor_log(&self) -> Result<AnchorLog> {
         let guard = self.inner.lock().await;
         Ok(guard.anchors.clone())
@@ -1200,6 +1288,48 @@ pub struct ObservabilityReport {
     pub hub_public_key: Option<String>,
     pub role: String,
     pub data_dir: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubProfileDescriptor {
+    pub ok: bool,
+    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    pub hub_id: String,
+    pub features: HubProfileFeatures,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubProfileFeatures {
+    pub core: bool,
+    pub fed1: bool,
+    pub auth1: bool,
+    pub kex1_plus: bool,
+    pub sh1_plus: bool,
+    pub lclass0: bool,
+    pub meta0_plus: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubRoleDescriptor {
+    pub ok: bool,
+    pub hub_id: String,
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<HubRoleStreamDescriptor>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubRoleStreamDescriptor {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub realm_id: Option<String>,
+    pub stream_id: String,
+    pub label: String,
+    pub policy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_hub: Option<String>,
+    pub local_is_primary: bool,
 }
 
 const HUB_KEY_VERSION: u8 = 1;
