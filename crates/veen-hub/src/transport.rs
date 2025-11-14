@@ -73,6 +73,8 @@ impl HubServerHandle {
 struct StreamQuery {
     stream: String,
     from: Option<u64>,
+    #[serde(default)]
+    with_proof: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,7 +122,7 @@ async fn handle_stream(
     Query(query): Query<StreamQuery>,
 ) -> impl IntoResponse {
     match pipeline
-        .stream(&query.stream, query.from.unwrap_or(0))
+        .stream(&query.stream, query.from.unwrap_or(0), query.with_proof)
         .await
     {
         Ok(messages) => (StatusCode::OK, Json(messages)).into_response(),
