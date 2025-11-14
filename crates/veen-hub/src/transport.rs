@@ -83,6 +83,7 @@ async fn handle_submit(
         Err(err) => {
             if let Some(cap_err) = err.downcast_ref::<CapabilityError>() {
                 tracing::warn!(error = ?cap_err, "submit failed");
+                pipeline.observability().record_submit_err(cap_err.code());
                 let status = match cap_err {
                     CapabilityError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
                     _ => StatusCode::FORBIDDEN,

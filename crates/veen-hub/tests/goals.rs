@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -20,6 +21,11 @@ use veen_hub::pipeline::{
     AnchorRequest, AttachmentUpload, AuthorizeResponse, SubmitRequest, SubmitResponse,
 };
 use veen_hub::runtime::HubRuntime;
+
+#[derive(Debug, Deserialize)]
+struct MetricsResponse {
+    submit_err_total: BTreeMap<String, u64>,
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn goals_core_pipeline() -> Result<()> {
@@ -141,7 +147,7 @@ async fn goals_core_pipeline() -> Result<()> {
         "--stream",
         "core/capped",
         "--ttl",
-        "600",
+        "4",
         "--rate",
         "1,1",
         "--out",
@@ -185,11 +191,17 @@ async fn goals_core_pipeline() -> Result<()> {
     assert_eq!(authorize_response.auth_ref, expected_auth_ref);
     let auth_ref_hex = authorize_response.auth_ref.clone();
 
+    let mut mismatched_subject = cap_token.subject_pk.as_ref().to_vec();
+    if let Some(first) = mismatched_subject.first_mut() {
+        *first ^= 0xFF;
+    }
+    let invalid_client_id = hex::encode(mismatched_subject);
+
     let unauthorized = http
         .post(&submit_endpoint)
         .json(&SubmitRequest {
             stream: "core/capped".to_string(),
-            client_id: "deadbeef".into(),
+            client_id: invalid_client_id,
             payload: serde_json::json!({"text":"denied"}),
             attachments: None,
             auth_ref: Some(auth_ref_hex.clone()),
@@ -200,7 +212,15 @@ async fn goals_core_pipeline() -> Result<()> {
         .send()
         .await
         .context("submitting unauthorized message")?;
-    assert!(unauthorized.status().is_client_error());
+    assert_eq!(unauthorized.status(), StatusCode::FORBIDDEN);
+    let unauthorized_body = unauthorized
+        .text()
+        .await
+        .context("reading unauthorized response body")?;
+    assert!(
+        unauthorized_body.contains("E.AUTH") || unauthorized_body.contains("E.CAP"),
+        "expected capability rejection to return E.AUTH or E.CAP, got: {unauthorized_body}"
+    );
 
     let _authorized: SubmitResponse = http
         .post(&submit_endpoint)
@@ -244,7 +264,8 @@ async fn goals_core_pipeline() -> Result<()> {
         .get(RETRY_AFTER)
         .context("missing retry-after header on rate limit")?
         .to_str()
-        .context("retry-after header not valid UTF-8")?;
+        .context("retry-after header not valid UTF-8")?
+        .to_string();
     assert!(!retry_after.is_empty());
     let rate_body = rate_limited
         .text()
@@ -253,6 +274,115 @@ async fn goals_core_pipeline() -> Result<()> {
     assert!(
         rate_body.contains("E.RATE"),
         "expected rate limit error code in body: {rate_body}"
+    );
+
+    let retry_after_secs: u64 = retry_after
+        .parse()
+        .context("parsing retry-after header as integer")?;
+    tokio::time::sleep(Duration::from_secs(retry_after_secs.max(1))).await;
+
+    let _rate_recovered: SubmitResponse = http
+        .post(&submit_endpoint)
+        .json(&SubmitRequest {
+            stream: "core/capped".to_string(),
+            client_id: hex::encode(cap_token.subject_pk.as_ref()),
+            payload: serde_json::json!({"text":"rate-recovered"}),
+            attachments: None,
+            auth_ref: Some(auth_ref_hex.clone()),
+            expires_at: None,
+            schema: None,
+            idem: None,
+        })
+        .send()
+        .await
+        .context("submitting message after rate token refill")?
+        .error_for_status()
+        .context("rate limit persisted after retry-after interval")?
+        .json()
+        .await
+        .context("parsing rate recovery response")?;
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    let ttl_expired = http
+        .post(&submit_endpoint)
+        .json(&SubmitRequest {
+            stream: "core/capped".to_string(),
+            client_id: hex::encode(cap_token.subject_pk.as_ref()),
+            payload: serde_json::json!({"text":"ttl-expired"}),
+            attachments: None,
+            auth_ref: Some(auth_ref_hex.clone()),
+            expires_at: None,
+            schema: None,
+            idem: None,
+        })
+        .send()
+        .await
+        .context("submitting message after capability ttl expiry")?;
+    assert_eq!(ttl_expired.status(), StatusCode::FORBIDDEN);
+    let ttl_body = ttl_expired
+        .text()
+        .await
+        .context("reading ttl expiry response body")?;
+    assert!(
+        ttl_body.contains("E.CAP"),
+        "expected ttl expiry to return E.CAP, got: {ttl_body}"
+    );
+
+    let reauthorized: AuthorizeResponse = http
+        .post(format!("http://{}/authorize", runtime.listen_addr()))
+        .header("Content-Type", "application/cbor")
+        .body(cap_bytes.clone())
+        .send()
+        .await
+        .context("reauthorizing capability after ttl expiry")?
+        .error_for_status()
+        .context("reauthorize endpoint returned error after ttl expiry")?
+        .json()
+        .await
+        .context("decoding reauthorize response")?;
+    assert_eq!(reauthorized.auth_ref, auth_ref_hex);
+
+    let _ttl_recovered: SubmitResponse = http
+        .post(&submit_endpoint)
+        .json(&SubmitRequest {
+            stream: "core/capped".to_string(),
+            client_id: hex::encode(cap_token.subject_pk.as_ref()),
+            payload: serde_json::json!({"text":"ttl-recovered"}),
+            attachments: None,
+            auth_ref: Some(auth_ref_hex.clone()),
+            expires_at: None,
+            schema: None,
+            idem: None,
+        })
+        .send()
+        .await
+        .context("submitting message after capability reauthorization")?
+        .error_for_status()
+        .context("submission after reauthorization returned error")?
+        .json()
+        .await
+        .context("parsing capability recovery response")?;
+
+    let metrics: MetricsResponse = http
+        .get(format!("http://{}/metrics", runtime.listen_addr()))
+        .send()
+        .await
+        .context("fetching metrics")?
+        .error_for_status()
+        .context("metrics endpoint error")?
+        .json()
+        .await
+        .context("decoding metrics response")?;
+    let cap_errors = metrics.submit_err_total.get("E.CAP").copied().unwrap_or(0);
+    assert!(
+        cap_errors >= 2,
+        "expected at least two E.CAP errors (subject mismatch + ttl expiry), got {cap_errors}"
+    );
+    let rate_errors = metrics.submit_err_total.get("E.RATE").copied().unwrap_or(0);
+    assert!(
+        rate_errors >= 1,
+        "expected at least one E.RATE error recorded, got {rate_errors}"
     );
 
     // Anchor log via HTTP
@@ -268,14 +398,7 @@ async fn goals_core_pipeline() -> Result<()> {
         .error_for_status()
         .context("anchor endpoint returned error")?;
 
-    // Metrics & health endpoints
-    http.get(format!("http://{}/metrics", runtime.listen_addr()))
-        .send()
-        .await
-        .context("fetching metrics")?
-        .error_for_status()
-        .context("metrics endpoint error")?;
-
+    // Health endpoint
     http.get(format!("http://{}/healthz", runtime.listen_addr()))
         .send()
         .await
@@ -429,6 +552,26 @@ async fn goals_capability_gating_persists() -> Result<()> {
     assert!(
         missing_body.contains("E.AUTH"),
         "expected E.AUTH error code in response: {missing_body}"
+    );
+
+    let restart_metrics: MetricsResponse = http
+        .get(format!("http://{}/metrics", restart_runtime.listen_addr()))
+        .send()
+        .await
+        .context("fetching restart hub metrics")?
+        .error_for_status()
+        .context("metrics endpoint error after restart")?
+        .json()
+        .await
+        .context("decoding restart metrics response")?;
+    let auth_errors = restart_metrics
+        .submit_err_total
+        .get("E.AUTH")
+        .copied()
+        .unwrap_or(0);
+    assert!(
+        auth_errors >= 1,
+        "expected at least one E.AUTH error recorded for missing auth_ref, got {auth_errors}"
     );
 
     restart_runtime.shutdown().await?;
