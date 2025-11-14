@@ -1672,10 +1672,12 @@ async fn handle_k8s_authority(args: K8sAuthorityArgs) -> Result<()> {
     ];
 
     docs.push(statefulset_manifest(
-        "veen-authority-hub",
-        &namespace,
-        base_labels.clone(),
-        default_annotations("authority", &version, Some(&combined_hash)),
+        ManifestMetadata::new(
+            "veen-authority-hub",
+            &namespace,
+            base_labels.clone(),
+            default_annotations("authority", &version, Some(&combined_hash)),
+        ),
         base_labels.clone(),
         pod_annotations,
         container,
@@ -1823,10 +1825,12 @@ async fn handle_k8s_tenant(args: K8sTenantArgs) -> Result<()> {
     }
 
     docs.push(deployment_manifest(
-        "veen-hub",
-        &namespace,
-        base_labels.clone(),
-        default_annotations("tenant", &version, Some(&combined_hash)),
+        ManifestMetadata::new(
+            "veen-hub",
+            &namespace,
+            base_labels.clone(),
+            default_annotations("tenant", &version, Some(&combined_hash)),
+        ),
         base_labels.clone(),
         pod_annotations,
         container,
@@ -2003,11 +2007,35 @@ fn service_manifest(
     JsonValue::Object(root)
 }
 
-fn statefulset_manifest(
-    name: &str,
-    namespace: &str,
+struct ManifestMetadata {
+    name: String,
+    namespace: String,
     labels: JsonMap,
     annotations: JsonMap,
+}
+
+impl ManifestMetadata {
+    fn new(name: &str, namespace: &str, labels: JsonMap, annotations: JsonMap) -> Self {
+        Self {
+            name: name.to_string(),
+            namespace: namespace.to_string(),
+            labels,
+            annotations,
+        }
+    }
+
+    fn metadata(&self) -> JsonValue {
+        metadata(
+            Some(&self.name),
+            Some(&self.namespace),
+            Some(self.labels.clone()),
+            Some(self.annotations.clone()),
+        )
+    }
+}
+
+fn statefulset_manifest(
+    resource_metadata: ManifestMetadata,
     selector_labels: JsonMap,
     pod_annotations: JsonMap,
     container: JsonValue,
@@ -2040,19 +2068,13 @@ fn statefulset_manifest(
     let mut root = JsonMap::new();
     root.insert("apiVersion".to_string(), json!("apps/v1"));
     root.insert("kind".to_string(), json!("StatefulSet"));
-    root.insert(
-        "metadata".to_string(),
-        metadata(Some(name), Some(namespace), Some(labels), Some(annotations)),
-    );
+    root.insert("metadata".to_string(), resource_metadata.metadata());
     root.insert("spec".to_string(), JsonValue::Object(spec));
     JsonValue::Object(root)
 }
 
 fn deployment_manifest(
-    name: &str,
-    namespace: &str,
-    labels: JsonMap,
-    annotations: JsonMap,
+    resource_metadata: ManifestMetadata,
     selector_labels: JsonMap,
     pod_annotations: JsonMap,
     container: JsonValue,
@@ -2083,10 +2105,7 @@ fn deployment_manifest(
     let mut root = JsonMap::new();
     root.insert("apiVersion".to_string(), json!("apps/v1"));
     root.insert("kind".to_string(), json!("Deployment"));
-    root.insert(
-        "metadata".to_string(),
-        metadata(Some(name), Some(namespace), Some(labels), Some(annotations)),
-    );
+    root.insert("metadata".to_string(), resource_metadata.metadata());
     root.insert("spec".to_string(), JsonValue::Object(spec));
     JsonValue::Object(root)
 }
