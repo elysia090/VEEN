@@ -16,9 +16,12 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::pipeline::{
-    AnchorRequest, BridgeIngestRequest, CapabilityError, HubPipeline, ObservabilityReport,
-    SubmitRequest,
+    AnchorRequest, BridgeIngestRequest, CapabilityError, HubPipeline, HubProfileDescriptor,
+    HubRoleDescriptor, ObservabilityReport, SubmitRequest,
 };
+use std::str::FromStr;
+use veen_core::label::StreamId;
+use veen_core::RealmId;
 
 pub struct HubServerHandle {
     shutdown: Option<oneshot::Sender<()>>,
@@ -45,6 +48,8 @@ impl HubServerHandle {
             .route("/revoke", post(handle_revoke))
             .route("/healthz", get(handle_health))
             .route("/metrics", get(handle_metrics))
+            .route("/profile", get(handle_profile))
+            .route("/role", get(handle_role))
             .route("/checkpoint_latest", get(handle_checkpoint_latest))
             .route("/checkpoint_range", get(handle_checkpoint_range))
             .with_state(pipeline);
@@ -262,6 +267,54 @@ async fn handle_health(State(pipeline): State<HubPipeline>) -> impl IntoResponse
 async fn handle_metrics(State(pipeline): State<HubPipeline>) -> impl IntoResponse {
     let report = pipeline.metrics_snapshot().await;
     (StatusCode::OK, Json(report)).into_response()
+}
+
+async fn handle_profile(State(pipeline): State<HubPipeline>) -> impl IntoResponse {
+    let descriptor: HubProfileDescriptor = pipeline.profile_descriptor().await;
+    (StatusCode::OK, Json(descriptor)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct RoleQuery {
+    #[serde(rename = "realm_id")]
+    realm_id: Option<String>,
+    #[serde(rename = "stream_id")]
+    stream_id: Option<String>,
+}
+
+async fn handle_role(
+    State(pipeline): State<HubPipeline>,
+    Query(query): Query<RoleQuery>,
+) -> impl IntoResponse {
+    let realm = match query.realm_id {
+        Some(ref hex) => match RealmId::from_str(hex) {
+            Ok(realm) => Some(realm),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "invalid realm_id; expected 64 hexadecimal characters".to_string(),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+    let stream = match query.stream_id {
+        Some(ref hex) => match StreamId::from_str(hex) {
+            Ok(stream) => Some(stream),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "invalid stream_id; expected 64 hexadecimal characters".to_string(),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+
+    let descriptor: HubRoleDescriptor = pipeline.role_descriptor(realm, stream).await;
+    (StatusCode::OK, Json(descriptor)).into_response()
 }
 
 async fn handle_checkpoint_latest(State(pipeline): State<HubPipeline>) -> impl IntoResponse {
