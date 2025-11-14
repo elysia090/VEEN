@@ -1,52 +1,90 @@
-VEEN Design Philosophy v0.0.1 (Tightened)
+VEEN Design Philosophy v0.0.1 (Ephemeral Fabric Tightened)
 Plain ASCII, English only
 	0.	Purpose and scope
 
-This document pinpoints the design philosophy of VEEN v0.0.1 as an operating model for a “virtualized network fabric”:
-	•	a minimal, invariant wire and log core;
-	•	disposable hubs as execution containers;
-	•	overlays (ID, WAL, RPC, CRDT) as deterministic folds over logs;
-	•	OS-agnostic deployment on Linux, WSL, Docker, and k8s/k3s.
+This document pinpoints the design philosophy of VEEN v0.0.1 as an operating model for an “ephemeral, verifiable, reproducible network fabric”.
+
+Motto:
+
+Treat networks as ephemeral as pods.
+A network should be disposable, verifiable, and reproducible.
+
+VEEN interprets this as:
+	•	networks are infrastructure with pod-like lifetimes;
+	•	hubs are disposable execution containers;
+	•	logs and receipts are the durable truth;
+	•	overlays (identity, wallet, RPC, CRDT, operations) are deterministic folds over logs;
+	•	deployment is OS-agnostic: Linux, WSL2, Docker, k8s, k3s.
 
 The goal is to keep these principles stable while implementations, overlays, and tooling evolve.
 	1.	Primary objectives
 
-1.1 Invariance
-	•	Fix a small set of wire objects and invariants:
-	•	MSG, RECEIPT, CHECKPOINT, mmr_proof, cap_token.
-	•	Invariants I1..I12 over their relationships.
-	•	Do not let:
-	•	OS,
-	•	container runtime,
-	•	hub topology,
-	•	overlay choice
-change the meaning of these objects.
+1.1 Ephemeral fabric
+	•	A “network” is treated like a pod:
+	•	it can be created, scaled, drained, and destroyed without reconfiguration debt;
+	•	lifetimes are short and repeatable;
+	•	the cost of replacement must be low enough that replacement is the default response to damage.
+	•	The long-lived artefacts are logs and keys, not hub processes or static configs.
 
-1.2 Determinism
+1.2 Disposability
+	•	Hubs are explicitly disposable:
+	•	a hub can be killed, upgraded, or moved without changing semantics of any label;
+	•	a hub can be replaced by another binary using the same data directory;
+	•	multiple hubs can serve the same fabric as long as they respect the core invariants.
+	•	Network topologies, pod layouts, and node assignments are allowed to change frequently; logs remain authoritative.
+
+1.3 Verifiability
+	•	Every accepted message is committed into an authenticated log:
+	•	leaf_hash and msg_id bind ciphertext to label, profile, and client_seq;
+	•	MMR roots and CHECKPOINT objects give compact inclusion proofs;
+	•	RECEIPT and CHECKPOINT carry hub signatures;
+	•	anchors optionally bind those roots to external ledgers.
+	•	Any statement about “what happened” must be reconstructible and checkable from retained logs and proofs, without trusting a live hub.
+
+1.4 Reproducibility
+	•	For any retained log prefix, folding overlays over that prefix must:
+	•	produce identical state on any conforming implementation;
+	•	allow state to be recomputed from scratch without hidden side channels;
+	•	allow a new hub or client to join by replaying logs only.
+	•	Reproducibility is preferred over mutable databases:
+	•	operational state is derived, not stored ad hoc;
+	•	divergence between stored state and log-derived state is treated as an error to surface.
+
+1.5 Invariance
+	•	A small set of wire objects and invariants is fixed:
+	•	MSG, RECEIPT, CHECKPOINT, mmr_proof, cap_token;
+	•	invariants I1..I12 over their relationships.
+	•	The following must not change the meaning of these objects:
+	•	OS or kernel version;
+	•	container runtime (bare metal, Docker, containerd, etc.);
+	•	hub process layout or topology;
+	•	which overlays are in use.
+
+1.6 Determinism
 	•	For any finite event prefix L on a label:
-	•	fold(L) is a deterministic function for every overlay.
-	•	Any conforming implementation produces identical overlay state from L.
+	•	fold(L) is a deterministic function for every overlay;
+	•	any conforming implementation produces identical overlay state from L.
 	•	All non-determinism is either:
 	•	forbidden, or
-	•	explicitly localized (time in ttl checks, day-boundary limit windows, etc.) and documented.
+	•	explicitly localized and documented (for example:
+	•	time in ttl checks,
+	•	day-boundary limit windows,
+	•	tie-breaking using stream_seq).
+	•	Admission and error behavior for a given MSG under v0.0.1 are deterministic given:
+	•	current log state;
+	•	configured limits and profiles.
 
-1.3 Portability
-	•	The same repository and binary MUST:
-	•	run on Ubuntu 22.04/24.04 (native, systemd),
-	•	run on WSL2 Ubuntu,
-	•	run in Docker/k8s/k3s,
-	•	with identical wire semantics and log behavior.
+1.7 Portability
+	•	The same repository and binary must:
+	•	run on Ubuntu 22.04 and 24.04 (native, systemd);
+	•	run on WSL2 Ubuntu;
+	•	run in containers under Docker, k8s, and k3s;
+	•	expose identical wire semantics and log behavior.
 	•	A “VEEN fabric instance” is defined by:
-	•	the set of logs (receipts.cborseq, payloads.cborseq, checkpoints.cborseq, anchors),
-	•	not by the OS, container runtime, or hub process layout.
+	•	its logs (receipts.cborseq, payloads.cborseq, checkpoints.cborseq, anchors);
+	•	not by OS, container runtime, or process layout.
 
-1.4 Auditability
-	•	Every decision in overlays (ID, WAL, etc.) MUST be:
-	•	reproducible from logs alone,
-	•	checkable offline without live hubs,
-	•	bound to MMR roots and optional anchors.
-
-1.5 Minimality
+1.8 Minimality
 	•	Hubs:
 	•	accept, verify, commit, stream, and anchor;
 	•	expose health and metrics;
@@ -55,261 +93,311 @@ change the meaning of these objects.
 	•	define schemas and folding rules;
 	•	are pure clients of the log model;
 	•	do not require hub modifications.
+	•	The core remains small enough that:
+	•	audits are feasible;
+	•	alternative hub implementations remain practical.
 
 	2.	Network-as-container model
 
 2.1 Fabric instance
 
 A VEEN fabric instance is:
-	•	a set of labels and their logs,
-	•	a set of MMR roots and checkpoints,
-	•	optional anchors and bridge relationships.
+	•	a set of labels and their event logs;
+	•	a set of MMR roots and checkpoints;
+	•	optional anchors and bridge relationships;
+	•	optional overlay-specific state reconstructed from logs.
 
-It is analogous to a container image plus its volume contents:
-	•	the logs are the durable “data volume”;
-	•	hubs are the disposable “container processes” that:
-	•	bind the logs to TCP ports,
-	•	provide admission and anchoring.
+This is analogous to:
+	•	a container image plus its volume contents:
+	•	logs are the durable “data volume”;
+	•	hubs are disposable “container processes” that:
+	•	bind logs to TCP ports and endpoints;
+	•	enforce admission and invariants;
+	•	interact with anchoring backends.
 
 2.2 Hubs as disposable nodes
-	•	A hub process:
-	•	is started with a data-dir, profile, listen address;
-	•	can be killed and restarted without semantic loss;
-	•	can be replaced by a newer binary against the same data-dir.
-	•	Hubs are intended to be:
-	•	run under systemd units,
-	•	run as containers in Docker/k8s/k3s,
-	•	scaled out or rotated with zero change in overlay semantics.
+	•	A hub process is started with a data directory, profile, and listen address.
+	•	A hub can be:
+	•	killed and restarted without semantic loss for any label whose logs are intact;
+	•	replaced by a newer binary using the same data directory;
+	•	replicated under supervision (systemd, k8s Deployments, k3s) with identical behavior for the same traffic and logs.
+	•	Hubs are expected to be:
+	•	short-lived compared to fabric lifetime;
+	•	rotated often for upgrades and hardening.
 
 2.3 Clients as portable endpoints
-	•	A client identity (keys + state) under $HOME or a volume:
-	•	can connect to any conforming hub in the fabric,
-	•	can resync and verify state purely from /stream and checkpoints,
-	•	does not depend on hub internals.
+	•	A client identity (keys and state) is stored under a user-controlled path or volume.
+	•	A client can:
+	•	connect to any conforming hub in the fabric;
+	•	resync and verify its state using /stream and CHECKPOINT endpoints;
+	•	detect divergence and recover via RESYNC flows.
+	•	Client correctness depends only on:
+	•	retained logs;
+	•	trust in pinned hub keys and profiles;
+	•	never on hub-local mutable databases.
 
 	3.	Wire and invariants
 
 3.1 Fixed wire objects
 	•	MSG:
-	•	contains client_id, auth_ref, payload_hdr, ciphertext, sig.
+	•	carries ver, profile_id, label, client_id, client_seq, prev_ack, auth_ref, ct_hash, ciphertext, sig.
 	•	RECEIPT:
-	•	contains stream_seq, mmr_root, leaf_hash, hub_sig, profile_id.
+	•	carries ver, label, stream_seq, leaf_hash, mmr_root, hub_ts, hub_sig.
 	•	CHECKPOINT:
-	•	commits peaks and mmr_root for ranges.
+	•	commits label_prev, label_curr, upto_seq, mmr_root, epoch, hub_sig, optional witness_sigs.
 	•	cap_token:
-	•	issuer_pk, subject_pk, allow, sig_chain.
+	•	carries issuer_pk, subject_pk, allow, sig_chain.
 
 3.2 Hub responsibilities
 
-The hub MUST:
-	•	check core invariants (signatures, sizes, sequences, profiles);
-	•	update MMR and emit RECEIPTs or error codes;
-	•	never:
-	•	branch on payload_hdr.schema contents,
-	•	decrypt body for application-level decisions,
-	•	embed overlay semantics inside core wire handling.
+The hub must:
+	•	validate:
+	•	signatures (MSG.sig, hub_sig, cap_token signatures when used);
+	•	sizes and limits;
+	•	sequence and uniqueness invariants;
+	•	profile compatibility;
+	•	maintain per-label MMR state and emit RECEIPTs;
+	•	emit CHECKPOINT objects and optional anchors.
+
+The hub must not:
+	•	branch on payload_hdr.schema contents for core behavior;
+	•	use decrypted body for admission or ordering decisions;
+	•	embed overlay-specific semantics into core wire handling.
 
 3.3 Version stability
 	•	Within v0.0.1:
-	•	wire encoding is frozen,
-	•	hub behavior for valid/invalid MSG is frozen.
-	•	Overlays may evolve (additional schemas, richer folds) without:
-	•	changing MSG, RECEIPT, CHECKPOINT structure,
-	•	requiring hub code changes.
+	•	wire encoding is frozen;
+	•	hub behavior for valid and invalid messages is frozen.
+	•	Overlays may evolve by defining new schemas and folding rules without:
+	•	changing MSG, RECEIPT, CHECKPOINT, mmr_proof, cap_token structure;
+	•	requiring hub code changes;
+	•	invalidating existing logs.
 
-	4.	Log semantics as single source of truth
+	4.	Logs as single source of truth
 
 4.1 Append-only model
-	•	The authoritative record is:
-	•	receipts.cborseq (MSG+RECEIPT pairs),
-	•	checkpoints.cborseq,
-	•	optional payloads.cborseq for body storage.
-	•	Hubs may rotate files and apply retention, but:
-	•	any retained prefix must be internally consistent and re-foldable.
+	•	The authoritative record for a label consists of:
+	•	receipts.cborseq (sequence of RECEIPT, optionally paired with MSG payloads for retention);
+	•	checkpoints.cborseq;
+	•	optional anchors that bind mmr_root values externally.
+	•	Hubs may rotate on-disk files and apply retention, but:
+	•	any retained prefix must remain internally consistent and re-foldable;
+	•	truncation must not silently create inconsistent prefixes.
 
-4.2 Folding
+4.2 Folding semantics
 	•	For each overlay:
-	•	state = fold(events up to upto_seq) on given streams.
-	•	Folding rules MUST:
+	•	state(label, upto_seq) = fold(events up to upto_seq on relevant streams).
+	•	Folding rules must:
 	•	depend only on:
-	•	stream order (stream_seq, tie-breaker),
-	•	payload_hdr.schema,
+	•	stream order (stream_seq as primary tie-breaker);
+	•	payload_hdr.schema;
 	•	payload body bytes;
+	•	optional timestamps inside the payload body;
 	•	not depend on:
-	•	which hub accepted MSG,
-	•	IP address of the sender,
-	•	OS or container runtime.
+	•	which hub accepted the message;
+	•	sender IP or connection metadata;
+	•	OS, hardware, or container runtime.
+	•	Re-running fold on the same retained prefix must exactly reproduce prior overlay state.
 
 4.3 Cross-hub consistency
-	•	Bridging MUST preserve:
-	•	payload bytes,
-	•	payload_hdr.schema,
-	•	a deterministic mapping from original msg_id to parent_id for replicas.
-	•	Overlay implementations MUST treat:
-	•	local and bridged events uniformly,
-	•	parent_id and transfer_id as deduplication keys where specified.
+	•	Bridging and mirroring must preserve:
+	•	payload bytes;
+	•	payload_hdr.schema;
+	•	a deterministic parent_id link back to original msg_id when mirroring.
+	•	Overlay implementations must:
+	•	treat local and bridged events under the same folding rules;
+	•	document deduplication keys (for example (source_hub, label, stream_seq) or parent_id).
 
 	5.	Overlay design constraints
 
 5.1 Pure overlay
 
-An overlay (ID, WAL, RPC, CRDT) MUST:
+An overlay (identity, wallet, RPC, CRDT, operations) must:
 	•	be defined only in terms of:
-	•	schema identifiers,
-	•	deterministic CBOR bodies,
-	•	per-stream folding rules;
+	•	schema identifiers in payload_hdr.schema;
+	•	deterministic CBOR payload bodies;
+	•	per-stream folding rules over logs;
 	•	not require:
-	•	hub-side special endpoints beyond VEEN core,
-	•	hub awareness of schemas,
+	•	hub-specific endpoints beyond VEEN core;
+	•	schema-aware logic in hub;
 	•	non-deterministic external state during folding.
 
 5.2 Conflict handling
-	•	Overlays MUST specify:
-	•	LWW rules when multiple updates can apply (ID profiles, org profiles),
-	•	OR-set / G-counter semantics when sets or counters are used (groups, CRDT),
-	•	deduplication rules when duplicate events may appear (bridged WAL transfers).
-	•	Any ambiguity MUST be resolved with:
-	•	explicit tie-breakers (updated_at, ts, stream_seq, leaf_hash),
-	•	documented behavior under exact ties.
+
+Overlays must specify:
+	•	update rules:
+	•	last-writer-wins when multiple updates can apply to the same key;
+	•	OR-set or grow-only counter semantics when sets or counters are used;
+	•	deduplication rules when duplicate events are possible (for example due to replay or mirroring);
+	•	explicit tie-breakers:
+	•	timestamps plus stream_seq;
+	•	stream_seq alone;
+	•	leaf_hash only if needed.
+
+Any ambiguity must be resolved by documented rules. Different implementations must not diverge under the same event prefix.
 
 5.3 Compatibility
-	•	Adding an overlay MUST NOT:
-	•	change how MSG are accepted or ordered,
-	•	require schema-specific hub logic,
-	•	invalidate older logs.
+	•	Adding an overlay must not:
+	•	change how MSG are accepted or ordered by the hub;
+	•	require schema-specific error handling in core paths;
+	•	invalidate or reinterpret older logs.
+	•	Overlays must be strictly additive with respect to the core.
 
-	6.	Identity overlay (ID) role
+	6.	Identity overlay role
 
-6.1 Identity as an overlay
-	•	Principals, devices, realms, ctx_id, orgs, groups, handles, external links:
-	•	exist only as folded state over ID streams.
+6.1 Identity as log-derived state
+	•	Principals, devices, realms, contexts, organizations, groups, and handles:
+	•	exist only as derived state from identity streams;
+	•	are folded from identity messages and revocation messages.
 	•	Hubs:
-	•	see none of these in plaintext,
-	•	do not derive or enforce ID semantics.
+	•	are unaware of identity details beyond public keys and cap_token structures;
+	•	are not required to understand realms, organizations, or group semantics.
 
-6.2 Session-level binding
-	•	Application endpoints:
-	•	bind client sessions to ctx_id / realm_id based on:
-	•	device keys,
-	•	cap_token chains,
-	•	ID logs.
-	•	This binding:
-	•	is verifiable and reproducible from logs,
-	•	does not require hub cooperation beyond cap_token admission.
+6.2 Sessions and context binding
+	•	Application frontends bind sessions to context identifiers using:
+	•	device keys;
+	•	capability chains;
+	•	identity overlay logs.
+	•	This binding must be:
+	•	reconstructible from logs;
+	•	verifiable offline;
+	•	independent of hub internals.
 
-	7.	Wallet overlay (WAL) role
+	7.	Wallet and paid operation overlay role
 
-7.1 Wallet semantics from logs
+7.1 Balances and transfers from logs
 	•	A wallet is defined by:
-	•	wallet_id (realm_id, ctx_id, currency),
-	•	its WAL event stream.
-	•	Balances, limits, freeze state, adjustments:
-	•	are derived by folding events,
-	•	must always satisfy balance >= 0 when input is policy-respecting.
+	•	wallet_id (for example realm, context, currency, account);
+	•	its event stream of wallet operations and paid operations.
+	•	Balances, limits, and freezes are derived entirely by folding events:
+	•	debit and credit operations;
+	•	adjustments;
+	•	policy events.
 
 7.2 No hub-side balances
 	•	Hubs do not:
-	•	maintain balances,
-	•	check WAL-specific conditions,
-	•	know which MSG are “financial”.
-	•	Applications and auditors:
-	•	recompute balances from WAL logs,
-	•	detect policy violations (overdraft, limit overreach) using the same rules.
+	•	store balances;
+	•	enforce wallet-specific rules;
+	•	distinguish financial messages from other payloads.
+	•	Wallet services and auditors:
+	•	recompute balances from logs;
+	•	detect overdrafts or violations using the same folding rules.
 
 	8.	OS and container integration
 
 8.1 Execution environment
-	•	VEEN MUST run as:
-	•	a normal Unix process on Linux/WSL,
-	•	a container entrypoint in Docker/k8s/k3s,
-	•	with the same CLI and hub behavior.
-	•	No external persistent services are required:
-	•	no RDBMS,
-	•	no message broker,
-	•	no external KMS,
-	•	beyond optional integration layers.
+	•	VEEN must run as:
+	•	a normal Unix process on Linux and WSL2;
+	•	a container entrypoint in Docker, k8s, and k3s;
+	•	the same veen binary with the same CLI surface.
+	•	No mandatory external persistent systems:
+	•	no required RDBMS;
+	•	no required message broker;
+	•	no required external KMS.
+	•	Integrations with databases, KMS, or queues are permitted as overlays or sidecars, not as core dependencies.
 
 8.2 Data and logs
 	•	Hub data directories:
-	•	are ordinary directories mountable as volumes,
-	•	can be attached to containers or bare-metal processes,
-	•	define the persistence of the fabric instance on that node.
+	•	are plain directories, mountable as volumes;
+	•	contain receipts, payloads, checkpoints, anchor metadata, and state files;
+	•	can be attached to containers or bare-metal processes interchangeably.
 	•	Clients:
-	•	store their identity and state under user-owned paths or volumes.
+	•	store identity and state under user paths or mounted volumes;
+	•	must be able to move between machines without changing semantics, as long as keys and state are preserved.
 
-8.3 Supervision
-	•	Hub lifecycle:
-	•	is managed by systemd units, k8s Deployments/StatefulSets, or simple nohup.
-	•	Shutdown:
-	•	MUST flush receipts and checkpoints,
-	•	MUST close listeners cleanly,
-	•	MUST allow immediate restart on the same port.
+8.3 Supervision and lifecycle
+	•	Hub lifecycle is managed by:
+	•	systemd units on bare metal and WSL2;
+	•	Deployments or StatefulSets on k8s and k3s;
+	•	equivalent constructs on other orchestrators.
+	•	Shutdown must:
+	•	flush receipts and checkpoints to disk at documented durability guarantees;
+	•	close listeners cleanly;
+	•	permit immediate restart on the same data directory and port.
 
 	9.	Security model
 
 9.1 Trust boundaries
 	•	Clients trust:
-	•	their own device keys,
-	•	principal/org roots (ID),
-	•	log ordering and hub signatures (core).
-	•	Hubs are:
-	•	trusted to enforce admission policies and invariants,
-	•	not trusted with plaintext application state.
+	•	their own keys and keystore;
+	•	pinned hub public keys and profiles;
+	•	log ordering and hub signatures as enforced by core invariants.
+	•	Hubs are trusted to:
+	•	enforce admission via cap_token and rate limiting;
+	•	maintain MMR consistency and signatures;
+	•	respect configured limits.
+	•	Hubs are not trusted with:
+	•	plaintext application payloads;
+	•	overlay semantics or policy decisions beyond admission.
 
 9.2 Confidentiality and integrity
-	•	Payloads are:
-	•	AEAD-protected, using HPKE-derived keys per label.
+	•	Confidentiality:
+	•	payloads are protected by AEAD using per-label keys derived from HPKE contexts;
+	•	hub does not see decrypted payload_hdr or body.
 	•	Integrity:
-	•	client-level via MSG.sig,
-	•	hub-level via hub_sig on RECEIPT and CHECKPOINT,
-	•	log-level via MMR and optional external anchoring.
+	•	client-level via MSG.sig over the canonical MSG encoding (without sig);
+	•	hub-level via hub_sig over RECEIPT and CHECKPOINT;
+	•	log-level via MMR roots and inclusion proofs plus optional external anchoring.
 
-9.3 Revocation
-	•	Revocation is expressed:
-	•	via ID overlay (devices, ctx_id, auth_ref),
-	•	via cap_token lifecycle and logs.
+9.3 Revocation and rotation
+	•	Revocation is represented as overlay events and cap_token lifecycle:
+	•	device or client identity revocations;
+	•	capability and auth_ref revocations.
 	•	Hubs and applications:
-	•	read the same revocation events,
+	•	read the same revocation events;
 	•	enforce consistent decisions for new messages.
+	•	Key rotation:
+	•	is performed without changing wire semantics;
+	•	is recorded via CHECKPOINT witness signatures and overlay events.
 
 	10.	Evolution and versioning
 
-10.1 Core
-	•	VEEN v0.0.1 is a fixed wire and invariant set.
-	•	Future versions:
-	•	may add fields or error codes,
-	•	MUST not silently reinterpret v0.0.1 logs,
-	•	MUST document compatibility and upgrade paths.
+10.1 Core evolution
+	•	VEEN v0.0.1:
+	•	fixes wire objects, invariants, and error behavior.
+	•	Future core versions may:
+	•	add new fields or error codes;
+	•	define new invariants;
+	•	provide explicit upgrade paths.
+	•	Core evolution must not:
+	•	silently reinterpret v0.0.1 logs;
+	•	break deterministic folding for pre-existing schemas.
 
-10.2 Overlays
-	•	New overlays:
-	•	are added by defining new schemas and folds,
-	•	do not require schema-dependent hub behavior.
-	•	Existing overlays:
-	•	may extend in a versioned manner (e.g. id.ctx.profile.v2),
-	•	MUST remain replayable from combined logs with clear precedence rules.
+10.2 Overlay evolution
+	•	New overlays are added by:
+	•	defining new schema identifiers;
+	•	defining folding rules and invariants for those schemas;
+	•	documenting interaction with existing overlays.
+	•	Existing overlays may:
+	•	evolve via versioned schemas (for example “id.ctx.profile.v2”);
+	•	introduce new fields while keeping old behavior well-defined.
+	•	Overlay evolution must:
+	•	be replayable from combined logs;
+	•	specify precedence and tie-breaking between versions.
 
 	11.	Non-goals
 
-VEEN is not:
-	•	a general-purpose compute platform;
-	•	a consensus system or blockchain;
-	•	an application-layer router with deep inspection;
-	•	a replacement for all existing auth/identity standards.
+VEEN does not aim to be:
+	•	a general-purpose compute or function execution platform;
+	•	a consensus or blockchain system;
+	•	a deep packet inspection or routing engine;
+	•	a replacement for every existing authentication or identity standard;
+	•	a full-featured API gateway or service mesh.
 
-VEEN is:
+VEEN aims to be:
 	•	a minimal, deterministic fabric for:
-	•	encrypted event transport,
-	•	verifiable logging,
-	•	overlay-defined state.
+	•	encrypted event transport;
+	•	verifiable logging;
+	•	overlay-defined state;
+	•	a network layer that is as ephemeral as pods but as auditable as a ledger.
 
 	12.	Summary axis
 
-The design axis that must not drift:
+The design axis that must not drift is:
 	•	Fix a minimal wire and log core with strong invariants.
-	•	Treat logs as the single durable truth.
-	•	Make hubs disposable containers attaching logs to networks.
-	•	Keep overlay semantics (ID, WAL, RPC, CRDT) as deterministic folds over logs.
-	•	Require OS and container independence: Linux, WSL, Docker, k8s/k3s all yield identical semantics for the same logs.
+	•	Treat logs, receipts, and checkpoints as the single durable truth.
+	•	Make hubs disposable containers that attach logs to networks and enforce invariants.
+	•	Keep all higher-level semantics (identity, wallet, RPC, CRDT, operations) as deterministic folds over logs.
+	•	Require OS and container independence: Linux, WSL2, Docker, k8s, and k3s all yield identical semantics for the same logs.
 
-Everything else (tooling, UI, packaging, ecosystem) is allowed to change as long as these properties remain intact.
+As long as these properties hold, networks can be treated as ephemeral as pods: disposable in deployment, verifiable in audit, and reproducible in operation.
