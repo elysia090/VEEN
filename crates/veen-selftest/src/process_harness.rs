@@ -1,15 +1,16 @@
 use std::ffi::OsString;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use reqwest::Client;
 use sha2::Digest;
 use tempfile::TempDir;
 use tokio::fs::{self, File};
 use tokio::io::{self, AsyncRead, AsyncWriteExt};
-use tokio::process::{Child, Command};
+use tokio::process::{Child, Command as TokioCommand};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::warn;
@@ -34,6 +35,9 @@ impl BinaryPaths {
         let hub = dir.join(format!("veen-hub{}", std::env::consts::EXE_SUFFIX));
         let cli = dir.join(format!("veen-cli{}", std::env::consts::EXE_SUFFIX));
         let bridge = dir.join(format!("veen-bridge{}", std::env::consts::EXE_SUFFIX));
+        ensure_binary(&hub, "veen-hub")?;
+        ensure_binary(&cli, "veen-cli")?;
+        ensure_binary(&bridge, "veen-bridge")?;
         if !hub.exists() {
             bail!("expected hub binary at {}", hub.display());
         }
@@ -47,6 +51,24 @@ impl BinaryPaths {
     }
 }
 
+fn ensure_binary(path: &Path, crate_name: &str) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    let status = Command::new("cargo")
+        .arg("build")
+        .arg("-p")
+        .arg(crate_name)
+        .arg("--bin")
+        .arg(crate_name)
+        .status()
+        .with_context(|| format!("building {crate_name} binary"))?;
+    if !status.success() {
+        bail!("cargo build --bin {crate_name} failed with status {status}");
+    }
+    Ok(())
+}
+
 struct ManagedProcess {
     name: String,
     child: Child,
@@ -58,8 +80,10 @@ struct ManagedProcess {
 
 impl ManagedProcess {
     async fn terminate(mut self) -> Result<()> {
+        let mut forced = false;
         if self.child.try_wait()?.is_none() {
             self.child.start_kill()?;
+            forced = true;
         }
         let status = self.child.wait().await.context("awaiting process exit")?;
         if let Some(task) = self.stdout_task.take() {
@@ -72,7 +96,7 @@ impl ManagedProcess {
                 .context("joining stderr task")?
                 .context("propagating stderr task error")?;
         }
-        if !status.success() {
+        if !status.success() && !forced {
             bail!(
                 "process {} exited with status {status:?}; see {} and {}",
                 self.name,
@@ -200,7 +224,7 @@ impl IntegrationHarness {
                 vec![
                     OsString::from("verify-state"),
                     OsString::from("--hub"),
-                    OsString::from(&hub_url),
+                    hub.data_dir.as_os_str().to_os_string(),
                     OsString::from("--client"),
                     client_dir.as_os_str().to_os_string(),
                     OsString::from("--stream"),
@@ -257,7 +281,7 @@ impl IntegrationHarness {
         .await?;
 
         // Capability flow
-        let cap_path = self.base_dir().join("cap.json");
+        let cap_path = self.base_dir().join("cap.cbor");
         self.run_cli_success(
             vec![
                 OsString::from("cap"),
@@ -288,6 +312,8 @@ impl IntegrationHarness {
                 OsString::from("core/capped"),
                 OsString::from("--body"),
                 OsString::from(r#"{"text":"denied"}"#),
+                OsString::from("--cap"),
+                cap_path.as_os_str().to_os_string(),
             ])
             .await?;
         if unauthorized.status.success() {
@@ -482,7 +508,7 @@ impl IntegrationHarness {
     }
 
     async fn run_cli(&self, args: Vec<OsString>) -> Result<CommandOutput> {
-        let mut command = Command::new(&self.bins.cli);
+        let mut command = TokioCommand::new(&self.bins.cli);
         command.args(args.iter());
         let output = command
             .output()
@@ -553,7 +579,7 @@ impl IntegrationHarness {
     ) -> Result<ManagedProcess> {
         let stdout_log = self.logs_dir.join(format!("{name}.stdout.log"));
         let stderr_log = self.logs_dir.join(format!("{name}.stderr.log"));
-        let mut command = Command::new(program);
+        let mut command = TokioCommand::new(program);
         command.args(args.iter());
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
@@ -677,7 +703,16 @@ impl IntegrationHarness {
             bail!("metrics endpoint {} returned {}", base, status);
         }
         let body = response.text().await.context("decoding metrics body")?;
-        ensure_contains(&body, "veen_submit", "metrics include submit counters")?;
+        let metrics: serde_json::Value =
+            serde_json::from_str(&body).context("parsing metrics payload as JSON")?;
+        ensure!(
+            metrics.get("submit_ok_total").is_some(),
+            "metrics response missing submit_ok_total"
+        );
+        ensure!(
+            metrics.get("submit_err_total").is_some(),
+            "metrics response missing submit_err_total"
+        );
         Ok(body)
     }
 

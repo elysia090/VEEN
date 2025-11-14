@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use hex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::Digest;
@@ -14,6 +15,7 @@ use tokio::sync::Mutex;
 
 use veen_core::wire::mmr::Mmr;
 use veen_core::wire::types::{LeafHash, MmrRoot};
+use veen_core::{cap_stream_id_from_label, cap_token_from_cbor, CapTokenRate, CAP_TOKEN_VERSION};
 
 use crate::config::{HubRole, HubRuntimeConfig};
 use crate::observability::HubObservability;
@@ -86,7 +88,7 @@ impl HubPipeline {
             client_id,
             payload,
             attachments,
-            capability,
+            auth_ref,
             expires_at,
             schema,
             idem,
@@ -95,7 +97,7 @@ impl HubPipeline {
         let attachments = attachments.unwrap_or_default();
         let submitted_at = current_unix_timestamp();
         let mut guard = self.inner.lock().await;
-        if let Some(cap) = capability.as_ref() {
+        if let Some(cap) = auth_ref.as_ref() {
             enforce_capability(
                 &mut guard.capabilities,
                 cap,
@@ -129,7 +131,7 @@ impl HubPipeline {
             body: Some(payload.to_string()),
             body_digest: None,
             attachments: stored_attachments.clone(),
-            cap_id: capability.clone(),
+            auth_ref: auth_ref.clone(),
             idem,
         };
 
@@ -276,18 +278,53 @@ impl HubPipeline {
         Ok(runtime.state.clone())
     }
 
-    pub async fn authorize_capability(&self, request: CapabilityRequest) -> Result<()> {
+    pub async fn authorize_capability(&self, token_bytes: &[u8]) -> Result<AuthorizeResponse> {
+        if matches!(self.role, HubRole::Replica) {
+            bail!("replica hubs are read-only");
+        }
+
+        let token = cap_token_from_cbor(token_bytes).context("decoding capability token")?;
+        if token.ver != CAP_TOKEN_VERSION {
+            bail!("unsupported capability token version {}", token.ver);
+        }
+        token
+            .verify()
+            .map_err(|err| anyhow!("capability token verification failed: {err}"))?;
+        if token.allow.ttl == 0 {
+            bail!("capability ttl must be greater than zero seconds");
+        }
+
+        let now = current_unix_timestamp();
+        let expires_at = now.saturating_add(token.allow.ttl);
+        let auth_ref = token.auth_ref().context("computing capability auth_ref")?;
+        let auth_ref_hex = hex::encode(auth_ref.as_ref());
+        let subject_hex = hex::encode(token.subject_pk.as_ref());
+        let stream_ids: Vec<String> = token
+            .allow
+            .stream_ids
+            .iter()
+            .map(|id| hex::encode(id.as_ref()))
+            .collect();
+
         let mut guard = self.inner.lock().await;
         let record = CapabilityRecord {
-            token_id: request.token_id.clone(),
-            subject: request.subject,
-            stream: request.stream,
-            expires_at: request.expires_at,
-            max_uses: request.max_uses,
+            subject: subject_hex,
+            stream_ids,
+            expires_at,
+            ttl: token.allow.ttl,
+            rate: token.allow.rate.clone(),
             uses: 0,
         };
-        guard.capabilities.records.insert(request.token_id, record);
-        update_capability_store(&self.storage, &guard.capabilities).await
+        guard
+            .capabilities
+            .records
+            .insert(auth_ref_hex.clone(), record);
+        update_capability_store(&self.storage, &guard.capabilities).await?;
+
+        Ok(AuthorizeResponse {
+            auth_ref: auth_ref_hex,
+            expires_at,
+        })
     }
 
     pub async fn anchor_checkpoint(&self, anchor: AnchorRequest) -> Result<()> {
@@ -336,7 +373,7 @@ pub struct SubmitRequest {
     pub client_id: String,
     pub payload: JsonValue,
     pub attachments: Option<Vec<AttachmentUpload>>,
-    pub capability: Option<String>,
+    pub auth_ref: Option<String>,
     pub expires_at: Option<u64>,
     pub schema: Option<String>,
     pub idem: Option<u64>,
@@ -370,15 +407,6 @@ pub struct BridgeIngestResponse {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct CapabilityRequest {
-    pub token_id: String,
-    pub subject: String,
-    pub stream: String,
-    pub expires_at: u64,
-    pub max_uses: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
 pub struct AnchorRequest {
     pub stream: String,
     pub mmr_root: String,
@@ -402,7 +430,7 @@ pub struct StoredMessage {
     pub body: Option<String>,
     pub body_digest: Option<String>,
     pub attachments: Vec<StoredAttachment>,
-    pub cap_id: Option<String>,
+    pub auth_ref: Option<String>,
     pub idem: Option<u64>,
 }
 
@@ -434,12 +462,18 @@ struct CapabilityStore {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CapabilityRecord {
-    token_id: String,
     subject: String,
-    stream: String,
+    stream_ids: Vec<String>,
     expires_at: u64,
-    max_uses: Option<u64>,
+    ttl: u64,
+    rate: Option<CapTokenRate>,
     uses: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthorizeResponse {
+    pub auth_ref: String,
+    pub expires_at: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -610,28 +644,29 @@ async fn persist_attachments(
 
 fn enforce_capability(
     store: &mut CapabilityStore,
-    token_id: &str,
+    auth_ref: &str,
     subject: &str,
     stream: &str,
     now: u64,
 ) -> Result<()> {
     let record = store
         .records
-        .get_mut(token_id)
-        .ok_or_else(|| anyhow!("capability {token_id} is not authorised"))?;
+        .get_mut(auth_ref)
+        .ok_or_else(|| anyhow!("capability {auth_ref} is not authorised"))?;
     if record.subject != subject {
         bail!("capability subject mismatch");
     }
-    if record.stream != stream {
+    let stream_id = cap_stream_id_from_label(stream).context("deriving stream identifier")?;
+    let stream_hex = hex::encode(stream_id.as_ref());
+    if !record
+        .stream_ids
+        .iter()
+        .any(|allowed| allowed == &stream_hex)
+    {
         bail!("capability stream mismatch");
     }
     if record.expires_at < now {
         bail!("capability token has expired");
-    }
-    if let Some(max) = record.max_uses {
-        if record.uses >= max {
-            bail!("capability usage exhausted");
-        }
     }
     record.uses = record.uses.saturating_add(1);
     Ok(())

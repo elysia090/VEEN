@@ -36,10 +36,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.suite {
-        Suite::Core => veen_selftest::run_core(),
+        Suite::Core => veen_selftest::run_core().await,
         Suite::Props => veen_selftest::run_props(),
         Suite::Fuzz => veen_selftest::run_fuzz(),
-        Suite::All => veen_selftest::run_all(),
+        Suite::All => veen_selftest::run_all().await,
         Suite::Overlays(args) => veen_selftest::run_overlays(args.subset.as_deref()).await,
     }?;
 

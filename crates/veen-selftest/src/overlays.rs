@@ -86,7 +86,7 @@ async fn run_fed_auth() -> Result<()> {
         client_id: DEFAULT_CLIENT_ID.to_string(),
         payload: json!({ "message": "hello from primary" }),
         attachments: None,
-        capability: None,
+        auth_ref: None,
         expires_at: None,
         schema: None,
         idem: None,

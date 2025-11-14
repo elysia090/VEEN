@@ -5,15 +5,14 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{body::Bytes, Json, Router};
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::pipeline::{
-    AnchorRequest, BridgeIngestRequest, CapabilityRequest, HubPipeline, ObservabilityReport,
-    SubmitRequest,
+    AnchorRequest, BridgeIngestRequest, HubPipeline, ObservabilityReport, SubmitRequest,
 };
 
 pub struct HubServerHandle {
@@ -115,12 +114,9 @@ async fn handle_resync(
     }
 }
 
-async fn handle_authorize(
-    State(pipeline): State<HubPipeline>,
-    Json(request): Json<CapabilityRequest>,
-) -> impl IntoResponse {
-    match pipeline.authorize_capability(request).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+async fn handle_authorize(State(pipeline): State<HubPipeline>, body: Bytes) -> impl IntoResponse {
+    match pipeline.authorize_capability(&body).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "authorize failed");
             (StatusCode::BAD_REQUEST, err.to_string()).into_response()

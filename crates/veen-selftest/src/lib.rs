@@ -3,7 +3,6 @@ use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use tokio::runtime::Runtime;
 
 use veen_core::meta::SchemaRegistry;
 use veen_core::wire::message::MSG_VERSION;
@@ -116,7 +115,7 @@ impl SampleData {
 }
 
 /// Execute the core protocol self-test invariants described in the CLI goal.
-pub fn run_core() -> Result<()> {
+pub async fn run_core() -> Result<()> {
     let data = SampleData::generate()?;
 
     ensure!(data.msg.has_valid_version(), "unexpected message version");
@@ -177,9 +176,8 @@ pub fn run_core() -> Result<()> {
         .verify_signature(&data.hub_public)
         .context("verifying hub receipt signature")?;
 
-    let runtime = Runtime::new().context("creating tokio runtime for process harness")?;
-    runtime
-        .block_on(process_harness::run_core_suite())
+    process_harness::run_core_suite()
+        .await
         .context("running process-level core integration suite")?;
 
     tracing::info!(
@@ -216,8 +214,8 @@ pub fn run_fuzz() -> Result<()> {
 }
 
 /// Run the complete self-test suite (core + props + fuzz).
-pub fn run_all() -> Result<()> {
-    run_core()?;
+pub async fn run_all() -> Result<()> {
+    run_core().await?;
     run_props()?;
     run_fuzz()?;
     tracing::info!("all VEEN self-test suites completed successfully");

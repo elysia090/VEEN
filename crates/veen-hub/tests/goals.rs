@@ -12,9 +12,10 @@ use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+use veen_core::cap_token_from_cbor;
 use veen_hub::config::{HubRole, HubRuntimeConfig};
 use veen_hub::pipeline::{
-    AnchorRequest, AttachmentUpload, CapabilityRequest, SubmitRequest, SubmitResponse,
+    AnchorRequest, AttachmentUpload, AuthorizeResponse, SubmitRequest, SubmitResponse,
 };
 use veen_hub::runtime::HubRuntime;
 
@@ -48,7 +49,7 @@ async fn goals_core_pipeline() -> Result<()> {
             client_id: client_id.clone(),
             payload: serde_json::json!({ "text": "hello-veens" }),
             attachments: None,
-            capability: None,
+            auth_ref: None,
             expires_at: None,
             schema: None,
             idem: None,
@@ -91,7 +92,7 @@ async fn goals_core_pipeline() -> Result<()> {
                 name: Some("file.bin".into()),
                 data: attachment_data,
             }]),
-            capability: None,
+            auth_ref: None,
             expires_at: None,
             schema: None,
             idem: None,
@@ -123,7 +124,7 @@ async fn goals_core_pipeline() -> Result<()> {
     run_cli(["keygen", "--out", admin_dir.to_str().unwrap()])
         .context("generating admin identity")?;
 
-    let cap_file = hub_dir.path().join("cap.json");
+    let cap_file = hub_dir.path().join("cap.cbor");
     run_cli([
         "cap",
         "issue",
@@ -140,20 +141,41 @@ async fn goals_core_pipeline() -> Result<()> {
     ])
     .context("issuing capability via CLI")?;
 
-    let cap_token: CapabilityFile = read_json(&cap_file)?;
-    http.post(format!("http://{}/authorize", runtime.listen_addr()))
-        .json(&CapabilityRequest {
-            token_id: cap_token.token_id.clone(),
-            subject: hex::encode(&cap_token.subject),
-            stream: cap_token.stream.clone(),
-            expires_at: cap_token.expires_at,
-            max_uses: Some(2),
-        })
+    let cap_bytes = std::fs::read(&cap_file).context("reading capability artefact")?;
+    let cap_token = cap_token_from_cbor(&cap_bytes).context("decoding issued capability")?;
+    cap_token
+        .verify()
+        .map_err(|err| anyhow::anyhow!("issued capability failed verification: {err}"))?;
+    let expected_auth_ref = hex::encode(cap_token.auth_ref()?.as_ref());
+
+    let mut tampered = cap_bytes.clone();
+    if let Some(last) = tampered.last_mut() {
+        *last ^= 0x01;
+    }
+    let tampered_response = http
+        .post(format!("http://{}/authorize", runtime.listen_addr()))
+        .header("Content-Type", "application/cbor")
+        .body(tampered)
+        .send()
+        .await
+        .context("authorizing tampered capability")?;
+    assert!(tampered_response.status().is_client_error());
+
+    let authorize_response: AuthorizeResponse = http
+        .post(format!("http://{}/authorize", runtime.listen_addr()))
+        .header("Content-Type", "application/cbor")
+        .body(cap_bytes.clone())
         .send()
         .await
         .context("authorizing capability")?
         .error_for_status()
-        .context("authorize endpoint returned error")?;
+        .context("authorize endpoint returned error")?
+        .json()
+        .await
+        .context("decoding authorize response")?;
+
+    assert_eq!(authorize_response.auth_ref, expected_auth_ref);
+    let auth_ref_hex = authorize_response.auth_ref.clone();
 
     let unauthorized = http
         .post(&submit_endpoint)
@@ -162,7 +184,7 @@ async fn goals_core_pipeline() -> Result<()> {
             client_id: "deadbeef".into(),
             payload: serde_json::json!({"text":"denied"}),
             attachments: None,
-            capability: Some(cap_token.token_id.clone()),
+            auth_ref: Some(auth_ref_hex.clone()),
             expires_at: None,
             schema: None,
             idem: None,
@@ -176,10 +198,10 @@ async fn goals_core_pipeline() -> Result<()> {
         .post(&submit_endpoint)
         .json(&SubmitRequest {
             stream: "core/capped".to_string(),
-            client_id: hex::encode(&cap_token.subject),
+            client_id: hex::encode(cap_token.subject_pk.as_ref()),
             payload: serde_json::json!({"text":"authorized"}),
             attachments: None,
-            capability: Some(cap_token.token_id.clone()),
+            auth_ref: Some(auth_ref_hex.clone()),
             expires_at: None,
             schema: None,
             idem: None,
@@ -287,22 +309,6 @@ fn stream_storage_name(stream: &str) -> String {
     let digest = Sha256::digest(stream.as_bytes());
     let suffix = hex::encode(&digest[..8]);
     format!("{safe}-{suffix}")
-}
-
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let value = serde_json::from_slice(&data)
-        .with_context(|| format!("decoding JSON from {}", path.display()))?;
-    Ok(value)
-}
-
-#[derive(Deserialize)]
-struct CapabilityFile {
-    token_id: String,
-    #[serde(with = "serde_bytes")]
-    subject: ByteBuf,
-    stream: String,
-    expires_at: u64,
 }
 
 #[derive(Deserialize)]
