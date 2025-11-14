@@ -1,0 +1,315 @@
+VEEN Design Philosophy v0.0.1 (Tightened)
+Plain ASCII, English only
+	0.	Purpose and scope
+
+This document pinpoints the design philosophy of VEEN v0.0.1 as an operating model for a “virtualized network fabric”:
+	•	a minimal, invariant wire and log core;
+	•	disposable hubs as execution containers;
+	•	overlays (ID, WAL, RPC, CRDT) as deterministic folds over logs;
+	•	OS-agnostic deployment on Linux, WSL, Docker, and k8s/k3s.
+
+The goal is to keep these principles stable while implementations, overlays, and tooling evolve.
+	1.	Primary objectives
+
+1.1 Invariance
+	•	Fix a small set of wire objects and invariants:
+	•	MSG, RECEIPT, CHECKPOINT, mmr_proof, cap_token.
+	•	Invariants I1..I12 over their relationships.
+	•	Do not let:
+	•	OS,
+	•	container runtime,
+	•	hub topology,
+	•	overlay choice
+change the meaning of these objects.
+
+1.2 Determinism
+	•	For any finite event prefix L on a label:
+	•	fold(L) is a deterministic function for every overlay.
+	•	Any conforming implementation produces identical overlay state from L.
+	•	All non-determinism is either:
+	•	forbidden, or
+	•	explicitly localized (time in ttl checks, day-boundary limit windows, etc.) and documented.
+
+1.3 Portability
+	•	The same repository and binary MUST:
+	•	run on Ubuntu 22.04/24.04 (native, systemd),
+	•	run on WSL2 Ubuntu,
+	•	run in Docker/k8s/k3s,
+	•	with identical wire semantics and log behavior.
+	•	A “VEEN fabric instance” is defined by:
+	•	the set of logs (receipts.cborseq, payloads.cborseq, checkpoints.cborseq, anchors),
+	•	not by the OS, container runtime, or hub process layout.
+
+1.4 Auditability
+	•	Every decision in overlays (ID, WAL, etc.) MUST be:
+	•	reproducible from logs alone,
+	•	checkable offline without live hubs,
+	•	bound to MMR roots and optional anchors.
+
+1.5 Minimality
+	•	Hubs:
+	•	accept, verify, commit, stream, and anchor;
+	•	expose health and metrics;
+	•	do not interpret payload schemas.
+	•	Overlays:
+	•	define schemas and folding rules;
+	•	are pure clients of the log model;
+	•	do not require hub modifications.
+
+	2.	Network-as-container model
+
+2.1 Fabric instance
+
+A VEEN fabric instance is:
+	•	a set of labels and their logs,
+	•	a set of MMR roots and checkpoints,
+	•	optional anchors and bridge relationships.
+
+It is analogous to a container image plus its volume contents:
+	•	the logs are the durable “data volume”;
+	•	hubs are the disposable “container processes” that:
+	•	bind the logs to TCP ports,
+	•	provide admission and anchoring.
+
+2.2 Hubs as disposable nodes
+	•	A hub process:
+	•	is started with a data-dir, profile, listen address;
+	•	can be killed and restarted without semantic loss;
+	•	can be replaced by a newer binary against the same data-dir.
+	•	Hubs are intended to be:
+	•	run under systemd units,
+	•	run as containers in Docker/k8s/k3s,
+	•	scaled out or rotated with zero change in overlay semantics.
+
+2.3 Clients as portable endpoints
+	•	A client identity (keys + state) under $HOME or a volume:
+	•	can connect to any conforming hub in the fabric,
+	•	can resync and verify state purely from /stream and checkpoints,
+	•	does not depend on hub internals.
+
+	3.	Wire and invariants
+
+3.1 Fixed wire objects
+	•	MSG:
+	•	contains client_id, auth_ref, payload_hdr, ciphertext, sig.
+	•	RECEIPT:
+	•	contains stream_seq, mmr_root, leaf_hash, hub_sig, profile_id.
+	•	CHECKPOINT:
+	•	commits peaks and mmr_root for ranges.
+	•	cap_token:
+	•	issuer_pk, subject_pk, allow, sig_chain.
+
+3.2 Hub responsibilities
+
+The hub MUST:
+	•	check core invariants (signatures, sizes, sequences, profiles);
+	•	update MMR and emit RECEIPTs or error codes;
+	•	never:
+	•	branch on payload_hdr.schema contents,
+	•	decrypt body for application-level decisions,
+	•	embed overlay semantics inside core wire handling.
+
+3.3 Version stability
+	•	Within v0.0.1:
+	•	wire encoding is frozen,
+	•	hub behavior for valid/invalid MSG is frozen.
+	•	Overlays may evolve (additional schemas, richer folds) without:
+	•	changing MSG, RECEIPT, CHECKPOINT structure,
+	•	requiring hub code changes.
+
+	4.	Log semantics as single source of truth
+
+4.1 Append-only model
+	•	The authoritative record is:
+	•	receipts.cborseq (MSG+RECEIPT pairs),
+	•	checkpoints.cborseq,
+	•	optional payloads.cborseq for body storage.
+	•	Hubs may rotate files and apply retention, but:
+	•	any retained prefix must be internally consistent and re-foldable.
+
+4.2 Folding
+	•	For each overlay:
+	•	state = fold(events up to upto_seq) on given streams.
+	•	Folding rules MUST:
+	•	depend only on:
+	•	stream order (stream_seq, tie-breaker),
+	•	payload_hdr.schema,
+	•	payload body bytes;
+	•	not depend on:
+	•	which hub accepted MSG,
+	•	IP address of the sender,
+	•	OS or container runtime.
+
+4.3 Cross-hub consistency
+	•	Bridging MUST preserve:
+	•	payload bytes,
+	•	payload_hdr.schema,
+	•	a deterministic mapping from original msg_id to parent_id for replicas.
+	•	Overlay implementations MUST treat:
+	•	local and bridged events uniformly,
+	•	parent_id and transfer_id as deduplication keys where specified.
+
+	5.	Overlay design constraints
+
+5.1 Pure overlay
+
+An overlay (ID, WAL, RPC, CRDT) MUST:
+	•	be defined only in terms of:
+	•	schema identifiers,
+	•	deterministic CBOR bodies,
+	•	per-stream folding rules;
+	•	not require:
+	•	hub-side special endpoints beyond VEEN core,
+	•	hub awareness of schemas,
+	•	non-deterministic external state during folding.
+
+5.2 Conflict handling
+	•	Overlays MUST specify:
+	•	LWW rules when multiple updates can apply (ID profiles, org profiles),
+	•	OR-set / G-counter semantics when sets or counters are used (groups, CRDT),
+	•	deduplication rules when duplicate events may appear (bridged WAL transfers).
+	•	Any ambiguity MUST be resolved with:
+	•	explicit tie-breakers (updated_at, ts, stream_seq, leaf_hash),
+	•	documented behavior under exact ties.
+
+5.3 Compatibility
+	•	Adding an overlay MUST NOT:
+	•	change how MSG are accepted or ordered,
+	•	require schema-specific hub logic,
+	•	invalidate older logs.
+
+	6.	Identity overlay (ID) role
+
+6.1 Identity as an overlay
+	•	Principals, devices, realms, ctx_id, orgs, groups, handles, external links:
+	•	exist only as folded state over ID streams.
+	•	Hubs:
+	•	see none of these in plaintext,
+	•	do not derive or enforce ID semantics.
+
+6.2 Session-level binding
+	•	Application endpoints:
+	•	bind client sessions to ctx_id / realm_id based on:
+	•	device keys,
+	•	cap_token chains,
+	•	ID logs.
+	•	This binding:
+	•	is verifiable and reproducible from logs,
+	•	does not require hub cooperation beyond cap_token admission.
+
+	7.	Wallet overlay (WAL) role
+
+7.1 Wallet semantics from logs
+	•	A wallet is defined by:
+	•	wallet_id (realm_id, ctx_id, currency),
+	•	its WAL event stream.
+	•	Balances, limits, freeze state, adjustments:
+	•	are derived by folding events,
+	•	must always satisfy balance >= 0 when input is policy-respecting.
+
+7.2 No hub-side balances
+	•	Hubs do not:
+	•	maintain balances,
+	•	check WAL-specific conditions,
+	•	know which MSG are “financial”.
+	•	Applications and auditors:
+	•	recompute balances from WAL logs,
+	•	detect policy violations (overdraft, limit overreach) using the same rules.
+
+	8.	OS and container integration
+
+8.1 Execution environment
+	•	VEEN MUST run as:
+	•	a normal Unix process on Linux/WSL,
+	•	a container entrypoint in Docker/k8s/k3s,
+	•	with the same CLI and hub behavior.
+	•	No external persistent services are required:
+	•	no RDBMS,
+	•	no message broker,
+	•	no external KMS,
+	•	beyond optional integration layers.
+
+8.2 Data and logs
+	•	Hub data directories:
+	•	are ordinary directories mountable as volumes,
+	•	can be attached to containers or bare-metal processes,
+	•	define the persistence of the fabric instance on that node.
+	•	Clients:
+	•	store their identity and state under user-owned paths or volumes.
+
+8.3 Supervision
+	•	Hub lifecycle:
+	•	is managed by systemd units, k8s Deployments/StatefulSets, or simple nohup.
+	•	Shutdown:
+	•	MUST flush receipts and checkpoints,
+	•	MUST close listeners cleanly,
+	•	MUST allow immediate restart on the same port.
+
+	9.	Security model
+
+9.1 Trust boundaries
+	•	Clients trust:
+	•	their own device keys,
+	•	principal/org roots (ID),
+	•	log ordering and hub signatures (core).
+	•	Hubs are:
+	•	trusted to enforce admission policies and invariants,
+	•	not trusted with plaintext application state.
+
+9.2 Confidentiality and integrity
+	•	Payloads are:
+	•	AEAD-protected, using HPKE-derived keys per label.
+	•	Integrity:
+	•	client-level via MSG.sig,
+	•	hub-level via hub_sig on RECEIPT and CHECKPOINT,
+	•	log-level via MMR and optional external anchoring.
+
+9.3 Revocation
+	•	Revocation is expressed:
+	•	via ID overlay (devices, ctx_id, auth_ref),
+	•	via cap_token lifecycle and logs.
+	•	Hubs and applications:
+	•	read the same revocation events,
+	•	enforce consistent decisions for new messages.
+
+	10.	Evolution and versioning
+
+10.1 Core
+	•	VEEN v0.0.1 is a fixed wire and invariant set.
+	•	Future versions:
+	•	may add fields or error codes,
+	•	MUST not silently reinterpret v0.0.1 logs,
+	•	MUST document compatibility and upgrade paths.
+
+10.2 Overlays
+	•	New overlays:
+	•	are added by defining new schemas and folds,
+	•	do not require schema-dependent hub behavior.
+	•	Existing overlays:
+	•	may extend in a versioned manner (e.g. id.ctx.profile.v2),
+	•	MUST remain replayable from combined logs with clear precedence rules.
+
+	11.	Non-goals
+
+VEEN is not:
+	•	a general-purpose compute platform;
+	•	a consensus system or blockchain;
+	•	an application-layer router with deep inspection;
+	•	a replacement for all existing auth/identity standards.
+
+VEEN is:
+	•	a minimal, deterministic fabric for:
+	•	encrypted event transport,
+	•	verifiable logging,
+	•	overlay-defined state.
+
+	12.	Summary axis
+
+The design axis that must not drift:
+	•	Fix a minimal wire and log core with strong invariants.
+	•	Treat logs as the single durable truth.
+	•	Make hubs disposable containers attaching logs to networks.
+	•	Keep overlay semantics (ID, WAL, RPC, CRDT) as deterministic folds over logs.
+	•	Require OS and container independence: Linux, WSL, Docker, k8s/k3s all yield identical semantics for the same logs.
+
+Everything else (tooling, UI, packaging, ecosystem) is allowed to change as long as these properties remain intact.
