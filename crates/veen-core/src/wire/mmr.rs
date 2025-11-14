@@ -61,7 +61,7 @@ impl Mmr {
             seq >>= 1;
         }
 
-        let peaks_after: Vec<MmrNode> = self.peaks.iter().cloned().collect();
+        let peaks_after: Vec<MmrNode> = self.peaks.to_vec();
         self.peaks.push(carry);
         let root = MmrRoot::from_peaks(&self.peaks).expect("peaks must be non-empty");
 
