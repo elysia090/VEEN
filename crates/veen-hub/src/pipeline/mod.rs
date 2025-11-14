@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -6,6 +7,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use hex;
 use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
 use serde_json::Value as JsonValue;
 use sha2::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,8 +15,12 @@ use tokio::fs;
 use tokio::fs::OpenOptions;
 use tokio::sync::Mutex;
 
+use veen_core::revocation::{
+    cap_token_hash, schema_revocation, RevocationKind, RevocationRecord, RevocationTarget,
+    RevocationView,
+};
 use veen_core::wire::mmr::Mmr;
-use veen_core::wire::types::{LeafHash, MmrRoot};
+use veen_core::wire::types::{AuthRef, ClientId, LeafHash, MmrRoot};
 use veen_core::{
     cap_stream_id_from_label, cap_token_from_cbor, CapTokenRate, StreamIdParseError,
     CAP_TOKEN_VERSION,
@@ -41,6 +47,8 @@ struct HubState {
     streams: HashMap<String, StreamRuntime>,
     capabilities: CapabilityStore,
     anchors: AnchorLog,
+    revocations: RevocationView,
+    revocation_log: Vec<RevocationRecord>,
 }
 
 struct StreamRuntime {
@@ -65,10 +73,15 @@ impl HubPipeline {
         let streams = load_existing_streams(storage).await?;
         let capabilities = load_capabilities(storage).await?;
         let anchors = load_anchor_log(storage).await?;
+        let revocation_log = load_revocation_log(storage).await?;
+        let mut revocations = RevocationView::new();
+        revocations.extend(revocation_log.iter().cloned());
         let state = HubState {
             streams,
             capabilities,
             anchors,
+            revocations,
+            revocation_log,
         };
 
         if config.anchors.enabled && state.anchors.entries.is_empty() {
@@ -122,7 +135,59 @@ impl HubPipeline {
 
         let attachments = attachments.unwrap_or_default();
         let submitted_at = current_unix_timestamp();
+        let client_id_value = ClientId::from_str(&client_id)
+            .with_context(|| format!("parsing client_id {client_id} as hex-encoded identifier"))?;
+        let client_target = RevocationTarget::from_slice(client_id_value.as_ref())
+            .context("constructing client revocation target")?;
+        let parsed_auth_ref = if let Some(ref auth_hex) = auth_ref {
+            Some(AuthRef::from_str(auth_hex).with_context(|| {
+                format!("parsing auth_ref {auth_hex} as hex-encoded identifier")
+            })?)
+        } else {
+            None
+        };
+        let auth_target = parsed_auth_ref
+            .as_ref()
+            .map(|value| RevocationTarget::from_slice(value.as_ref()))
+            .transpose()
+            .context("constructing auth_ref revocation target")?;
+
         let mut guard = self.inner.lock().await;
+
+        if guard
+            .revocations
+            .is_revoked(RevocationKind::ClientId, client_target, submitted_at)
+        {
+            return Err(anyhow::Error::new(CapabilityError::ClientIdRevoked {
+                client_id: client_id.clone(),
+            }));
+        }
+
+        if let (Some(auth_hex), Some(target)) = (auth_ref.as_ref(), auth_target) {
+            if guard
+                .revocations
+                .is_revoked(RevocationKind::AuthRef, target, submitted_at)
+            {
+                return Err(anyhow::Error::new(CapabilityError::AuthRefRevoked {
+                    auth_ref: auth_hex.clone(),
+                }));
+            }
+        }
+
+        let token_revocation = if let Some(auth_hex) = auth_ref.as_ref() {
+            if let Some(record) = guard.capabilities.records.get(auth_hex) {
+                if let Some(hash) = record.token_hash.as_ref() {
+                    Some((hash.clone(), revocation_target_from_hex_str(hash)?))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         if let Some(cap) = auth_ref.as_ref() {
             if let Err(err) = enforce_capability(
                 &mut guard.capabilities,
@@ -140,6 +205,32 @@ impl HubPipeline {
                 auth_ref: "missing".to_string(),
             }));
         }
+
+        if let Some((token_hash, target)) = token_revocation {
+            if guard
+                .revocations
+                .is_revoked(RevocationKind::CapToken, target, submitted_at)
+            {
+                update_capability_store(&self.storage, &guard.capabilities).await?;
+                return Err(anyhow::Error::new(CapabilityError::CapTokenRevoked {
+                    token_hash,
+                }));
+            }
+        }
+
+        let usage_update = match check_client_usage(
+            &mut guard.capabilities,
+            &self.admission,
+            &client_id,
+            &stream,
+            submitted_at,
+        ) {
+            Ok(update) => update,
+            Err(err) => {
+                update_capability_store(&self.storage, &guard.capabilities).await?;
+                return Err(anyhow::Error::new(err));
+            }
+        };
 
         let stream_runtime = guard.streams.entry(stream.clone()).or_insert_with(|| {
             StreamRuntime::new(HubStreamState::default()).expect("empty stream state")
@@ -176,6 +267,12 @@ impl HubPipeline {
         persist_stream_state(&self.storage, &stream, &stream_runtime.state).await?;
         persist_message_bundle(&self.storage, &stream, seq, &stored_message).await?;
         append_receipt(&self.storage, &stream, seq, &leaf, &mmr_root, submitted_at).await?;
+
+        if let Err(err) = apply_client_usage_update(&mut guard.capabilities, usage_update) {
+            update_capability_store(&self.storage, &guard.capabilities).await?;
+            return Err(anyhow::Error::new(err));
+        }
+
         update_capability_store(&self.storage, &guard.capabilities).await?;
 
         self.observability.record_submit_ok();
@@ -287,6 +384,26 @@ impl HubPipeline {
         })
     }
 
+    pub async fn publish_revocation(&self, payload: &[u8]) -> Result<()> {
+        if matches!(self.role, HubRole::Replica) {
+            bail!("replica hubs are read-only");
+        }
+
+        let envelope: SignedEnvelope<RevocationRecord> =
+            ciborium::de::from_reader(payload).context("decoding revocation envelope")?;
+        if envelope.schema.as_ref() != schema_revocation().as_slice() {
+            bail!("unexpected schema identifier in revocation envelope");
+        }
+
+        let record = envelope.body;
+        tracing::info!(?record, "recorded revocation");
+
+        let mut guard = self.inner.lock().await;
+        guard.revocations.insert(record.clone());
+        guard.revocation_log.push(record);
+        persist_revocations(&self.storage, &guard.revocation_log).await
+    }
+
     pub async fn stream(&self, stream: &str, from: u64) -> Result<Vec<StoredMessage>> {
         let guard = self.inner.lock().await;
         let runtime = guard
@@ -362,6 +479,7 @@ impl HubPipeline {
                 last_refill: now,
             }),
             uses: 0,
+            token_hash: Some(hex::encode(cap_token_hash(token_bytes))),
         };
         guard
             .capabilities
@@ -441,6 +559,16 @@ pub struct SubmitResponse {
     pub stored_attachments: Vec<StoredAttachment>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SignedEnvelope<T> {
+    #[serde(with = "serde_bytes")]
+    schema: ByteBuf,
+    body: T,
+    #[serde(with = "serde_bytes")]
+    #[allow(dead_code)]
+    signature: ByteBuf,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct BridgeIngestRequest {
     pub message: StoredMessage,
@@ -506,6 +634,8 @@ pub struct AnchorRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct CapabilityStore {
     records: HashMap<String, CapabilityRecord>,
+    #[serde(default)]
+    client_usage: HashMap<String, ClientAdmissionState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -518,6 +648,30 @@ struct CapabilityRecord {
     #[serde(default)]
     bucket_state: Option<TokenBucketState>,
     uses: u64,
+    #[serde(default)]
+    token_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClientAdmissionState {
+    first_seen: u64,
+    #[serde(default)]
+    per_stream_counts: HashMap<String, u64>,
+}
+
+impl ClientAdmissionState {
+    fn new(first_seen: u64) -> Self {
+        Self {
+            first_seen,
+            per_stream_counts: HashMap::new(),
+        }
+    }
+}
+
+struct ClientUsageUpdate {
+    client_id: String,
+    stream: String,
+    first_seen: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -542,6 +696,22 @@ pub enum CapabilityError {
     StreamDenied { auth_ref: String, stream: String },
     #[error("E.CAP capability {auth_ref} has expired")]
     Expired { auth_ref: String },
+    #[error("E.AUTH client_id {client_id} has been revoked")]
+    ClientIdRevoked { client_id: String },
+    #[error("E.CAP auth_ref {auth_ref} has been revoked")]
+    AuthRefRevoked { auth_ref: String },
+    #[error("E.CAP capability token {token_hash} has been revoked")]
+    CapTokenRevoked { token_hash: String },
+    #[error("E.AUTH client_id {client_id} lifetime exceeded ({lifetime}s limit)")]
+    ClientLifetimeExceeded { client_id: String, lifetime: u64 },
+    #[error("E.AUTH client_id {client_id} exceeded quota for stream {stream} (limit {limit})")]
+    ClientQuotaExceeded {
+        client_id: String,
+        stream: String,
+        limit: u64,
+    },
+    #[error("E.AUTH client_id {client_id} message count overflow for stream {stream}")]
+    ClientUsageOverflow { client_id: String, stream: String },
     #[error("E.RATE capability {auth_ref} is rate limited (retry after {retry_after}s)")]
     RateLimited { auth_ref: String, retry_after: u64 },
 }
@@ -728,6 +898,77 @@ async fn persist_attachments(
     Ok(stored)
 }
 
+fn check_client_usage(
+    store: &mut CapabilityStore,
+    admission: &AdmissionConfig,
+    client_id: &str,
+    stream: &str,
+    now: u64,
+) -> Result<Option<ClientUsageUpdate>, CapabilityError> {
+    if admission.max_client_id_lifetime_sec.is_none()
+        && admission.max_msgs_per_client_id_per_label.is_none()
+    {
+        return Ok(None);
+    }
+
+    let entry = store
+        .client_usage
+        .entry(client_id.to_string())
+        .or_insert_with(|| ClientAdmissionState::new(now));
+
+    if let Some(limit) = admission.max_client_id_lifetime_sec {
+        if now.saturating_sub(entry.first_seen) >= limit {
+            return Err(CapabilityError::ClientLifetimeExceeded {
+                client_id: client_id.to_string(),
+                lifetime: limit,
+            });
+        }
+    }
+
+    let current = entry.per_stream_counts.get(stream).copied().unwrap_or(0);
+
+    if let Some(limit) = admission.max_msgs_per_client_id_per_label {
+        if current >= limit {
+            return Err(CapabilityError::ClientQuotaExceeded {
+                client_id: client_id.to_string(),
+                stream: stream.to_string(),
+                limit,
+            });
+        }
+    }
+
+    Ok(Some(ClientUsageUpdate {
+        client_id: client_id.to_string(),
+        stream: stream.to_string(),
+        first_seen: entry.first_seen,
+    }))
+}
+
+fn apply_client_usage_update(
+    store: &mut CapabilityStore,
+    update: Option<ClientUsageUpdate>,
+) -> Result<(), CapabilityError> {
+    if let Some(ClientUsageUpdate {
+        client_id,
+        stream,
+        first_seen,
+    }) = update
+    {
+        let entry = store
+            .client_usage
+            .entry(client_id.clone())
+            .or_insert_with(|| ClientAdmissionState::new(first_seen));
+        let counter = entry.per_stream_counts.entry(stream.clone()).or_insert(0);
+        *counter = counter
+            .checked_add(1)
+            .ok_or_else(|| CapabilityError::ClientUsageOverflow {
+                client_id: client_id.clone(),
+                stream: stream.clone(),
+            })?;
+    }
+    Ok(())
+}
+
 fn enforce_capability(
     store: &mut CapabilityStore,
     auth_ref: &str,
@@ -862,6 +1103,25 @@ async fn load_capabilities(storage: &HubStorage) -> Result<CapabilityStore> {
     Ok(store)
 }
 
+async fn load_revocation_log(storage: &HubStorage) -> Result<Vec<RevocationRecord>> {
+    let path = storage.revocations_store_path();
+    if !fs::try_exists(&path)
+        .await
+        .with_context(|| format!("checking revocation log {}", path.display()))?
+    {
+        return Ok(Vec::new());
+    }
+    let data = fs::read(&path)
+        .await
+        .with_context(|| format!("reading revocation log from {}", path.display()))?;
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+    let records = serde_json::from_slice(&data)
+        .with_context(|| format!("parsing revocation log from {}", path.display()))?;
+    Ok(records)
+}
+
 async fn load_anchor_log(storage: &HubStorage) -> Result<AnchorLog> {
     let path = storage.anchor_log_path();
     if !fs::try_exists(&path)
@@ -891,6 +1151,19 @@ async fn persist_anchor_log(storage: &HubStorage, log: &AnchorLog) -> Result<()>
         .with_context(|| format!("writing anchor log to {}", path.display()))
 }
 
+async fn persist_revocations(storage: &HubStorage, records: &[RevocationRecord]) -> Result<()> {
+    let path = storage.revocations_store_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("ensuring revocation directory {}", parent.display()))?;
+    }
+    let data = serde_json::to_vec_pretty(records).context("encoding revocation log")?;
+    fs::write(&path, data)
+        .await
+        .with_context(|| format!("writing revocation log to {}", path.display()))
+}
+
 fn leaf_hash_for(message: &StoredMessage) -> Result<LeafHash> {
     let encoded = serde_json::to_vec(message).context("encoding message for leaf hash")?;
     let digest = sha2::Sha256::digest(&encoded);
@@ -904,4 +1177,16 @@ fn current_unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("system time before UNIX_EPOCH");
     now.as_secs()
+}
+
+fn revocation_target_from_hex_str(value: &str) -> Result<RevocationTarget> {
+    let bytes =
+        hex::decode(value).with_context(|| format!("decoding revocation target {value}"))?;
+    RevocationTarget::from_slice(&bytes).map_err(|err| {
+        anyhow!(
+            "invalid revocation target length: expected {} bytes, found {}",
+            err.expected(),
+            err.actual()
+        )
+    })
 }

@@ -35,6 +35,7 @@ impl HubServerHandle {
             .route("/authorize", post(handle_authorize))
             .route("/anchor", post(handle_anchor))
             .route("/bridge", post(handle_bridge))
+            .route("/revoke", post(handle_revoke))
             .route("/healthz", get(handle_health))
             .route("/metrics", get(handle_metrics))
             .with_state(pipeline);
@@ -83,12 +84,8 @@ async fn handle_submit(
             if let Some(cap_err) = err.downcast_ref::<CapabilityError>() {
                 tracing::warn!(error = ?cap_err, "submit failed");
                 let status = match cap_err {
-                    CapabilityError::Unauthorized { .. } => StatusCode::FORBIDDEN,
-                    CapabilityError::SubjectMismatch { .. }
-                    | CapabilityError::StreamMismatch { .. }
-                    | CapabilityError::StreamDenied { .. }
-                    | CapabilityError::Expired { .. } => StatusCode::FORBIDDEN,
                     CapabilityError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
+                    _ => StatusCode::FORBIDDEN,
                 };
                 let mut response = (status, cap_err.to_string()).into_response();
                 if let Some(wait) = cap_err.retry_after() {
@@ -165,6 +162,16 @@ async fn handle_bridge(
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "bridge ingest failed");
+            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+        }
+    }
+}
+
+async fn handle_revoke(State(pipeline): State<HubPipeline>, body: Bytes) -> impl IntoResponse {
+    match pipeline.publish_revocation(&body).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "revocation publish failed");
             (StatusCode::BAD_REQUEST, err.to_string()).into_response()
         }
     }
