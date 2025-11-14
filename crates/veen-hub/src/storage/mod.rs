@@ -11,6 +11,7 @@ pub const RECEIPTS_FILE: &str = "receipts.cborseq";
 pub const PAYLOADS_FILE: &str = "payloads.cborseq";
 pub const CHECKPOINTS_FILE: &str = "checkpoints.cborseq";
 pub const HUB_PID_FILE: &str = "hub.pid";
+pub const HUB_KEY_FILE: &str = "hub_key.cbor";
 pub const STATE_DIR: &str = "state";
 pub const STREAMS_DIR: &str = "streams";
 pub const MESSAGES_DIR: &str = "messages";
@@ -77,6 +78,10 @@ impl HubStorage {
 
     pub fn anchors_dir(&self) -> PathBuf {
         self.data_dir.join(ANCHORS_DIR)
+    }
+
+    pub fn hub_key_path(&self) -> PathBuf {
+        self.data_dir.join(HUB_KEY_FILE)
     }
 
     pub fn tls_info_path(&self) -> PathBuf {

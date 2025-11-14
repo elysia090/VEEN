@@ -2,18 +2,22 @@ use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
 use base64::Engine;
 use ciborium::de::from_reader;
+use ciborium::ser::into_writer;
+use ed25519_dalek::SigningKey;
+use rand::rngs::OsRng;
 use reqwest::header::RETRY_AFTER;
 use reqwest::{Client, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tokio::fs;
 
 use veen_core::{cap_token_from_cbor, revocation::cap_token_hash, PowCookie};
 use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
@@ -26,6 +30,49 @@ use veen_hub::runtime::HubRuntime;
 #[derive(Debug, Deserialize)]
 struct MetricsResponse {
     submit_err_total: BTreeMap<String, u64>,
+}
+
+const HUB_KEY_VERSION: u8 = 1;
+
+#[derive(Serialize)]
+struct TestHubKeyMaterial {
+    version: u8,
+    created_at: u64,
+    #[serde(with = "serde_bytes")]
+    public_key: ByteBuf,
+    #[serde(with = "serde_bytes")]
+    secret_key: ByteBuf,
+}
+
+async fn ensure_hub_key(data_dir: &Path) -> Result<()> {
+    let path = data_dir.join("hub_key.cbor");
+    if fs::try_exists(&path)
+        .await
+        .with_context(|| format!("checking hub key at {}", path.display()))?
+    {
+        return Ok(());
+    }
+
+    let mut rng = OsRng;
+    let signing = SigningKey::generate(&mut rng);
+    let verifying = signing.verifying_key();
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_secs();
+    let material = TestHubKeyMaterial {
+        version: HUB_KEY_VERSION,
+        created_at,
+        public_key: ByteBuf::from(verifying.to_bytes().to_vec()),
+        secret_key: ByteBuf::from(signing.to_bytes().to_vec()),
+    };
+
+    let mut encoded = Vec::new();
+    into_writer(&material, &mut encoded).context("encoding hub key material")?;
+    fs::write(&path, encoded)
+        .await
+        .with_context(|| format!("writing hub key material to {}", path.display()))?;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -48,6 +95,7 @@ async fn goals_core_pipeline() -> Result<()> {
         },
     )
     .await?;
+    ensure_hub_key(hub_dir.path()).await?;
     let runtime = HubRuntime::start(config).await?;
 
     let client_id = read_client_id(&client_dir.join("identity_card.pub"))?;
@@ -442,6 +490,7 @@ async fn goals_pow_prefilter_enforced() -> Result<()> {
         },
     )
     .await?;
+    ensure_hub_key(hub_dir.path()).await?;
     let runtime = HubRuntime::start(config).await?;
 
     let client_id = read_client_id(&client_dir.join("identity_card.pub"))?;
@@ -535,6 +584,7 @@ async fn goals_capability_gating_persists() -> Result<()> {
         HubConfigOverrides::default(),
     )
     .await?;
+    ensure_hub_key(hub_dir.path()).await?;
     let runtime = HubRuntime::start(config).await?;
     let base_url = format!("http://{}", runtime.listen_addr());
 
@@ -588,6 +638,7 @@ async fn goals_capability_gating_persists() -> Result<()> {
         HubConfigOverrides::default(),
     )
     .await?;
+    ensure_hub_key(hub_dir.path()).await?;
     let restart_runtime = HubRuntime::start(restart_config).await?;
     let submit_endpoint = format!("http://{}/submit", restart_runtime.listen_addr());
 
@@ -749,6 +800,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         },
     )
     .await?;
+    ensure_hub_key(hub_dir.path()).await?;
     let runtime = HubRuntime::start(config).await?;
     let hub_url = format!("http://{}", runtime.listen_addr());
     let submit_endpoint = format!("{hub_url}/submit");
