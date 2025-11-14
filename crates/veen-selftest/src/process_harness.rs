@@ -4,16 +4,27 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use ciborium::{de::from_reader, ser::into_writer};
+use ed25519_dalek::{Signer, SigningKey};
+
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use reqwest::Client;
+use serde::Deserialize;
+use serde_bytes::ByteBuf;
 use sha2::Digest;
 use tempfile::TempDir;
-use tokio::fs::{self, File};
+use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{self, AsyncRead, AsyncWriteExt};
 use tokio::process::{Child, Command as TokioCommand};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::warn;
+
+use veen_core::label::Label;
+use veen_core::wire::checkpoint::{Checkpoint, CHECKPOINT_VERSION};
+use veen_core::wire::mmr::Mmr;
+use veen_core::wire::types::{LeafHash, MmrRoot, Signature64};
+use veen_hub::pipeline::{HubStreamState, StoredMessage, StreamMessageWithProof};
 
 #[derive(Clone)]
 struct BinaryPaths {
@@ -397,6 +408,10 @@ impl IntegrationHarness {
         )
         .await?;
 
+        self.run_mmr_drift_recovery(&hub, &hub_url, &client_dir)
+            .await
+            .context("executing checkpoint recovery scenario")?;
+
         // Explain error codes to ensure table is wired
         let explain = self
             .run_cli_success(
@@ -499,6 +514,172 @@ impl IntegrationHarness {
         Ok(())
     }
 
+    async fn run_mmr_drift_recovery(
+        &mut self,
+        primary: &HubProcess,
+        primary_url: &str,
+        client_dir: &Path,
+    ) -> Result<()> {
+        const STREAM: &str = "core/drift-long";
+        const INITIAL_MESSAGES: usize = 4;
+        const FORK_MESSAGES: usize = 6;
+        const PRIMARY_MESSAGES_AFTER: usize = 20;
+
+        for idx in 0..INITIAL_MESSAGES {
+            let body = format!(r#"{{\"text\":\"drift-initial-{idx}\"}}"#);
+            self.send_test_message(primary_url, client_dir, STREAM, &body)
+                .await
+                .with_context(|| format!("sending initial drift message {idx}"))?;
+        }
+
+        let fork_dir = self.base_dir().join("fork-hub");
+        if fs::try_exists(&fork_dir)
+            .await
+            .with_context(|| format!("checking fork directory {}", fork_dir.display()))?
+        {
+            fs::remove_dir_all(&fork_dir)
+                .await
+                .with_context(|| format!("clearing prior fork directory {}", fork_dir.display()))?;
+        }
+        copy_dir_recursive(&primary.data_dir, &fork_dir)
+            .await
+            .context("copying primary hub state for forked hub")?;
+
+        let fork = self
+            .spawn_hub("fork-hub", HubRole::Primary, &[])
+            .await
+            .context("spawning forked hub process")?;
+        let fork_url = format!("http://{}", fork.listen);
+        self.wait_for_health(fork.listen)
+            .await
+            .context("awaiting fork hub health")?;
+
+        for idx in INITIAL_MESSAGES..(INITIAL_MESSAGES + FORK_MESSAGES) {
+            let body = format!(r#"{{\"text\":\"fork-divergent-{idx}\"}}"#);
+            self.send_test_message(&fork_url, client_dir, STREAM, &body)
+                .await
+                .with_context(|| format!("sending divergent message {idx} to fork"))?;
+        }
+
+        for idx in INITIAL_MESSAGES..(INITIAL_MESSAGES + PRIMARY_MESSAGES_AFTER) {
+            let body = format!(r#"{{\"text\":\"primary-divergent-{idx}\"}}"#);
+            self.send_test_message(primary_url, client_dir, STREAM, &body)
+                .await
+                .with_context(|| format!("sending divergent message {idx} to primary"))?;
+        }
+
+        fork.handle
+            .terminate()
+            .await
+            .context("terminating forked hub after divergence")?;
+
+        let fork_root_before = compute_stream_mmr_root(&fork_dir, STREAM)
+            .await
+            .context("computing forked hub MMR root prior to recovery")?;
+        let fork_root_before = fork_root_before
+            .map(|root| hex::encode(root.as_bytes()))
+            .unwrap_or_default();
+
+        let primary_metrics = self
+            .fetch_metrics(primary_url)
+            .await
+            .context("fetching metrics for primary hub during drift scenario")?;
+        let primary_root_hex = extract_mmr_root(&primary_metrics, STREAM)
+            .context("primary hub missing MMR root for drift stream")?;
+        ensure!(
+            fork_root_before != primary_root_hex,
+            "forked hub should diverge from primary before recovery"
+        );
+
+        let remote_messages = self
+            .fetch_stream_with_proofs(primary_url, STREAM)
+            .await
+            .context("streaming primary messages with proofs")?;
+        ensure!(
+            !remote_messages.is_empty(),
+            "primary hub must provide messages for drift recovery"
+        );
+
+        let mut recovery_mmr = Mmr::new();
+        for remote in &remote_messages {
+            let leaf = message_leaf_hash(&remote.message)
+                .context("computing leaf hash for streamed message")?;
+            let (seq, root) = recovery_mmr.append(leaf);
+            ensure!(
+                seq == remote.message.seq,
+                "stream {} sequence mismatch while rebuilding MMR",
+                STREAM
+            );
+
+            let receipt_root = parse_mmr_root_hex(&remote.receipt.mmr_root)
+                .context("decoding receipt mmr_root during recovery")?;
+            ensure!(
+                root == receipt_root,
+                "replayed receipt root does not match reconstructed MMR"
+            );
+
+            let proof = remote
+                .proof
+                .clone()
+                .try_into_mmr()
+                .context("decoding remote MMR proof")?;
+            ensure!(
+                proof.verify(&receipt_root),
+                "remote proof failed verification during recovery replay"
+            );
+        }
+
+        let final_root = recovery_mmr
+            .root()
+            .context("reconstructed MMR missing root after replay")?;
+        let final_root_hex = hex::encode(final_root.as_bytes());
+        ensure!(
+            final_root_hex == primary_root_hex,
+            "replayed receipts did not converge to primary MMR root"
+        );
+
+        let checkpoint =
+            create_checkpoint_for_stream(&primary.data_dir, STREAM, recovery_mmr.seq(), final_root)
+                .await
+                .context("creating checkpoint for drift recovery")?;
+        append_checkpoint(&primary.data_dir, &checkpoint)
+            .await
+            .context("appending drift recovery checkpoint")?;
+
+        let fetched_checkpoint = self
+            .fetch_latest_checkpoint(primary_url)
+            .await
+            .context("fetching latest checkpoint after publication")?;
+        ensure!(
+            fetched_checkpoint.mmr_root == checkpoint.mmr_root,
+            "checkpoint endpoint returned unexpected MMR root"
+        );
+        ensure!(
+            fetched_checkpoint.upto_seq == checkpoint.upto_seq,
+            "checkpoint endpoint returned unexpected upto_seq"
+        );
+
+        persist_recovered_stream_state(
+            &fork_dir,
+            STREAM,
+            remote_messages.iter().map(|m| m.message.clone()),
+        )
+        .await
+        .context("persisting recovered stream state to fork directory")?;
+
+        let fork_root_after = compute_stream_mmr_root(&fork_dir, STREAM)
+            .await
+            .context("computing forked hub MMR root after recovery")?
+            .map(|root| hex::encode(root.as_bytes()))
+            .unwrap_or_default();
+        ensure!(
+            fork_root_after == final_root_hex,
+            "forked hub state did not converge to checkpoint root"
+        );
+
+        Ok(())
+    }
+
     async fn run_cli_success(&self, args: Vec<OsString>, context: &str) -> Result<CommandOutput> {
         let output = self.run_cli(args).await?;
         if !output.status.success() {
@@ -510,6 +691,79 @@ impl IntegrationHarness {
             );
         }
         Ok(output)
+    }
+
+    async fn send_test_message(
+        &self,
+        hub_url: &str,
+        client_dir: &Path,
+        stream: &str,
+        body: &str,
+    ) -> Result<()> {
+        self.run_cli_success(
+            vec![
+                OsString::from("send"),
+                OsString::from("--hub"),
+                OsString::from(hub_url),
+                OsString::from("--client"),
+                client_dir.as_os_str().to_os_string(),
+                OsString::from("--stream"),
+                OsString::from(stream),
+                OsString::from("--body"),
+                OsString::from(body),
+            ],
+            "sending drift scenario message",
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn fetch_stream_with_proofs(
+        &self,
+        hub_url: &str,
+        stream: &str,
+    ) -> Result<Vec<StreamMessageWithProof>> {
+        let response = self
+            .http
+            .get(format!("{hub_url}/stream"))
+            .query(&[("stream", stream), ("with_proof", "true")])
+            .send()
+            .await
+            .with_context(|| format!("streaming {stream} from {hub_url}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            bail!(
+                "stream endpoint {} returned {} while fetching {}",
+                hub_url,
+                status,
+                stream
+            );
+        }
+        let messages = response
+            .json::<Vec<StreamMessageWithProof>>()
+            .await
+            .context("decoding streamed messages with proofs")?;
+        Ok(messages)
+    }
+
+    async fn fetch_latest_checkpoint(&self, hub_url: &str) -> Result<Checkpoint> {
+        let response = self
+            .http
+            .get(format!("{hub_url}/checkpoint_latest"))
+            .send()
+            .await
+            .with_context(|| format!("fetching checkpoint_latest from {hub_url}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            bail!("checkpoint_latest {} returned status {}", hub_url, status);
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .context("reading checkpoint response body")?;
+        let checkpoint: Checkpoint =
+            from_reader(bytes.as_ref()).context("decoding checkpoint CBOR payload")?;
+        Ok(checkpoint)
     }
 
     async fn run_cli(&self, args: Vec<OsString>) -> Result<CommandOutput> {
@@ -837,6 +1091,76 @@ fn stream_storage_name(stream: &str) -> String {
     format!("{safe}-{suffix}")
 }
 
+async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    let mut stack = vec![(src.to_path_buf(), dst.to_path_buf())];
+    while let Some((from, to)) = stack.pop() {
+        fs::create_dir_all(&to)
+            .await
+            .with_context(|| format!("creating directory {}", to.display()))?;
+        let mut entries = fs::read_dir(&from)
+            .await
+            .with_context(|| format!("reading directory {}", from.display()))?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .context("advancing directory iterator")?
+        {
+            let file_type = entry
+                .file_type()
+                .await
+                .with_context(|| format!("reading metadata for {}", entry.path().display()))?;
+            let target = to.join(entry.file_name());
+            if file_type.is_dir() {
+                stack.push((entry.path(), target));
+            } else if file_type.is_file() {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .with_context(|| format!("ensuring parent directory {}", parent.display()))?;
+                }
+                fs::copy(entry.path(), &target)
+                    .await
+                    .with_context(|| {
+                        format!("copying {} to {}", entry.path().display(), target.display())
+                    })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn clear_stream_messages(dir: &Path, stream: &str) -> Result<()> {
+    if !fs::try_exists(dir)
+        .await
+        .with_context(|| format!("checking messages directory {}", dir.display()))?
+    {
+        return Ok(());
+    }
+    let mut entries = fs::read_dir(dir)
+        .await
+        .with_context(|| format!("reading messages directory {}", dir.display()))?;
+    let prefix = format!("{}-", stream_storage_name(stream));
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .context("advancing messages directory iterator")?
+    {
+        let path = entry.path();
+        if entry
+            .file_type()
+            .await
+            .with_context(|| format!("checking file type for {}", path.display()))?
+            .is_file()
+            && entry.file_name().to_string_lossy().starts_with(&prefix)
+        {
+            fs::remove_file(&path)
+                .await
+                .with_context(|| format!("removing stale bundle {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 fn ensure_contains(haystack: &str, needle: &str, context: &str) -> Result<()> {
     if !haystack.contains(needle) {
         bail!("expected {context}; missing `{needle}` in `{haystack}`");
@@ -850,6 +1174,169 @@ fn extract_mmr_root(metrics: &str, stream: &str) -> Option<String> {
         .find(|line| line.contains("veen_mmr_root{") && line.contains(stream))
         .and_then(|line| line.split_whitespace().last())
         .map(|value| value.trim().to_string())
+}
+
+async fn persist_recovered_stream_state<I>(data_dir: &Path, stream: &str, messages: I) -> Result<()>
+where
+    I: IntoIterator<Item = StoredMessage>,
+{
+    let collected: Vec<StoredMessage> = messages.into_iter().collect();
+    let state = HubStreamState {
+        messages: collected.clone(),
+    };
+    let state_path = data_dir
+        .join("state")
+        .join("streams")
+        .join(format!("{}.json", stream_storage_name(stream)));
+    if let Some(parent) = state_path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("ensuring stream directory {}", parent.display()))?;
+    }
+    let encoded = serde_json::to_vec_pretty(&state)
+        .with_context(|| format!("encoding recovered state for stream {}", stream))?;
+    fs::write(&state_path, encoded)
+        .await
+        .with_context(|| format!("writing recovered state to {}", state_path.display()))?;
+
+    let messages_dir = data_dir.join("state").join("messages");
+    clear_stream_messages(&messages_dir, stream).await?;
+    for message in &state.messages {
+        let bundle_path = message_bundle_path(data_dir, stream, message.seq);
+        if let Some(parent) = bundle_path.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("ensuring message directory {}", parent.display()))?;
+        }
+        let encoded = serde_json::to_vec_pretty(message).with_context(|| {
+            format!(
+                "encoding message bundle for {stream}#{seq}",
+                seq = message.seq
+            )
+        })?;
+        fs::write(&bundle_path, encoded)
+            .await
+            .with_context(|| format!("writing message bundle to {}", bundle_path.display()))?;
+    }
+    Ok(())
+}
+
+fn message_leaf_hash(message: &StoredMessage) -> Result<LeafHash> {
+    let encoded =
+        serde_json::to_vec(message).context("encoding message for leaf hash computation")?;
+    let digest = sha2::Sha256::digest(&encoded);
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&digest);
+    Ok(LeafHash::new(bytes))
+}
+
+fn parse_mmr_root_hex(value: &str) -> Result<MmrRoot> {
+    let bytes = hex::decode(value).with_context(|| format!("decoding mmr_root {}", value))?;
+    MmrRoot::from_slice(&bytes).with_context(|| format!("parsing mmr_root {}", value))
+}
+
+async fn append_checkpoint(data_dir: &Path, checkpoint: &Checkpoint) -> Result<()> {
+    let path = data_dir.join("checkpoints.cborseq");
+    let mut encoded = Vec::new();
+    into_writer(checkpoint, &mut encoded).context("encoding checkpoint to CBOR")?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .await
+        .with_context(|| format!("opening checkpoint log {}", path.display()))?;
+    file.write_all(&encoded)
+        .await
+        .context("appending checkpoint to log")?;
+    file.flush().await.context("flushing checkpoint log")?;
+    Ok(())
+}
+
+async fn create_checkpoint_for_stream(
+    data_dir: &Path,
+    stream: &str,
+    upto_seq: u64,
+    root: MmrRoot,
+) -> Result<Checkpoint> {
+    let key_path = data_dir.join("hub_key.cbor");
+    let key_bytes = fs::read(&key_path)
+        .await
+        .with_context(|| format!("reading hub key from {}", key_path.display()))?;
+    let material: HubKeyMaterial =
+        from_reader(key_bytes.as_slice()).context("decoding hub key material")?;
+    ensure!(
+        material.public_key.len() == 32,
+        "hub public key must be 32 bytes"
+    );
+    ensure!(
+        material.secret_key.len() == 32,
+        "hub secret key must be 32 bytes"
+    );
+    let mut secret = [0u8; 32];
+    secret.copy_from_slice(&material.secret_key);
+    let signing = SigningKey::from_bytes(&secret);
+
+    let label_bytes = sha2::Sha256::digest(stream.as_bytes());
+    let label = Label::from_slice(&label_bytes)
+        .context("constructing checkpoint label from stream hash")?;
+
+    let mut checkpoint = Checkpoint {
+        ver: CHECKPOINT_VERSION,
+        label_prev: label,
+        label_curr: label,
+        upto_seq,
+        mmr_root: root,
+        epoch: upto_seq,
+        hub_sig: Signature64::from([0u8; 64]),
+        witness_sigs: None,
+    };
+    let digest = checkpoint
+        .signing_tagged_hash()
+        .context("computing checkpoint signing digest")?;
+    let signature = signing.sign(&digest);
+    checkpoint.hub_sig = Signature64::from(signature.to_bytes());
+    Ok(checkpoint)
+}
+
+#[derive(Deserialize)]
+struct HubKeyMaterial {
+    _version: u8,
+    _created_at: u64,
+    #[serde(with = "serde_bytes")]
+    public_key: ByteBuf,
+    #[serde(with = "serde_bytes")]
+    secret_key: ByteBuf,
+}
+
+async fn compute_stream_mmr_root(data_dir: &Path, stream: &str) -> Result<Option<MmrRoot>> {
+    let state_path = data_dir
+        .join("state")
+        .join("streams")
+        .join(format!("{}.json", stream_storage_name(stream)));
+    if !fs::try_exists(&state_path)
+        .await
+        .with_context(|| format!("checking state file {}", state_path.display()))?
+    {
+        return Ok(None);
+    }
+    let data = fs::read(&state_path)
+        .await
+        .with_context(|| format!("reading stream state from {}", state_path.display()))?;
+    let state: HubStreamState = serde_json::from_slice(&data)
+        .with_context(|| format!("decoding stream state from {}", state_path.display()))?;
+    if state.messages.is_empty() {
+        return Ok(None);
+    }
+    let mut mmr = Mmr::new();
+    for message in &state.messages {
+        let leaf = message_leaf_hash(message)?;
+        let (seq, _) = mmr.append(leaf);
+        ensure!(
+            seq == message.seq,
+            "stream {stream} sequence mismatch while recomputing MMR"
+        );
+    }
+    Ok(mmr.root())
 }
 
 pub async fn run_core_suite() -> Result<()> {
