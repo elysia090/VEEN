@@ -822,9 +822,7 @@ impl HubPipeline {
             }
             .to_string();
             let primary_hex = authority.primary_hub.map(|hub| hex::encode(hub.as_ref()));
-            let local_is_primary = authority
-                .primary_hub
-                .map_or(false, |hub| hub == self.identity.hub_id);
+            let local_is_primary = authority.primary_hub == Some(self.identity.hub_id);
 
             HubRoleDescriptor {
                 ok: true,
