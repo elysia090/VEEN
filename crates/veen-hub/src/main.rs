@@ -63,6 +63,9 @@ struct RunCommand {
     /// Upstream primary hubs that this replica should follow.
     #[arg(long = "replica-target", value_name = "URL")]
     replica_targets: Vec<String>,
+    /// Require submitters to present a proof-of-work cookie meeting this difficulty.
+    #[arg(long = "pow-difficulty")]
+    pow_difficulty: Option<u8>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -156,6 +159,7 @@ impl RunCommand {
             } else {
                 Some(self.replica_targets.clone())
             },
+            pow_difficulty: self.pow_difficulty,
         }
     }
 }

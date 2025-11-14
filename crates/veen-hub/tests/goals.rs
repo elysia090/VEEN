@@ -15,10 +15,11 @@ use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-use veen_core::{cap_token_from_cbor, revocation::cap_token_hash};
+use veen_core::{cap_token_from_cbor, revocation::cap_token_hash, PowCookie};
 use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::pipeline::{
-    AnchorRequest, AttachmentUpload, AuthorizeResponse, SubmitRequest, SubmitResponse,
+    AnchorRequest, AttachmentUpload, AuthorizeResponse, PowCookieEnvelope, SubmitRequest,
+    SubmitResponse,
 };
 use veen_hub::runtime::HubRuntime;
 
@@ -65,6 +66,7 @@ async fn goals_core_pipeline() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -108,6 +110,7 @@ async fn goals_core_pipeline() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -208,6 +211,7 @@ async fn goals_core_pipeline() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -233,6 +237,7 @@ async fn goals_core_pipeline() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -254,6 +259,7 @@ async fn goals_core_pipeline() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -292,6 +298,7 @@ async fn goals_core_pipeline() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -315,6 +322,7 @@ async fn goals_core_pipeline() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -354,6 +362,7 @@ async fn goals_core_pipeline() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -407,6 +416,81 @@ async fn goals_core_pipeline() -> Result<()> {
         .context("healthz endpoint error")?;
 
     run_cli(["selftest", "core"]).context("running selftest core suite")?;
+
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn goals_pow_prefilter_enforced() -> Result<()> {
+    let hub_dir = TempDir::new().context("creating pow hub temp directory")?;
+    let client_dir = hub_dir.path().join("client");
+
+    run_cli(["keygen", "--out", client_dir.to_str().unwrap()])
+        .context("generating client identity for pow test")?;
+
+    let listen_addr = next_listen_addr()?;
+    let config = HubRuntimeConfig::from_sources(
+        listen_addr,
+        hub_dir.path().to_path_buf(),
+        None,
+        HubRole::Primary,
+        HubConfigOverrides {
+            capability_gating_enabled: Some(false),
+            pow_difficulty: Some(10),
+            ..HubConfigOverrides::default()
+        },
+    )
+    .await?;
+    let runtime = HubRuntime::start(config).await?;
+
+    let client_id = read_client_id(&client_dir.join("identity_card.pub"))?;
+    let http = Client::new();
+    let submit_endpoint = format!("http://{}/submit", runtime.listen_addr());
+
+    let forbidden = http
+        .post(&submit_endpoint)
+        .json(&SubmitRequest {
+            stream: "core/pow".to_string(),
+            client_id: client_id.clone(),
+            payload: serde_json::json!({ "text": "pow" }),
+            attachments: None,
+            auth_ref: None,
+            expires_at: None,
+            schema: None,
+            idem: None,
+            pow_cookie: None,
+        })
+        .send()
+        .await
+        .context("submitting message without pow cookie")?;
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+    let pow_envelope = solve_pow_for_tests(vec![0x42; 16], 10);
+
+    let success: SubmitResponse = http
+        .post(&submit_endpoint)
+        .json(&SubmitRequest {
+            stream: "core/pow".to_string(),
+            client_id,
+            payload: serde_json::json!({ "text": "pow" }),
+            attachments: None,
+            auth_ref: None,
+            expires_at: None,
+            schema: None,
+            idem: None,
+            pow_cookie: Some(pow_envelope),
+        })
+        .send()
+        .await
+        .context("submitting message with pow cookie")?
+        .error_for_status()
+        .context("pow submit returned error")?
+        .json()
+        .await
+        .context("parsing pow submit response")?;
+
+    assert_eq!(success.stream, "core/pow");
 
     runtime.shutdown().await?;
     Ok(())
@@ -518,6 +602,7 @@ async fn goals_capability_gating_persists() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -540,6 +625,7 @@ async fn goals_capability_gating_persists() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -726,6 +812,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
                 expires_at: None,
                 schema: None,
                 idem: None,
+                pow_cookie: None,
             })
             .send()
             .await
@@ -748,6 +835,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -789,6 +877,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -816,6 +905,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -858,6 +948,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -903,6 +994,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -926,6 +1018,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
             expires_at: None,
             schema: None,
             idem: None,
+            pow_cookie: None,
         })
         .send()
         .await
@@ -977,6 +1070,24 @@ fn read_client_id(path: &Path) -> Result<String> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let bundle: ClientPublicBundle = from_reader(file).context("decoding client identity card")?;
     Ok(hex::encode(bundle.client_id))
+}
+
+fn solve_pow_for_tests(challenge: Vec<u8>, difficulty: u8) -> PowCookieEnvelope {
+    let mut cookie = PowCookie {
+        challenge,
+        nonce: 0,
+        difficulty,
+    };
+
+    loop {
+        if cookie.meets_difficulty() {
+            return PowCookieEnvelope::from_cookie(&cookie);
+        }
+        if cookie.nonce == u64::MAX {
+            panic!("unable to solve proof-of-work for tests");
+        }
+        cookie.nonce = cookie.nonce.checked_add(1).expect("nonce overflow");
+    }
 }
 
 fn message_bundle_path(hub_dir: &Path, stream: &str, seq: u64) -> PathBuf {

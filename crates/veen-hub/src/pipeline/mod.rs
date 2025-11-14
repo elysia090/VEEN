@@ -30,7 +30,7 @@ use veen_core::wire::{
 use veen_core::{
     cap_stream_id_from_label, cap_token_from_cbor, schema_fed_authority, schema_label_class,
     schema_meta_schema, AuthorityRecord, AuthorityView, CapTokenRate, Label, LabelClassRecord,
-    SchemaDescriptor, StreamIdParseError, CAP_TOKEN_VERSION,
+    PowCookie, SchemaDescriptor, StreamIdParseError, CAP_TOKEN_VERSION,
 };
 
 use thiserror::Error;
@@ -157,7 +157,34 @@ impl HubPipeline {
             expires_at,
             schema,
             idem,
+            pow_cookie,
         } = request;
+
+        if let Some(required) = self.admission.pow_difficulty {
+            match pow_cookie {
+                Some(cookie) => {
+                    if cookie.difficulty < required {
+                        return Err(anyhow::Error::new(
+                            CapabilityError::ProofOfWorkInsufficient {
+                                required,
+                                provided: cookie.difficulty,
+                            },
+                        ));
+                    }
+                    let decoded = cookie.into_pow_cookie();
+                    if !decoded.meets_difficulty() {
+                        return Err(anyhow::Error::new(CapabilityError::ProofOfWorkInvalid {
+                            required,
+                        }));
+                    }
+                }
+                None => {
+                    return Err(anyhow::Error::new(CapabilityError::ProofOfWorkRequired {
+                        difficulty: required,
+                    }));
+                }
+            }
+        }
 
         let attachments = attachments.unwrap_or_default();
         let submitted_at = current_unix_timestamp();
@@ -678,6 +705,32 @@ impl HubPipeline {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct PowCookieEnvelope {
+    #[serde(with = "serde_bytes")]
+    pub challenge: ByteBuf,
+    pub nonce: u64,
+    pub difficulty: u8,
+}
+
+impl PowCookieEnvelope {
+    pub fn into_pow_cookie(self) -> PowCookie {
+        PowCookie {
+            challenge: self.challenge.into_vec(),
+            nonce: self.nonce,
+            difficulty: self.difficulty,
+        }
+    }
+
+    pub fn from_cookie(cookie: &PowCookie) -> Self {
+        Self {
+            challenge: ByteBuf::from(cookie.challenge.clone()),
+            nonce: cookie.nonce,
+            difficulty: cookie.difficulty,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SubmitRequest {
     pub stream: String,
     pub client_id: String,
@@ -687,6 +740,8 @@ pub struct SubmitRequest {
     pub expires_at: Option<u64>,
     pub schema: Option<String>,
     pub idem: Option<u64>,
+    #[serde(default)]
+    pub pow_cookie: Option<PowCookieEnvelope>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -956,6 +1011,14 @@ pub enum CapabilityError {
     ClientUsageOverflow { client_id: String, stream: String },
     #[error("E.RATE capability {auth_ref} is rate limited (retry after {retry_after}s)")]
     RateLimited { auth_ref: String, retry_after: u64 },
+    #[error("E.AUTH proof-of-work cookie with difficulty >= {difficulty} required")]
+    ProofOfWorkRequired { difficulty: u8 },
+    #[error(
+        "E.AUTH proof-of-work cookie difficulty insufficient (required {required}, provided {provided})"
+    )]
+    ProofOfWorkInsufficient { required: u8, provided: u8 },
+    #[error("E.AUTH proof-of-work cookie failed verification (required {required})")]
+    ProofOfWorkInvalid { required: u8 },
 }
 
 impl CapabilityError {
@@ -981,6 +1044,9 @@ impl CapabilityError {
             | Self::Expired { .. }
             | Self::AuthRefRevoked { .. }
             | Self::CapTokenRevoked { .. } => "E.CAP",
+            Self::ProofOfWorkRequired { .. }
+            | Self::ProofOfWorkInsufficient { .. }
+            | Self::ProofOfWorkInvalid { .. } => "E.AUTH",
         }
     }
 }
