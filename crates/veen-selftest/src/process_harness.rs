@@ -1114,15 +1114,13 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
                 stack.push((entry.path(), target));
             } else if file_type.is_file() {
                 if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)
-                        .await
-                        .with_context(|| format!("ensuring parent directory {}", parent.display()))?;
-                }
-                fs::copy(entry.path(), &target)
-                    .await
-                    .with_context(|| {
-                        format!("copying {} to {}", entry.path().display(), target.display())
+                    fs::create_dir_all(parent).await.with_context(|| {
+                        format!("ensuring parent directory {}", parent.display())
                     })?;
+                }
+                fs::copy(entry.path(), &target).await.with_context(|| {
+                    format!("copying {} to {}", entry.path().display(), target.display())
+                })?;
             }
         }
     }
