@@ -447,6 +447,9 @@ struct K8sAuthorityArgs {
     /// Container image reference for the hub runtime.
     #[arg(long)]
     image: Option<String>,
+    /// Container image reference for the authority self-test job.
+    #[arg(long)]
+    selftest_image: Option<String>,
     /// Kubernetes storage class for the PersistentVolumeClaim.
     #[arg(long)]
     storage_class: Option<String>,
@@ -1604,6 +1607,7 @@ async fn handle_k8s_authority(args: K8sAuthorityArgs) -> Result<()> {
         config,
         keys,
         image,
+        selftest_image,
         storage_class,
         storage_size,
         port,
@@ -1612,6 +1616,7 @@ async fn handle_k8s_authority(args: K8sAuthorityArgs) -> Result<()> {
 
     let namespace = namespace.unwrap_or_else(|| "veen-system".to_string());
     let image = image.unwrap_or_else(|| format!("veen-hub:{version}"));
+    let selftest_image = selftest_image.unwrap_or_else(|| format!("veen-selftest:{version}"));
 
     let config_contents = fs::read_to_string(&config)
         .await
@@ -1726,6 +1731,33 @@ async fn handle_k8s_authority(args: K8sAuthorityArgs) -> Result<()> {
         container,
         volumes,
         "veen-authority",
+    ));
+
+    let job_labels = standard_labels("selftest", "selftest", &universe_id, None);
+    let job_annotations = default_annotations("selftest", &version, None);
+    let hub_url = format!("http://veen-authority:{port}");
+    let job_container = json!({
+        "name": "veen-selftest-authority",
+        "image": selftest_image,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["veen-selftest", "authority", "--hub", hub_url],
+        "env": [
+            {"name": "VEEN_ROLE", "value": "selftest"},
+            {"name": "VEEN_UNIVERSE_ID", "value": universe_id.clone()}
+        ],
+        "volumeMounts": [
+            {"name": "work", "mountPath": "/work"}
+        ]
+    });
+    let job_volumes = vec![json!({"name": "work", "emptyDir": {}})];
+
+    docs.push(job_manifest(
+        "veen-selftest-authority",
+        &namespace,
+        job_labels,
+        job_annotations,
+        job_container,
+        job_volumes,
     ));
 
     let output = render_yaml_documents(&docs)?;
