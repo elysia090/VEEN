@@ -34,7 +34,10 @@ async fn goals_core_pipeline() -> Result<()> {
         hub_dir.path().to_path_buf(),
         None,
         HubRole::Primary,
-        HubConfigOverrides::default(),
+        HubConfigOverrides {
+            capability_gating_enabled: Some(false),
+            ..HubConfigOverrides::default()
+        },
     )
     .await?;
     let runtime = HubRuntime::start(config).await?;
@@ -282,6 +285,153 @@ async fn goals_core_pipeline() -> Result<()> {
     run_cli(["selftest", "core"]).context("running selftest core suite")?;
 
     runtime.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn goals_capability_gating_persists() -> Result<()> {
+    let hub_dir = TempDir::new().context("creating hub temp directory")?;
+    let client_dir = hub_dir.path().join("client");
+    let admin_dir = hub_dir.path().join("admin");
+    let cap_file = hub_dir.path().join("cap.cbor");
+
+    run_cli(["keygen", "--out", client_dir.to_str().unwrap()])
+        .context("generating client identity")?;
+    run_cli(["keygen", "--out", admin_dir.to_str().unwrap()])
+        .context("generating admin identity")?;
+
+    run_cli([
+        "cap",
+        "issue",
+        "--issuer",
+        admin_dir.to_str().unwrap(),
+        "--subject",
+        client_dir.to_str().unwrap(),
+        "--stream",
+        "core/capped",
+        "--ttl",
+        "600",
+        "--rate",
+        "1,1",
+        "--out",
+        cap_file.to_str().unwrap(),
+    ])
+    .context("issuing capability via CLI")?;
+
+    let listen_addr = next_listen_addr()?;
+    let config = HubRuntimeConfig::from_sources(
+        listen_addr,
+        hub_dir.path().to_path_buf(),
+        None,
+        HubRole::Primary,
+        HubConfigOverrides::default(),
+    )
+    .await?;
+    let runtime = HubRuntime::start(config).await?;
+    let base_url = format!("http://{}", runtime.listen_addr());
+
+    let cap_bytes = std::fs::read(&cap_file).context("reading capability artefact")?;
+    let cap_token = cap_token_from_cbor(&cap_bytes).context("decoding issued capability")?;
+    cap_token
+        .verify()
+        .map_err(|err| anyhow::anyhow!("issued capability failed verification: {err}"))?;
+    let subject_client_id = hex::encode(cap_token.subject_pk.as_ref());
+
+    let http = Client::new();
+    let authorize_response: AuthorizeResponse = http
+        .post(format!("{base_url}/authorize"))
+        .header("Content-Type", "application/cbor")
+        .body(cap_bytes.clone())
+        .send()
+        .await
+        .context("authorizing capability")?
+        .error_for_status()
+        .context("authorize endpoint returned error")?
+        .json()
+        .await
+        .context("decoding authorize response")?;
+    let auth_ref_hex = authorize_response.auth_ref.clone();
+
+    let capability_store_path = hub_dir
+        .path()
+        .join("state")
+        .join("capabilities")
+        .join("authorized_caps.json");
+
+    runtime.shutdown().await?;
+
+    let stored_caps = std::fs::read_to_string(&capability_store_path).with_context(|| {
+        format!(
+            "reading capability store from {}",
+            capability_store_path.display()
+        )
+    })?;
+    assert!(
+        stored_caps.contains(&auth_ref_hex),
+        "capability store missing authorised record"
+    );
+
+    let restart_addr = next_listen_addr()?;
+    let restart_config = HubRuntimeConfig::from_sources(
+        restart_addr,
+        hub_dir.path().to_path_buf(),
+        None,
+        HubRole::Primary,
+        HubConfigOverrides::default(),
+    )
+    .await?;
+    let restart_runtime = HubRuntime::start(restart_config).await?;
+    let submit_endpoint = format!("http://{}/submit", restart_runtime.listen_addr());
+
+    let authorized: SubmitResponse = http
+        .post(&submit_endpoint)
+        .json(&SubmitRequest {
+            stream: "core/capped".to_string(),
+            client_id: subject_client_id.clone(),
+            payload: serde_json::json!({ "text": "authorized" }),
+            attachments: None,
+            auth_ref: Some(auth_ref_hex.clone()),
+            expires_at: None,
+            schema: None,
+            idem: None,
+        })
+        .send()
+        .await
+        .context("submitting authorized message after restart")?
+        .error_for_status()
+        .context("authorized submit after restart returned error")?
+        .json()
+        .await
+        .context("parsing authorized submit response")?;
+    assert_eq!(authorized.stream, "core/capped");
+
+    let missing_auth = http
+        .post(&submit_endpoint)
+        .json(&SubmitRequest {
+            stream: "core/capped".to_string(),
+            client_id: subject_client_id,
+            payload: serde_json::json!({ "text": "unauthorized" }),
+            attachments: None,
+            auth_ref: None,
+            expires_at: None,
+            schema: None,
+            idem: None,
+        })
+        .send()
+        .await
+        .context("submitting message without auth_ref")?;
+    assert_eq!(missing_auth.status(), StatusCode::FORBIDDEN);
+    let missing_body = missing_auth
+        .text()
+        .await
+        .context("reading missing auth_ref response body")?;
+    assert!(
+        missing_body.contains("E.AUTH"),
+        "expected E.AUTH error code in response: {missing_body}"
+    );
+
+    restart_runtime.shutdown().await?;
+
     Ok(())
 }
 

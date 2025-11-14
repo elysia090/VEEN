@@ -57,7 +57,10 @@ async fn run_fed_auth() -> Result<()> {
         primary_dir.path().to_path_buf(),
         None,
         HubRole::Primary,
-        HubConfigOverrides::default(),
+        HubConfigOverrides {
+            capability_gating_enabled: Some(false),
+            ..HubConfigOverrides::default()
+        },
     )
     .await?;
     let replica_config = HubRuntimeConfig::from_sources(

@@ -37,10 +37,21 @@ pub struct ObservabilityConfig {
     pub enable_logs: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AdmissionConfig {
+    pub capability_gating_enabled: bool,
     pub max_client_id_lifetime_sec: Option<u64>,
     pub max_msgs_per_client_id_per_label: Option<u64>,
+}
+
+impl Default for AdmissionConfig {
+    fn default() -> Self {
+        Self {
+            capability_gating_enabled: true,
+            max_client_id_lifetime_sec: None,
+            max_msgs_per_client_id_per_label: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -55,6 +66,7 @@ pub struct HubConfigOverrides {
     pub anchor_backend: Option<String>,
     pub enable_metrics: Option<bool>,
     pub enable_logs: Option<bool>,
+    pub capability_gating_enabled: Option<bool>,
     pub max_client_id_lifetime_sec: Option<u64>,
     pub max_msgs_per_client_id_per_label: Option<u64>,
     pub replica_targets: Option<Vec<String>>,
@@ -88,6 +100,7 @@ struct ObservabilitySection {
 
 #[derive(Debug, Deserialize, Default)]
 struct AdmissionSection {
+    capability_gating_enabled: Option<bool>,
     max_client_id_lifetime_sec: Option<u64>,
     max_msgs_per_client_id_per_label: Option<u64>,
 }
@@ -131,6 +144,9 @@ impl HubRuntimeConfig {
                 .unwrap_or_else(|| file_cfg.observability.enable_logs.unwrap_or(true)),
         };
         let admission = AdmissionConfig {
+            capability_gating_enabled: overrides
+                .capability_gating_enabled
+                .unwrap_or_else(|| file_cfg.admission.capability_gating_enabled.unwrap_or(true)),
             max_client_id_lifetime_sec: overrides
                 .max_client_id_lifetime_sec
                 .or(file_cfg.admission.max_client_id_lifetime_sec),
