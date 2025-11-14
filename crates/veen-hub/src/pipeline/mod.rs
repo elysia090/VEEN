@@ -134,6 +134,11 @@ impl HubPipeline {
                 update_capability_store(&self.storage, &guard.capabilities).await?;
                 return Err(anyhow::Error::new(err));
             }
+        } else if self.admission.capability_gating_enabled {
+            update_capability_store(&self.storage, &guard.capabilities).await?;
+            return Err(anyhow::Error::new(CapabilityError::Unauthorized {
+                auth_ref: "missing".to_string(),
+            }));
         }
 
         let stream_runtime = guard.streams.entry(stream.clone()).or_insert_with(|| {

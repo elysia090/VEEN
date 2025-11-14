@@ -42,6 +42,9 @@ struct RunCommand {
     /// Disable anchoring regardless of configuration files.
     #[arg(long = "disable-anchors")]
     disable_anchors: bool,
+    /// Disable capability gating checks for submit requests.
+    #[arg(long = "disable-capability-gating")]
+    disable_capability_gating: bool,
     /// Anchor backend identifier to use (e.g. "file" or "dummy").
     #[arg(long = "anchor-backend", conflicts_with = "disable_anchors")]
     anchor_backend: Option<String>,
@@ -145,6 +148,7 @@ impl RunCommand {
             anchor_backend: self.anchor_backend.clone(),
             enable_metrics: self.disable_metrics.then_some(false),
             enable_logs: self.disable_logs.then_some(false),
+            capability_gating_enabled: self.disable_capability_gating.then_some(false),
             max_client_id_lifetime_sec: self.max_client_id_lifetime_sec,
             max_msgs_per_client_id_per_label: self.max_msgs_per_client_id_per_label,
             replica_targets: if self.replica_targets.is_empty() {

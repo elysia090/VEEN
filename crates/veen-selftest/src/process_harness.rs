@@ -540,6 +540,7 @@ impl IntegrationHarness {
             OsString::from(listen.to_string()),
             OsString::from("--data-dir"),
             data_dir.as_os_str().to_os_string(),
+            OsString::from("--disable-capability-gating"),
         ];
         if role == HubRole::Replica {
             args.push(OsString::from("--role"));
