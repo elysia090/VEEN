@@ -827,7 +827,7 @@ impl OperationIndex {
     pub fn contains(&self, schema: [u8; 32], operation_id: &OperationId) -> bool {
         self.inner
             .get(&schema)
-            .map_or(false, |ids| ids.contains(operation_id))
+            .is_some_and(|ids| ids.contains(operation_id))
     }
 
     /// Clears all tracked entries.
