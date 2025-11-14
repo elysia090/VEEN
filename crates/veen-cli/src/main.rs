@@ -3360,7 +3360,7 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::mpsc;
     use tokio::time::sleep;
-    use veen_hub::config::{HubRole, HubRuntimeConfig};
+    use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
     use veen_hub::runtime::HubRuntime;
 
     async fn spawn_cbor_capture_server(
@@ -3470,6 +3470,7 @@ mod tests {
             hub_dir.path().to_path_buf(),
             None,
             HubRole::Primary,
+            HubConfigOverrides::default(),
         )
         .await?;
         let runtime = HubRuntime::start(config).await?;

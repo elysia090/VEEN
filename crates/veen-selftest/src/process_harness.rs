@@ -143,7 +143,7 @@ impl IntegrationHarness {
 
     pub async fn run_core_suite(&mut self) -> Result<()> {
         let hub = self
-            .spawn_hub("core-hub", HubRole::Primary)
+            .spawn_hub("core-hub", HubRole::Primary, &[])
             .await
             .context("spawning primary hub process")?;
 
@@ -416,11 +416,16 @@ impl IntegrationHarness {
 
     pub async fn run_federation_suite(&mut self) -> Result<()> {
         let primary = self
-            .spawn_hub("overlay-primary", HubRole::Primary)
+            .spawn_hub("overlay-primary", HubRole::Primary, &[])
             .await
             .context("spawning primary hub")?;
+        let replica_target = format!("http://{}", primary.listen);
         let replica = self
-            .spawn_hub("overlay-replica", HubRole::Replica)
+            .spawn_hub(
+                "overlay-replica",
+                HubRole::Replica,
+                &[replica_target.clone()],
+            )
             .await
             .context("spawning replica hub")?;
 
@@ -517,7 +522,12 @@ impl IntegrationHarness {
         Ok(CommandOutput::from(output))
     }
 
-    async fn spawn_hub(&self, name: &str, role: HubRole) -> Result<HubProcess> {
+    async fn spawn_hub(
+        &self,
+        name: &str,
+        role: HubRole,
+        replica_targets: &[String],
+    ) -> Result<HubProcess> {
         let listen = next_listen_addr()?;
         let data_dir = self.base_dir().join(name);
         fs::create_dir_all(&data_dir)
@@ -534,6 +544,10 @@ impl IntegrationHarness {
         if role == HubRole::Replica {
             args.push(OsString::from("--role"));
             args.push(OsString::from("replica"));
+            for target in replica_targets {
+                args.push(OsString::from("--replica-target"));
+                args.push(OsString::from(target));
+            }
         }
         let handle = self
             .spawn_process(name, &self.bins.hub, args)

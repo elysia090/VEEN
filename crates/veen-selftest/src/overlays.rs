@@ -13,7 +13,7 @@ use tracing::info;
 
 use crate::process_harness;
 use veen_bridge::{run_bridge, BridgeConfig, EndpointConfig};
-use veen_hub::config::{HubRole, HubRuntimeConfig};
+use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::pipeline::{HubStreamState, SubmitRequest};
 use veen_hub::runtime::HubRuntime;
 
@@ -57,6 +57,7 @@ async fn run_fed_auth() -> Result<()> {
         primary_dir.path().to_path_buf(),
         None,
         HubRole::Primary,
+        HubConfigOverrides::default(),
     )
     .await?;
     let replica_config = HubRuntimeConfig::from_sources(
@@ -64,6 +65,10 @@ async fn run_fed_auth() -> Result<()> {
         replica_dir.path().to_path_buf(),
         None,
         HubRole::Replica,
+        HubConfigOverrides {
+            replica_targets: Some(vec![format!("http://{}", primary_addr)]),
+            ..HubConfigOverrides::default()
+        },
     )
     .await?;
 
