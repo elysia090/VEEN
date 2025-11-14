@@ -1111,9 +1111,9 @@ where
         .arg("--")
         .args(args)
         .status()
-        .context("executing veen-cli command")?;
+        .context("executing veen command")?;
     if !status.success() {
-        bail!("veen-cli command failed with status {status}");
+        bail!("veen command failed with status {status}");
     }
     Ok(())
 }

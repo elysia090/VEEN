@@ -52,11 +52,11 @@ impl BinaryPaths {
             dir.pop();
         }
         let hub = dir.join(format!("veen-hub{}", std::env::consts::EXE_SUFFIX));
-        let cli = dir.join(format!("veen-cli{}", std::env::consts::EXE_SUFFIX));
+        let cli = dir.join(format!("veen{}", std::env::consts::EXE_SUFFIX));
         let bridge = dir.join(format!("veen-bridge{}", std::env::consts::EXE_SUFFIX));
-        ensure_binary(&hub, "veen-hub")?;
-        ensure_binary(&cli, "veen-cli")?;
-        ensure_binary(&bridge, "veen-bridge")?;
+        ensure_binary(&hub, "veen-hub", "veen-hub")?;
+        ensure_binary(&cli, "veen-cli", "veen")?;
+        ensure_binary(&bridge, "veen-bridge", "veen-bridge")?;
         if !hub.exists() {
             bail!("expected hub binary at {}", hub.display());
         }
@@ -70,7 +70,7 @@ impl BinaryPaths {
     }
 }
 
-fn ensure_binary(path: &Path, crate_name: &str) -> Result<()> {
+fn ensure_binary(path: &Path, crate_name: &str, bin_name: &str) -> Result<()> {
     if path.exists() {
         return Ok(());
     }
@@ -79,7 +79,7 @@ fn ensure_binary(path: &Path, crate_name: &str) -> Result<()> {
         .arg("-p")
         .arg(crate_name)
         .arg("--bin")
-        .arg(crate_name)
+        .arg(bin_name)
         .status()
         .with_context(|| format!("building {crate_name} binary"))?;
     if !status.success() {
