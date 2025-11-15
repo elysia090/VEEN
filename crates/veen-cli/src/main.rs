@@ -1769,6 +1769,7 @@ async fn handle_k8s_authority(args: K8sAuthorityArgs) -> Result<()> {
 
     let output = render_yaml_documents(&docs)?;
     print!("{}", output);
+    log_cli_goal("CLI.K8S.AUTHORITY_RENDER");
     Ok(())
 }
 
@@ -1949,6 +1950,7 @@ async fn handle_k8s_tenant(args: K8sTenantArgs) -> Result<()> {
 
     let output = render_yaml_documents(&docs)?;
     print!("{}", output);
+    log_cli_goal("CLI.K8S.TENANT_RENDER");
     Ok(())
 }
 
@@ -2427,6 +2429,7 @@ async fn run_hub_foreground(args: HubStartArgs) -> Result<()> {
     save_hub_state(&data_dir, &state).await?;
     remove_pid_file(&data_dir).await?;
     println!("hub stopped. uptime_sec={}", state.uptime(stop_ts));
+    log_cli_goal("CLI.HUB0.START");
     Ok(())
 }
 
@@ -2588,11 +2591,12 @@ async fn handle_hub_stop(args: HubStopArgs) -> Result<()> {
         "hub stopped. uptime_sec={}",
         refreshed_state.uptime(stop_ts)
     );
+    log_cli_goal("CLI.HUB0.STOP");
     Ok(())
 }
 
 async fn handle_hub_status(args: HubStatusArgs) -> Result<()> {
-    match parse_hub_reference(&args.hub)? {
+    let result = match parse_hub_reference(&args.hub)? {
         HubReference::Local(data_dir) => {
             let state = load_hub_state(&data_dir).await?;
 
@@ -2652,7 +2656,13 @@ async fn handle_hub_status(args: HubStatusArgs) -> Result<()> {
             }
             Ok(())
         }
+    };
+
+    if result.is_ok() {
+        log_cli_goal("CLI.HUB0.STATUS");
     }
+
+    result
 }
 
 async fn handle_hub_key(args: HubKeyArgs) -> Result<()> {
@@ -2664,6 +2674,7 @@ async fn handle_hub_key(args: HubKeyArgs) -> Result<()> {
             println!("hub_pk: {}", key_info.public_key_hex);
             println!("created_at: {}", key_info.created_at);
 
+            log_cli_goal("CLI.KEX0.HUB_KEY");
             Ok(())
         }
         HubReference::Remote(client) => {
@@ -2679,6 +2690,7 @@ async fn handle_hub_key(args: HubKeyArgs) -> Result<()> {
             if let Some(profile_id) = report.profile_id.as_deref() {
                 println!("profile_id: {profile_id}");
             }
+            log_cli_goal("CLI.KEX0.HUB_KEY");
             Ok(())
         }
     }
@@ -2739,6 +2751,7 @@ async fn handle_hub_verify_rotation(args: HubVerifyRotationArgs) -> Result<()> {
     println!(
         "checkpoint rotation verified: hub_sig (new key) and witness_sigs (old+new) are valid"
     );
+    log_cli_goal("CLI.KEX0.VERIFY_ROTATION");
     Ok(())
 }
 
@@ -3038,6 +3051,7 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
         }
     }
 
+    log_cli_goal("CLI.AUTH1.ROLE");
     Ok(())
 }
 
@@ -3051,6 +3065,7 @@ async fn handle_hub_checkpoint_latest(args: HubCheckpointLatestArgs) -> Result<C
 
     let checkpoint: Checkpoint = client.get_cbor("/checkpoint_latest", &[]).await?;
     print_checkpoint_summary(&checkpoint);
+    log_cli_goal("CLI.RESYNC0.CHECKPOINT_LATEST");
     Ok(checkpoint)
 }
 
@@ -3079,6 +3094,7 @@ async fn handle_hub_checkpoint_range(args: HubCheckpointRangeArgs) -> Result<Vec
             print_checkpoint_summary(checkpoint);
         }
     }
+    log_cli_goal("CLI.RESYNC0.CHECKPOINT_RANGE");
     Ok(checkpoints)
 }
 
@@ -3130,6 +3146,7 @@ async fn handle_hub_tls_info(args: HubTlsInfoArgs) -> Result<()> {
             "disabled"
         }
     );
+    log_cli_goal("CLI.SH0.TLS_INFO");
     Ok(())
 }
 
@@ -3207,6 +3224,7 @@ async fn handle_keygen(args: KeygenArgs) -> Result<()> {
         "generated VEEN client identity"
     );
 
+    log_cli_goal("CLI.CORE.KEYGEN");
     Ok(())
 }
 
@@ -3255,6 +3273,7 @@ async fn handle_id_show(args: IdShowArgs) -> Result<()> {
         }
     }
 
+    log_cli_goal("CLI.KEX0.ID_SHOW");
     Ok(())
 }
 
@@ -3324,14 +3343,21 @@ async fn handle_id_rotate(args: IdRotateArgs) -> Result<()> {
     tracing::info!(client_id = %new_client_id_hex, "rotated VEEN client identity");
     println!("rotated client identity. new client_id: {new_client_id_hex}");
 
+    log_cli_goal("CLI.KEX0.ID_ROTATE");
     Ok(())
 }
 
 async fn handle_send(args: SendArgs) -> Result<()> {
-    match parse_hub_reference(&args.hub)? {
+    let result = match parse_hub_reference(&args.hub)? {
         HubReference::Local(data_dir) => handle_send_local(data_dir, args).await,
         HubReference::Remote(client) => handle_send_remote(client, args).await,
+    };
+
+    if result.is_ok() {
+        log_cli_goal("CLI.CORE.SEND");
     }
+
+    result
 }
 
 async fn handle_send_local(data_dir: PathBuf, args: SendArgs) -> Result<()> {
@@ -3621,7 +3647,7 @@ fn solve_pow_cookie(challenge: Vec<u8>, difficulty: u8) -> Result<PowCookie> {
 
 async fn handle_stream(args: StreamArgs) -> Result<()> {
     let hub = parse_hub_reference(&args.hub)?;
-    match hub {
+    let result = match hub {
         HubReference::Local(data_dir) => {
             let stream_state = load_stream_state(&data_dir, &args.stream).await?;
             if args.with_proof {
@@ -3654,27 +3680,33 @@ async fn handle_stream(args: StreamArgs) -> Result<()> {
                     );
                 }
 
-                return Ok(());
-            }
+                Ok(())
+            } else {
+                let mut emitted = false;
+                for message in stream_state.messages.iter().filter(|m| m.seq >= args.from) {
+                    emitted = true;
+                    print_stream_message(message);
+                    println!("---");
+                }
 
-            let mut emitted = false;
-            for message in stream_state.messages.iter().filter(|m| m.seq >= args.from) {
-                emitted = true;
-                print_stream_message(message);
-                println!("---");
-            }
+                if !emitted {
+                    println!(
+                        "no messages in stream {} from seq {}",
+                        args.stream, args.from
+                    );
+                }
 
-            if !emitted {
-                println!(
-                    "no messages in stream {} from seq {}",
-                    args.stream, args.from
-                );
+                Ok(())
             }
-
-            Ok(())
         }
         HubReference::Remote(client) => handle_stream_remote(client, args).await,
+    };
+
+    if result.is_ok() {
+        log_cli_goal("CLI.CORE.STREAM");
     }
+
+    result
 }
 
 async fn handle_stream_remote(client: HubHttpClient, args: StreamArgs) -> Result<()> {
@@ -3767,6 +3799,7 @@ async fn handle_attachment_verify(args: AttachmentVerifyArgs) -> Result<()> {
         "attachment verified. digest={} size={} stored={}",
         attachment.digest, attachment.size, attachment.stored_path
     );
+    log_cli_goal("CLI.ATTACH0.VERIFY");
     Ok(())
 }
 
@@ -3823,6 +3856,7 @@ async fn handle_cap_issue(args: CapIssueArgs) -> Result<()> {
     println!("  auth_ref: {}", hex::encode(auth_ref.as_ref()));
     println!("  saved to {}", args.out.display());
 
+    log_cli_goal("CLI.CAP0.ISSUE");
     Ok(())
 }
 
@@ -3862,6 +3896,7 @@ async fn handle_cap_authorize_remote(client: HubHttpClient, args: CapAuthorizeAr
     println!("authorised capability");
     println!("  auth_ref: {}", auth_ref_hex);
     println!("  expires_at: {}", response.expires_at);
+    log_cli_goal("CLI.CAP0.AUTHORIZE");
     Ok(())
 }
 
@@ -3927,6 +3962,7 @@ async fn handle_authority_set_remote(client: HubHttpClient, args: AuthoritySetAr
     println!("  stream: {}", args.stream);
     println!("  policy: {:?}", args.policy);
     println!("  ttl: {}", ttl);
+    log_cli_goal("CLI.FED1.AUTHORITY_SET");
     Ok(())
 }
 
@@ -4076,6 +4112,7 @@ async fn handle_label_class_set_remote(
 async fn handle_schema_id(args: SchemaIdArgs) -> Result<()> {
     let digest = compute_schema_identifier(&args.name);
     println!("{}", hex::encode(digest));
+    log_cli_goal("CLI.META0_PLUS.SCHEMA_ID");
     Ok(())
 }
 
@@ -4212,12 +4249,14 @@ async fn handle_wallet_transfer_remote(
     println!("  to_wallet_id: {}", args.to_wallet_id);
     println!("  amount: {}", args.amount);
     println!("  transfer_id: {}", hex::encode(transfer_id.as_bytes()));
+    log_cli_goal("CLI.WALLET.TRANSFER");
     Ok(())
 }
 
 async fn handle_operation_id(args: OperationIdArgs) -> Result<()> {
     let operation_id = operation_id_from_bundle(&args.bundle).await?;
     println!("operation_id: {}", hex::encode(operation_id.as_bytes()));
+    log_cli_goal("CLI.OPERATION0.ID");
     Ok(())
 }
 
@@ -4269,6 +4308,7 @@ async fn handle_revoke_publish_remote(
     if let Some(ttl) = args.ttl {
         println!("  ttl: {ttl}");
     }
+    log_cli_goal("CLI.AUTH1.REVOKE_PUBLISH");
     Ok(())
 }
 
@@ -4686,27 +4726,44 @@ async fn handle_retention_show(args: RetentionShowArgs) -> Result<()> {
     print_retention_entry("payloads", payloads);
     print_retention_entry("checkpoints", checkpoints);
 
+    log_cli_goal("CLI.COMP0.RETENTION_SHOW");
     Ok(())
 }
 
 async fn handle_selftest_core() -> Result<()> {
     println!("running VEEN core self-tests...");
-    veen_selftest::run_core().await
+    let result = veen_selftest::run_core().await;
+    if result.is_ok() {
+        log_cli_goal("CLI.SELFTEST.CORE");
+    }
+    result
 }
 
 async fn handle_selftest_props() -> Result<()> {
     println!("running VEEN property self-tests...");
-    veen_selftest::run_props()
+    let result = veen_selftest::run_props();
+    if result.is_ok() {
+        log_cli_goal("CLI.SELFTEST.PROPS");
+    }
+    result
 }
 
 async fn handle_selftest_fuzz() -> Result<()> {
     println!("running VEEN fuzz self-tests...");
-    veen_selftest::run_fuzz()
+    let result = veen_selftest::run_fuzz();
+    if result.is_ok() {
+        log_cli_goal("CLI.SELFTEST.FUZZ");
+    }
+    result
 }
 
 async fn handle_selftest_all() -> Result<()> {
     println!("running full VEEN self-test suite...");
-    veen_selftest::run_all().await
+    let result = veen_selftest::run_all().await;
+    if result.is_ok() {
+        log_cli_goal("CLI.SELFTEST.ALL");
+    }
+    result
 }
 
 async fn ensure_data_dir_layout(data_dir: &Path) -> Result<()> {
