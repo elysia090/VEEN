@@ -32,9 +32,9 @@ use veen_core::wire::{
 };
 use veen_core::{
     cap_stream_id_from_label, cap_token_from_cbor, schema_fed_authority, schema_label_class,
-    schema_meta_schema, AuthorityRecord, AuthorityView, CapTokenRate, Label, LabelClassRecord,
-    LabelPolicy, PowCookie, RealmId, SchemaDescriptor, StreamId, StreamIdParseError,
-    CAP_TOKEN_VERSION, MAX_ATTACHMENTS_PER_MSG, MAX_BODY_BYTES, MAX_MSG_BYTES,
+    schema_meta_schema, AuthorityPolicy, AuthorityRecord, AuthorityView, CapTokenRate, Label,
+    LabelClassRecord, LabelPolicy, PowCookie, RealmId, SchemaDescriptor, StreamId,
+    StreamIdParseError, CAP_TOKEN_VERSION, MAX_ATTACHMENTS_PER_MSG, MAX_BODY_BYTES, MAX_MSG_BYTES,
 };
 
 use thiserror::Error;
@@ -934,6 +934,106 @@ impl HubPipeline {
         }
     }
 
+    pub async fn authority_view_descriptor(
+        &self,
+        realm_id: RealmId,
+        stream_id: StreamId,
+    ) -> HubAuthorityRecordDescriptor {
+        let now = current_unix_timestamp();
+        let records = {
+            let guard = self.inner.lock().await;
+            guard.authority_view.records_for(realm_id, stream_id)
+        };
+
+        let ordering = |a: &AuthorityRecord, b: &AuthorityRecord| {
+            a.ts.cmp(&b.ts)
+                .then_with(|| a.primary_hub.as_ref().cmp(b.primary_hub.as_ref()))
+        };
+
+        let mut sorted = records;
+        sorted.sort_by(ordering);
+        let active = sorted.iter().find(|record| record.is_active_at(now));
+        let selected = active.or_else(|| sorted.first());
+
+        let primary_hub =
+            selected.and_then(|record| Some(hex::encode(record.primary_hub.as_ref())));
+        let replica_hubs = selected
+            .map(|record| {
+                record
+                    .replica_hubs
+                    .iter()
+                    .map(|hub| hex::encode(hub.as_ref()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let policy = selected
+            .map(|record| match record.policy {
+                AuthorityPolicy::SinglePrimary => "single-primary".to_string(),
+                AuthorityPolicy::MultiPrimary => "multi-primary".to_string(),
+            })
+            .unwrap_or_else(|| "unspecified".to_string());
+        let ts = selected.map(|record| record.ts).unwrap_or(0);
+        let ttl = selected.map(|record| record.ttl).unwrap_or(0);
+        let expires_at = selected.and_then(|record| record.expires_at());
+        let active_now = active.is_some();
+
+        HubAuthorityRecordDescriptor {
+            ok: true,
+            realm_id: hex::encode(realm_id.as_ref()),
+            stream_id: hex::encode(stream_id.as_ref()),
+            primary_hub,
+            replica_hubs,
+            policy,
+            ts,
+            ttl,
+            expires_at,
+            active_now,
+        }
+    }
+
+    pub async fn label_authority_descriptor(
+        &self,
+        stream_id: StreamId,
+    ) -> HubLabelAuthorityDescriptor {
+        let now = current_unix_timestamp();
+        let authority = {
+            let guard = self.inner.lock().await;
+            guard
+                .authority_view
+                .label_authority_for_stream(stream_id, now)
+        };
+
+        let policy = match authority.policy {
+            LabelPolicy::SinglePrimary => "single-primary".to_string(),
+            LabelPolicy::MultiPrimary => "multi-primary".to_string(),
+            LabelPolicy::Unspecified => "unspecified".to_string(),
+        };
+
+        let primary_hub = authority.primary_hub.map(|hub| hex::encode(hub.as_ref()));
+        let replica_hubs = authority
+            .replica_hubs
+            .iter()
+            .map(|hub| hex::encode(hub.as_ref()))
+            .collect::<Vec<_>>();
+        let realm_id = authority
+            .realm_id
+            .map(|realm| hex::encode(realm.as_ref()))
+            .filter(|value| !value.is_empty());
+        let local_is_authorized = authority.allows_hub(self.identity.hub_id);
+
+        HubLabelAuthorityDescriptor {
+            ok: true,
+            label: hex::encode(stream_id.as_ref()),
+            realm_id,
+            stream_id: hex::encode(stream_id.as_ref()),
+            policy,
+            primary_hub,
+            replica_hubs,
+            local_hub_id: self.identity.hub_id_hex.clone(),
+            local_is_authorized,
+        }
+    }
+
     pub async fn anchor_log(&self) -> Result<AnchorLog> {
         let guard = self.inner.lock().await;
         Ok(guard.anchors.clone())
@@ -1444,6 +1544,37 @@ pub struct HubRoleStreamDescriptor {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_hub: Option<String>,
     pub local_is_primary: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubAuthorityRecordDescriptor {
+    pub ok: bool,
+    pub realm_id: String,
+    pub stream_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_hub: Option<String>,
+    pub replica_hubs: Vec<String>,
+    pub policy: String,
+    pub ts: u64,
+    pub ttl: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    pub active_now: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubLabelAuthorityDescriptor {
+    pub ok: bool,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub realm_id: Option<String>,
+    pub stream_id: String,
+    pub policy: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_hub: Option<String>,
+    pub replica_hubs: Vec<String>,
+    pub local_hub_id: String,
+    pub local_is_authorized: bool,
 }
 
 const HUB_KEY_VERSION: u8 = 1;

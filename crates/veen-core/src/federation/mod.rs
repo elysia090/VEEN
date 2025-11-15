@@ -217,6 +217,17 @@ impl AuthorityView {
         let realm_id = realm_id_for_label(label);
         self.label_authority(stream_id, realm_id, time)
     }
+
+    /// Returns all authority records tracked for the provided `(realm_id,
+    /// stream_id)` pair. The records are cloned so callers can inspect them
+    /// without holding the internal view lock.
+    #[must_use]
+    pub fn records_for(&self, realm_id: RealmId, stream_id: StreamId) -> Vec<AuthorityRecord> {
+        self.records
+            .get(&(realm_id, stream_id))
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
 /// Policy classification returned by [`LabelAuthority`].
