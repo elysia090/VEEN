@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::Cursor;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -226,7 +227,7 @@ async fn goals_core_pipeline() -> Result<()> {
         .context("authorizing tampered capability")?;
     assert!(tampered_response.status().is_client_error());
 
-    let authorize_response: AuthorizeResponse = http
+    let authorize_response_bytes = http
         .post(format!("http://{}/authorize", runtime.listen_addr()))
         .header("Content-Type", "application/cbor")
         .body(cap_bytes.clone())
@@ -235,12 +236,18 @@ async fn goals_core_pipeline() -> Result<()> {
         .context("authorizing capability")?
         .error_for_status()
         .context("authorize endpoint returned error")?
-        .json()
+        .bytes()
         .await
-        .context("decoding authorize response")?;
+        .context("reading authorize response body")?;
+    let authorize_response: AuthorizeResponse =
+        from_reader(&mut Cursor::new(authorize_response_bytes.as_ref()))
+            .context("decoding authorize response")?;
 
-    assert_eq!(authorize_response.auth_ref, expected_auth_ref);
-    let auth_ref_hex = authorize_response.auth_ref.clone();
+    assert_eq!(
+        hex::encode(authorize_response.auth_ref.as_ref()),
+        expected_auth_ref
+    );
+    let auth_ref_hex = hex::encode(authorize_response.auth_ref.as_ref());
 
     let mut mismatched_subject = cap_token.subject_pk.as_ref().to_vec();
     if let Some(first) = mismatched_subject.first_mut() {
@@ -385,7 +392,7 @@ async fn goals_core_pipeline() -> Result<()> {
         "expected ttl expiry to return E.CAP, got: {ttl_body}"
     );
 
-    let reauthorized: AuthorizeResponse = http
+    let reauthorized_bytes = http
         .post(format!("http://{}/authorize", runtime.listen_addr()))
         .header("Content-Type", "application/cbor")
         .body(cap_bytes.clone())
@@ -394,10 +401,13 @@ async fn goals_core_pipeline() -> Result<()> {
         .context("reauthorizing capability after ttl expiry")?
         .error_for_status()
         .context("reauthorize endpoint returned error after ttl expiry")?
-        .json()
+        .bytes()
         .await
-        .context("decoding reauthorize response")?;
-    assert_eq!(reauthorized.auth_ref, auth_ref_hex);
+        .context("reading reauthorize response body")?;
+    let reauthorized: AuthorizeResponse =
+        from_reader(&mut Cursor::new(reauthorized_bytes.as_ref()))
+            .context("decoding reauthorize response")?;
+    assert_eq!(hex::encode(reauthorized.auth_ref.as_ref()), auth_ref_hex);
 
     let _ttl_recovered: SubmitResponse = http
         .post(&submit_endpoint)
@@ -596,7 +606,7 @@ async fn goals_capability_gating_persists() -> Result<()> {
     let subject_client_id = hex::encode(cap_token.subject_pk.as_ref());
 
     let http = Client::new();
-    let authorize_response: AuthorizeResponse = http
+    let authorize_response_bytes = http
         .post(format!("{base_url}/authorize"))
         .header("Content-Type", "application/cbor")
         .body(cap_bytes.clone())
@@ -605,10 +615,13 @@ async fn goals_capability_gating_persists() -> Result<()> {
         .context("authorizing capability")?
         .error_for_status()
         .context("authorize endpoint returned error")?
-        .json()
+        .bytes()
         .await
-        .context("decoding authorize response")?;
-    let auth_ref_hex = authorize_response.auth_ref.clone();
+        .context("reading authorize response body")?;
+    let authorize_response: AuthorizeResponse =
+        from_reader(&mut Cursor::new(authorize_response_bytes.as_ref()))
+            .context("decoding authorize response")?;
+    let auth_ref_hex = hex::encode(authorize_response.auth_ref.as_ref());
 
     let capability_store_path = hub_dir
         .path()
@@ -813,7 +826,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
     cap_quota_token
         .verify()
         .map_err(|err| anyhow::anyhow!("client A capability verification failed: {err}"))?;
-    let auth_quota: AuthorizeResponse = http
+    let auth_quota_bytes = http
         .post(format!("{hub_url}/authorize"))
         .header("Content-Type", "application/cbor")
         .body(cap_quota_bytes.clone())
@@ -822,8 +835,10 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         .context("authorizing client A quota capability")?
         .error_for_status()
         .context("authorize endpoint rejected client A quota capability")?
-        .json()
+        .bytes()
         .await
+        .context("reading authorize response for client A quota capability")?;
+    let auth_quota: AuthorizeResponse = from_reader(&mut Cursor::new(auth_quota_bytes.as_ref()))
         .context("decoding authorize response for client A quota capability")?;
 
     let cap_revoke_bytes =
@@ -833,7 +848,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
     cap_revoke_token
         .verify()
         .map_err(|err| anyhow::anyhow!("client revoke capability verification failed: {err}"))?;
-    let auth_revoke: AuthorizeResponse = http
+    let auth_revoke_bytes = http
         .post(format!("{hub_url}/authorize"))
         .header("Content-Type", "application/cbor")
         .body(cap_revoke_bytes.clone())
@@ -842,12 +857,14 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         .context("authorizing client revoke capability")?
         .error_for_status()
         .context("authorize endpoint rejected client revoke capability")?
-        .json()
+        .bytes()
         .await
+        .context("reading authorize response for client revoke capability")?;
+    let auth_revoke: AuthorizeResponse = from_reader(&mut Cursor::new(auth_revoke_bytes.as_ref()))
         .context("decoding authorize response for client revoke capability")?;
 
-    let auth_ref_quota = auth_quota.auth_ref.clone();
-    let auth_ref_revoke = auth_revoke.auth_ref.clone();
+    let auth_ref_quota = hex::encode(auth_quota.auth_ref.as_ref());
+    let auth_ref_revoke = hex::encode(auth_revoke.auth_ref.as_ref());
     let client_a_id = read_client_id(&client_a_dir.join("identity_card.pub"))?;
     let client_revoke_id = read_client_id(&client_revoke_dir.join("identity_card.pub"))?;
     let token_hash_revoke = hex::encode(cap_token_hash(&cap_revoke_bytes));
@@ -1020,7 +1037,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
     cap_b_token
         .verify()
         .map_err(|err| anyhow::anyhow!("client B capability verification failed: {err}"))?;
-    let auth_b: AuthorizeResponse = http
+    let auth_b_bytes = http
         .post(format!("{hub_url}/authorize"))
         .header("Content-Type", "application/cbor")
         .body(cap_b_bytes.clone())
@@ -1029,10 +1046,12 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         .context("authorizing client B capability")?
         .error_for_status()
         .context("authorize endpoint rejected client B capability")?
-        .json()
+        .bytes()
         .await
+        .context("reading authorize response for client B")?;
+    let auth_b: AuthorizeResponse = from_reader(&mut Cursor::new(auth_b_bytes.as_ref()))
         .context("decoding authorize response for client B")?;
-    let auth_ref_b = auth_b.auth_ref.clone();
+    let auth_ref_b = hex::encode(auth_b.auth_ref.as_ref());
     let client_b_id = read_client_id(&client_b_dir.join("identity_card.pub"))?;
 
     let _: SubmitResponse = http

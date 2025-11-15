@@ -725,7 +725,7 @@ impl HubPipeline {
         update_capability_store(&self.storage, &guard.capabilities).await?;
 
         Ok(AuthorizeResponse {
-            auth_ref: auth_ref_hex,
+            auth_ref,
             expires_at,
         })
     }
@@ -1295,7 +1295,7 @@ impl CapabilityError {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthorizeResponse {
-    pub auth_ref: String,
+    pub auth_ref: AuthRef,
     pub expires_at: u64,
 }
 
