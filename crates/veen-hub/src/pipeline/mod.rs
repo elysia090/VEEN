@@ -955,8 +955,7 @@ impl HubPipeline {
         let active = sorted.iter().find(|record| record.is_active_at(now));
         let selected = active.or_else(|| sorted.first());
 
-        let primary_hub =
-            selected.map(|record| hex::encode(record.primary_hub.as_ref()));
+        let primary_hub = selected.map(|record| hex::encode(record.primary_hub.as_ref()));
         let replica_hubs = selected
             .map(|record| {
                 record
