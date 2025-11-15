@@ -9,7 +9,7 @@ use std::process::{self, Command as StdCommand, Stdio};
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use ciborium::{de::Error as CborDeError, ser::Error as CborSerError, value::Value as CborValue};
