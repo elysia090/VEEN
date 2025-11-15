@@ -140,7 +140,8 @@ impl BridgeRuntime {
             }
         }
 
-        for stream in self.streams.clone().keys().cloned().collect::<Vec<_>>() {
+        let streams: Vec<String> = self.streams.keys().cloned().collect();
+        for stream in streams {
             let state = self.streams.entry(stream.clone()).or_default();
             let next_seq = state.next_seq;
             let messages = self.fetch_primary_stream(&stream, next_seq).await?;
