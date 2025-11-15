@@ -15,6 +15,8 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use hex;
+
 use crate::pipeline::{
     AnchorRequest, BridgeIngestRequest, CapabilityError, HubPipeline, HubProfileDescriptor,
     HubRoleDescriptor, ObservabilityReport, SubmitRequest,
@@ -41,7 +43,9 @@ impl HubServerHandle {
             .route("/resync", post(handle_resync))
             .route("/authorize", post(handle_authorize))
             .route("/authority", post(handle_authority))
+            .route("/authority_view", get(handle_authority_view))
             .route("/label-class", post(handle_label_class))
+            .route("/label_authority", get(handle_label_authority))
             .route("/schema", post(handle_schema_descriptor))
             .route("/anchor", post(handle_anchor))
             .route("/bridge", post(handle_bridge))
@@ -95,6 +99,17 @@ struct ResyncRequest {
 struct CheckpointRangeQuery {
     from_epoch: Option<u64>,
     to_epoch: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthorityViewQuery {
+    realm_id: String,
+    stream_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelAuthorityQuery {
+    label: String,
 }
 
 async fn handle_submit(
@@ -228,6 +243,25 @@ async fn handle_authority(State(pipeline): State<HubPipeline>, body: Bytes) -> i
     }
 }
 
+async fn handle_authority_view(
+    State(pipeline): State<HubPipeline>,
+    Query(query): Query<AuthorityViewQuery>,
+) -> impl IntoResponse {
+    let realm_id = match parse_realm_id_hex(&query.realm_id) {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let stream_id = match parse_stream_id_hex(&query.stream_id) {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+
+    let descriptor = pipeline
+        .authority_view_descriptor(realm_id, stream_id)
+        .await;
+    (StatusCode::OK, Json(descriptor)).into_response()
+}
+
 async fn handle_label_class(State(pipeline): State<HubPipeline>, body: Bytes) -> impl IntoResponse {
     match pipeline.publish_label_class(&body).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -236,6 +270,19 @@ async fn handle_label_class(State(pipeline): State<HubPipeline>, body: Bytes) ->
             (StatusCode::BAD_REQUEST, err.to_string()).into_response()
         }
     }
+}
+
+async fn handle_label_authority(
+    State(pipeline): State<HubPipeline>,
+    Query(query): Query<LabelAuthorityQuery>,
+) -> impl IntoResponse {
+    let stream_id = match parse_stream_id_hex(&query.label) {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+
+    let descriptor = pipeline.label_authority_descriptor(stream_id).await;
+    (StatusCode::OK, Json(descriptor)).into_response()
 }
 
 async fn handle_schema_descriptor(
@@ -386,6 +433,16 @@ async fn handle_checkpoint_range(
             (StatusCode::BAD_REQUEST, err.to_string()).into_response()
         }
     }
+}
+
+fn parse_realm_id_hex(input: &str) -> Result<RealmId, String> {
+    let bytes = hex::decode(input).map_err(|err| format!("invalid realm_id: {err}"))?;
+    RealmId::from_slice(&bytes).map_err(|err| format!("invalid realm_id length: {err}"))
+}
+
+fn parse_stream_id_hex(input: &str) -> Result<StreamId, String> {
+    let bytes = hex::decode(input).map_err(|err| format!("invalid stream identifier: {err}"))?;
+    StreamId::from_slice(&bytes).map_err(|err| format!("invalid stream identifier length: {err}"))
 }
 
 fn cbor_response<T>(value: &T) -> Result<Response>

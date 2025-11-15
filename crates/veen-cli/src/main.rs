@@ -372,7 +372,10 @@ enum Command {
     Cap(CapCommand),
     /// Federation and authority helpers.
     #[command(subcommand)]
-    Authority(AuthorityCommand),
+    Fed(FedCommand),
+    /// Label helpers.
+    #[command(subcommand)]
+    Label(LabelCommand),
     /// Label classification helpers.
     #[command(subcommand, name = "label-class")]
     LabelClass(LabelClassCommand),
@@ -497,9 +500,24 @@ enum CrdtCommand {
 }
 
 #[derive(Subcommand)]
-enum AuthorityCommand {
+enum FedCommand {
+    /// Federation authority helpers.
+    #[command(subcommand)]
+    Authority(FedAuthorityCommand),
+}
+
+#[derive(Subcommand)]
+enum FedAuthorityCommand {
     /// Publish an authority record for a stream.
-    Set(AuthoritySetArgs),
+    Publish(FedAuthorityPublishArgs),
+    /// Show the active authority record for a stream.
+    Show(FedAuthorityShowArgs),
+}
+
+#[derive(Subcommand)]
+enum LabelCommand {
+    /// Inspect label authority information.
+    Authority(LabelAuthorityArgs),
 }
 
 #[derive(Subcommand)]
@@ -892,7 +910,7 @@ struct CapAuthorizeArgs {
 }
 
 #[derive(Args)]
-struct AuthoritySetArgs {
+struct FedAuthorityPublishArgs {
     #[arg(long)]
     hub: String,
     #[arg(long)]
@@ -911,12 +929,36 @@ struct AuthoritySetArgs {
     ttl: Option<u64>,
     #[arg(long)]
     ts: Option<u64>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum AuthorityPolicyValue {
     SinglePrimary,
     MultiPrimary,
+}
+
+#[derive(Args)]
+struct FedAuthorityShowArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long, value_name = "HEX32")]
+    realm: String,
+    #[arg(long)]
+    stream: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct LabelAuthorityArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long, value_name = "HEX32")]
+    label: String,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -1428,6 +1470,34 @@ struct RemoteHubRoleStream {
 }
 
 #[derive(Debug, Deserialize)]
+struct RemoteAuthorityRecordDescriptor {
+    ok: bool,
+    realm_id: String,
+    stream_id: String,
+    primary_hub: Option<String>,
+    replica_hubs: Vec<String>,
+    policy: String,
+    ts: u64,
+    ttl: u64,
+    expires_at: Option<u64>,
+    active_now: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteLabelAuthorityDescriptor {
+    ok: bool,
+    label: String,
+    realm_id: Option<String>,
+    stream_id: String,
+    policy: String,
+    primary_hub: Option<String>,
+    replica_hubs: Vec<String>,
+    local_hub_id: String,
+    #[serde(rename = "local_is_authorized")]
+    local_is_authorized: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct RemoteHealthStatus {
     ok: bool,
     #[serde(with = "humantime_serde")]
@@ -1719,8 +1789,14 @@ async fn run_cli() -> Result<()> {
             CapCommand::Issue(args) => handle_cap_issue(args).await,
             CapCommand::Authorize(args) => handle_cap_authorize(args).await,
         },
-        Command::Authority(cmd) => match cmd {
-            AuthorityCommand::Set(args) => handle_authority_set(args).await,
+        Command::Fed(cmd) => match cmd {
+            FedCommand::Authority(sub) => match sub {
+                FedAuthorityCommand::Publish(args) => handle_fed_authority_publish(args).await,
+                FedAuthorityCommand::Show(args) => handle_fed_authority_show(args).await,
+            },
+        },
+        Command::Label(cmd) => match cmd {
+            LabelCommand::Authority(args) => handle_label_authority(args).await,
         },
         Command::LabelClass(cmd) => match cmd {
             LabelClassCommand::Set(args) => handle_label_class_set(args).await,
@@ -3118,18 +3194,26 @@ async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
         process::exit(4);
     }
 
+    let profile_id = match profile_id {
+        Some(value) => value,
+        None => {
+            emit_cli_error(
+                "E.PROFILE",
+                Some("hub did not provide a profile identifier"),
+                use_json,
+            );
+            process::exit(4);
+        }
+    };
+
     if use_json {
         let mut root = JsonMap::new();
         root.insert("ok".to_string(), JsonValue::Bool(ok));
         root.insert("version".to_string(), JsonValue::String(version));
-        match profile_id {
-            Some(value) => {
-                root.insert("profile_id".to_string(), JsonValue::String(value));
-            }
-            None => {
-                root.insert("profile_id".to_string(), JsonValue::Null);
-            }
-        }
+        root.insert(
+            "profile_id".to_string(),
+            JsonValue::String(profile_id.clone()),
+        );
         root.insert("hub_id".to_string(), JsonValue::String(hub_id));
         let mut feature_map = JsonMap::new();
         feature_map.insert("core".to_string(), JsonValue::Bool(features.core));
@@ -3149,10 +3233,7 @@ async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
         );
     } else {
         println!("version: {version}");
-        match profile_id {
-            Some(value) => println!("profile_id: {value}"),
-            None => println!("profile_id: (none)"),
-        }
+        println!("profile_id: {profile_id}");
         println!("hub_id: {hub_id}");
         println!("features:");
         println!("  core: {}", features.core);
@@ -3269,13 +3350,13 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
             serde_json::to_string_pretty(&JsonValue::Object(root))?
         );
     } else {
-        println!("role: {role}");
-        println!("hub_id: {hub_id}");
         if let Some(ref stream) = stream_info {
+            println!("hub_id: {hub_id}");
+            println!("role: {role}");
             let realm_out = stream
                 .realm_id
                 .clone()
-                .unwrap_or_else(|| "none".to_string());
+                .unwrap_or_else(|| "unspecified".to_string());
             println!("realm_id: {realm_out}");
             println!("stream_id: {}", stream.stream_id);
             println!("label: {}", stream.label);
@@ -3286,6 +3367,9 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
                 .unwrap_or_else(|| "none".to_string());
             println!("primary_hub: {primary}");
             println!("local_is_primary: {}", stream.local_is_primary);
+        } else {
+            println!("role: {role}");
+            println!("hub_id: {hub_id}");
         }
     }
 
@@ -4150,43 +4234,61 @@ struct SignedEnvelope<T> {
 const ADMIN_SIGNING_DOMAIN: &str = "veen/admin";
 const WALLET_TRANSFER_DOMAIN: &str = "veen/cli-wallet-transfer";
 
-async fn handle_authority_set(args: AuthoritySetArgs) -> Result<()> {
+async fn handle_fed_authority_publish(args: FedAuthorityPublishArgs) -> Result<()> {
     match parse_hub_reference(&args.hub)? {
-        HubReference::Remote(client) => handle_authority_set_remote(client, args).await,
+        HubReference::Remote(client) => handle_fed_authority_publish_remote(client, args).await,
         HubReference::Local(_) => {
-            bail_usage!("authority set requires an HTTP hub endpoint (e.g. http://host:port)")
+            bail_usage!(
+                "fed authority publish requires an HTTP hub endpoint (e.g. http://host:port)"
+            )
         }
     }
 }
 
-async fn handle_authority_set_remote(client: HubHttpClient, args: AuthoritySetArgs) -> Result<()> {
-    let signing_key = load_signing_key_from_dir(&args.signer).await?;
-    let realm_id = RealmId::derive(&args.realm);
-    let stream_id = cap_stream_id_from_label(&args.stream)
-        .with_context(|| format!("deriving stream identifier for {}", args.stream))?;
-    let primary_hub = parse_hub_id_hex(&args.primary_hub)?;
-    let mut replica_hubs = Vec::new();
-    for hub in &args.replica_hubs {
-        replica_hubs.push(parse_hub_id_hex(hub)?);
+async fn handle_fed_authority_publish_remote(
+    client: HubHttpClient,
+    args: FedAuthorityPublishArgs,
+) -> Result<()> {
+    let FedAuthorityPublishArgs {
+        hub: _,
+        signer,
+        realm,
+        stream,
+        policy,
+        primary_hub,
+        replica_hubs,
+        ttl,
+        ts,
+        json,
+    } = args;
+
+    let signing_key = load_signing_key_from_dir(&signer).await?;
+    let realm_id = parse_realm_id_hex(&realm)?;
+    let stream_id = cap_stream_id_from_label(&stream)
+        .with_context(|| format!("deriving stream identifier for {stream}"))?;
+    let primary_hub = parse_hub_id_hex(&primary_hub)?;
+    let mut replica_ids = Vec::new();
+    for hub in &replica_hubs {
+        replica_ids.push(parse_hub_id_hex(hub)?);
     }
 
-    if matches!(args.policy, AuthorityPolicyValue::MultiPrimary) && replica_hubs.is_empty() {
+    if matches!(policy, AuthorityPolicyValue::MultiPrimary) && replica_ids.is_empty() {
         bail_usage!("multi-primary policy requires at least one replica hub");
     }
 
-    let policy = match args.policy {
+    let policy = match policy {
         AuthorityPolicyValue::SinglePrimary => AuthorityPolicy::SinglePrimary,
         AuthorityPolicyValue::MultiPrimary => AuthorityPolicy::MultiPrimary,
     };
 
-    let ttl = args.ttl.unwrap_or(0);
-    let ts = args.ts.unwrap_or(current_unix_timestamp()?);
+    let ttl = ttl.unwrap_or(0);
+    let ts = ts.unwrap_or(current_unix_timestamp()?);
 
     let record = AuthorityRecord {
         realm_id,
         stream_id,
         primary_hub,
-        replica_hubs,
+        replica_hubs: replica_ids,
         policy,
         ts,
         ttl,
@@ -4195,13 +4297,183 @@ async fn handle_authority_set_remote(client: HubHttpClient, args: AuthoritySetAr
     let payload = encode_signed_envelope(schema_fed_authority(), &record, &signing_key)?;
     submit_signed_payload(&client, "/authority", &payload).await?;
 
-    println!("published authority record");
-    println!("  realm: {}", args.realm);
-    println!("  stream: {}", args.stream);
-    println!("  policy: {:?}", args.policy);
-    println!("  ttl: {}", ttl);
-    log_cli_goal("CLI.FED1.AUTHORITY_SET");
+    let realm_hex = hex::encode(record.realm_id.as_ref());
+    let stream_hex = hex::encode(record.stream_id.as_ref());
+    let descriptor = fetch_authority_descriptor(&client, &realm_hex, &stream_hex).await?;
+    render_authority_record(&descriptor, json_output_enabled(json));
+    log_cli_goal("CLI.FED1.AUTHORITY_PUBLISH");
     Ok(())
+}
+
+async fn handle_fed_authority_show(args: FedAuthorityShowArgs) -> Result<()> {
+    let FedAuthorityShowArgs {
+        hub,
+        realm,
+        stream,
+        json,
+    } = args;
+
+    let client = match parse_hub_reference(&hub)? {
+        HubReference::Remote(client) => client,
+        HubReference::Local(_) => {
+            bail_usage!("fed authority show requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    };
+
+    let realm_id = parse_realm_id_hex(&realm)?;
+    let stream_id = cap_stream_id_from_label(&stream)
+        .with_context(|| format!("deriving stream identifier for {stream}"))?;
+    let realm_hex = hex::encode(realm_id.as_ref());
+    let stream_hex = hex::encode(stream_id.as_ref());
+    let descriptor = fetch_authority_descriptor(&client, &realm_hex, &stream_hex).await?;
+    render_authority_record(&descriptor, json_output_enabled(json));
+    log_cli_goal("CLI.FED1.AUTHORITY_SHOW");
+    Ok(())
+}
+
+async fn handle_label_authority(args: LabelAuthorityArgs) -> Result<()> {
+    let LabelAuthorityArgs { hub, label, json } = args;
+
+    let client = match parse_hub_reference(&hub)? {
+        HubReference::Remote(client) => client,
+        HubReference::Local(_) => {
+            bail_usage!("label authority requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    };
+
+    let label_bytes = hex::decode(&label)
+        .map_err(|err| CliUsageError::new(format!("label must be hex encoded: {err}")))?;
+    let stream_id = StreamId::from_slice(&label_bytes).map_err(|err| {
+        CliUsageError::new(format!("label must encode a 32-byte identifier: {err}"))
+    })?;
+    let label_hex = hex::encode(stream_id.as_ref());
+    let descriptor = fetch_label_authority_descriptor(&client, &label_hex).await?;
+    render_label_authority(&descriptor, json_output_enabled(json));
+    log_cli_goal("CLI.AUTH1.LABEL_AUTHORITY");
+    Ok(())
+}
+
+async fn fetch_authority_descriptor(
+    client: &HubHttpClient,
+    realm_hex: &str,
+    stream_hex: &str,
+) -> Result<RemoteAuthorityRecordDescriptor> {
+    client
+        .get_json(
+            "/authority_view",
+            &[
+                ("realm_id", realm_hex.to_string()),
+                ("stream_id", stream_hex.to_string()),
+            ],
+        )
+        .await
+}
+
+async fn fetch_label_authority_descriptor(
+    client: &HubHttpClient,
+    label_hex: &str,
+) -> Result<RemoteLabelAuthorityDescriptor> {
+    client
+        .get_json("/label_authority", &[("label", label_hex.to_string())])
+        .await
+}
+
+fn render_authority_record(descriptor: &RemoteAuthorityRecordDescriptor, use_json: bool) {
+    if !descriptor.ok {
+        emit_cli_error(
+            "E.PROFILE",
+            Some("hub declined to provide authority information"),
+            use_json,
+        );
+        process::exit(4);
+    }
+
+    if use_json {
+        let output = json!({
+            "ok": true,
+            "realm_id": descriptor.realm_id,
+            "stream_id": descriptor.stream_id,
+            "primary_hub": descriptor.primary_hub,
+            "replica_hubs": descriptor.replica_hubs,
+            "policy": descriptor.policy,
+            "ts": descriptor.ts,
+            "ttl": descriptor.ttl,
+            "expires_at": descriptor.expires_at,
+            "active_now": descriptor.active_now,
+        });
+        match serde_json::to_string_pretty(&output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => println!("{output}"),
+        }
+    } else {
+        let primary = descriptor
+            .primary_hub
+            .clone()
+            .unwrap_or_else(|| "none".to_string());
+        let replicas = if descriptor.replica_hubs.is_empty() {
+            "[]".to_string()
+        } else {
+            format!("[{}]", descriptor.replica_hubs.join(","))
+        };
+        let expires = descriptor
+            .expires_at
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "0".to_string());
+        println!("realm_id: {}", descriptor.realm_id);
+        println!("stream_id: {}", descriptor.stream_id);
+        println!("primary_hub: {primary}");
+        println!("replica_hubs: {replicas}");
+        println!("policy: {}", descriptor.policy);
+        println!("ts: {}", descriptor.ts);
+        println!("ttl: {}", descriptor.ttl);
+        println!("expires_at: {expires}");
+        println!("active_now: {}", descriptor.active_now);
+    }
+}
+
+fn render_label_authority(descriptor: &RemoteLabelAuthorityDescriptor, use_json: bool) {
+    if !descriptor.ok {
+        emit_cli_error(
+            "E.PROFILE",
+            Some("hub declined to provide label authority information"),
+            use_json,
+        );
+        process::exit(4);
+    }
+
+    if use_json {
+        let output = json!({
+            "ok": true,
+            "label": descriptor.label,
+            "realm_id": descriptor.realm_id,
+            "stream_id": descriptor.stream_id,
+            "policy": descriptor.policy,
+            "primary_hub": descriptor.primary_hub,
+            "replica_hubs": descriptor.replica_hubs,
+            "local_hub_id": descriptor.local_hub_id,
+            "locally_authorized": descriptor.local_is_authorized,
+        });
+        match serde_json::to_string_pretty(&output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => println!("{output}"),
+        }
+    } else {
+        let realm_display = descriptor
+            .realm_id
+            .clone()
+            .unwrap_or_else(|| "unspecified".to_string());
+        let primary = descriptor
+            .primary_hub
+            .clone()
+            .unwrap_or_else(|| "none".to_string());
+        println!("label: {}", descriptor.label);
+        println!("realm_id: {realm_display}");
+        println!("stream_id: {}", descriptor.stream_id);
+        println!("policy: {}", descriptor.policy);
+        println!("primary_hub: {primary}");
+        println!("local_hub_id: {}", descriptor.local_hub_id);
+        println!("locally_authorized: {}", descriptor.local_is_authorized);
+    }
 }
 
 fn encode_signed_envelope<T>(
@@ -5519,7 +5791,9 @@ mod tests {
     use ed25519_dalek::{Signature, Verifier};
     use hyper::body::to_bytes;
     use hyper::service::{make_service_fn, service_fn};
-    use hyper::{Body, Request as HyperRequest, Response as HyperResponse, Server, StatusCode};
+    use hyper::{
+        Body, Method, Request as HyperRequest, Response as HyperResponse, Server, StatusCode,
+    };
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
     use std::convert::Infallible;
@@ -5938,25 +6212,103 @@ mod tests {
         })
         .await?;
 
-        let (url, mut body_rx, server) = spawn_cbor_capture_server("/authority").await?;
-        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
+        let realm_id = RealmId::derive("default");
+        let realm_hex = hex::encode(realm_id.as_ref());
         let primary_hex = hex::encode([0x11u8; HUB_ID_LEN]);
         let replica_hex = hex::encode([0x22u8; HUB_ID_LEN]);
-        let args = AuthoritySetArgs {
+        let stream_name = "fed/chat".to_string();
+        let stream_id = cap_stream_id_from_label(&stream_name)?;
+        let stream_hex = hex::encode(stream_id.as_ref());
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let (tx, mut body_rx) = mpsc::channel(1);
+        let response_realm = realm_hex.clone();
+        let response_stream = stream_hex.clone();
+        let response_primary = primary_hex.clone();
+        let response_replica = replica_hex.clone();
+        let service = make_service_fn(move |_| {
+            let tx = tx.clone();
+            let response_realm = response_realm.clone();
+            let response_stream = response_stream.clone();
+            let response_primary = response_primary.clone();
+            let response_replica = response_replica.clone();
+            async move {
+                Ok::<_, Infallible>(service_fn(move |mut req: HyperRequest<Body>| {
+                    let tx = tx.clone();
+                    let response_realm = response_realm.clone();
+                    let response_stream = response_stream.clone();
+                    let response_primary = response_primary.clone();
+                    let response_replica = response_replica.clone();
+                    async move {
+                        match (req.method(), req.uri().path()) {
+                            (&Method::POST, "/authority") => {
+                                let body = to_bytes(req.body_mut()).await.unwrap().to_vec();
+                                tx.send(body).await.unwrap();
+                                Ok::<_, Infallible>(
+                                    HyperResponse::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Body::from("null"))
+                                        .unwrap(),
+                                )
+                            }
+                            (&Method::GET, "/authority_view") => {
+                                let payload = json!({
+                                    "ok": true,
+                                    "realm_id": response_realm,
+                                    "stream_id": response_stream,
+                                    "primary_hub": response_primary,
+                                    "replica_hubs": [response_replica],
+                                    "policy": "single-primary",
+                                    "ts": 1_234_567u64,
+                                    "ttl": 3_600u64,
+                                    "expires_at": 1_238_167u64,
+                                    "active_now": true,
+                                });
+                                let body = serde_json::to_string(&payload).unwrap();
+                                Ok::<_, Infallible>(
+                                    HyperResponse::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Body::from(body))
+                                        .unwrap(),
+                                )
+                            }
+                            _ => Ok::<_, Infallible>(
+                                HyperResponse::builder()
+                                    .status(StatusCode::NOT_FOUND)
+                                    .body(Body::empty())
+                                    .unwrap(),
+                            ),
+                        }
+                    }
+                }))
+            }
+        });
+        let server = Server::from_tcp(listener)?.serve(service);
+        let handle = tokio::spawn(async move {
+            if let Err(err) = server.await {
+                eprintln!("authority test server error: {err}");
+            }
+        });
+
+        let url = format!("http://{}", addr);
+        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
+        let args = FedAuthorityPublishArgs {
             hub: url.clone(),
             signer: signer_dir.path().to_path_buf(),
-            realm: "default".to_string(),
-            stream: "fed/chat".to_string(),
+            realm: realm_hex,
+            stream: stream_name,
             policy: AuthorityPolicyValue::SinglePrimary,
             primary_hub: primary_hex.clone(),
             replica_hubs: vec![replica_hex.clone()],
             ttl: Some(3_600),
             ts: Some(1_234_567),
+            json: false,
         };
 
-        handle_authority_set_remote(client, args).await?;
+        handle_fed_authority_publish_remote(client, args).await?;
         let body = body_rx.recv().await.expect("payload captured");
-        server.abort();
+        handle.abort();
 
         let envelope: SignedEnvelope<AuthorityRecord> = from_reader(body.as_slice())?;
         assert_eq!(envelope.schema.as_ref(), schema_fed_authority().as_slice());
