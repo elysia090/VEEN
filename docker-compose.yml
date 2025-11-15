@@ -1,0 +1,27 @@
+version: "3.9"
+
+services:
+  hub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: veen-hub:local
+    restart: unless-stopped
+    ports:
+      - "37411:37411"
+    environment:
+      VEEN_LISTEN: 0.0.0.0:37411
+      VEEN_LOG_LEVEL: info
+      RUST_LOG: info,veen_hub=info
+    volumes:
+      - veen-data:/var/lib/veen
+    healthcheck:
+      test: ["CMD", "veen", "hub", "health", "--hub", "http://127.0.0.1:37411"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  veen-data:
+    driver: local
