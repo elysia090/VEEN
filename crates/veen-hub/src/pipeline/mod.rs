@@ -780,6 +780,75 @@ impl HubPipeline {
         }
     }
 
+    pub async fn readiness_report(&self) -> HubReadinessReport {
+        let mut details = Vec::new();
+        let data_dir = self.storage.data_dir().to_string_lossy().into_owned();
+        let state_dir = self.storage.state_dir();
+        let state_dir_accessible = match fs::metadata(&state_dir).await {
+            Ok(_) => true,
+            Err(err) => {
+                details.push(format!(
+                    "state directory {} not accessible: {err}",
+                    state_dir.display()
+                ));
+                false
+            }
+        };
+
+        let now = current_unix_timestamp();
+        let mut indexes_initialised = true;
+        let authority_readiness = {
+            let guard = self.inner.lock().await;
+            for (stream, runtime) in &guard.streams {
+                let mmr_seq = runtime.mmr.seq();
+                let message_count = runtime.state.messages.len() as u64;
+                if mmr_seq != message_count {
+                    indexes_initialised = false;
+                    details.push(format!(
+                        "stream {stream} MMR seq {mmr_seq} diverges from stored message count {message_count}"
+                    ));
+                }
+            }
+
+            let mut latest_ts: Option<u64> = None;
+            let mut active = 0usize;
+            let mut stale = 0usize;
+            for record in &guard.authority_records {
+                if record.is_active_at(now) {
+                    active += 1;
+                } else {
+                    stale += 1;
+                }
+                latest_ts = Some(match latest_ts {
+                    Some(current) => current.max(record.ts),
+                    None => record.ts,
+                });
+            }
+
+            AuthorityReadiness {
+                ok: active > 0 || stale == 0,
+                active_records: active,
+                stale_records: stale,
+                latest_record_ts: latest_ts,
+            }
+        };
+
+        if !authority_readiness.ok {
+            details.push("no active authority records in view".to_string());
+        }
+
+        let ok = state_dir_accessible && indexes_initialised && authority_readiness.ok;
+
+        HubReadinessReport {
+            ok,
+            data_dir,
+            state_dir_accessible,
+            indexes_initialised,
+            authority_view: authority_readiness,
+            details,
+        }
+    }
+
     pub async fn profile_descriptor(&self) -> HubProfileDescriptor {
         let guard = self.inner.lock().await;
         let features = HubProfileFeatures {
@@ -1313,6 +1382,26 @@ pub struct ObservabilityReport {
     pub hub_public_key: Option<String>,
     pub role: String,
     pub data_dir: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthorityReadiness {
+    pub ok: bool,
+    pub active_records: usize,
+    pub stale_records: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_record_ts: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubReadinessReport {
+    pub ok: bool,
+    pub data_dir: String,
+    pub state_dir_accessible: bool,
+    pub indexes_initialised: bool,
+    pub authority_view: AuthorityReadiness,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2086,6 +2175,7 @@ mod tests {
     use anyhow::Context;
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
+    use serde_json::json;
     use std::net::SocketAddr;
     use std::path::Path;
     use tempfile::tempdir;
@@ -2182,6 +2272,99 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&envelope, &mut buf).unwrap();
         buf
+    }
+
+    #[test]
+    fn readiness_report_ok_for_fresh_state() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let pipeline = init_pipeline(temp.path()).await;
+
+            let report = pipeline.readiness_report().await;
+            assert!(report.ok, "fresh pipeline must be ready");
+            assert!(report.state_dir_accessible);
+            assert!(report.indexes_initialised);
+            assert!(report.details.is_empty());
+            assert!(report.authority_view.ok);
+        });
+    }
+
+    #[test]
+    fn readiness_report_detects_stale_authority() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let pipeline = init_pipeline(temp.path()).await;
+
+            let realm = RealmId::derive("stale");
+            let stream = realm.stream_fed_admin();
+            let record = AuthorityRecord {
+                realm_id: realm,
+                stream_id: stream,
+                primary_hub: HubId::new([0x01; 32]),
+                replica_hubs: Vec::new(),
+                policy: AuthorityPolicy::SinglePrimary,
+                ts: 1,
+                ttl: 1,
+            };
+            let payload = encode_envelope(schema_fed_authority(), record);
+            pipeline.publish_authority(&payload).await.unwrap();
+
+            let report = pipeline.readiness_report().await;
+            assert!(!report.ok, "stale authority view must fail readiness");
+            assert!(!report.authority_view.ok);
+            assert!(report
+                .details
+                .iter()
+                .any(|detail| detail.contains("authority")));
+        });
+    }
+
+    #[test]
+    fn readiness_report_detects_index_divergence() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let overrides = HubConfigOverrides {
+                capability_gating_enabled: Some(false),
+                ..HubConfigOverrides::default()
+            };
+            let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
+            let stream = "core/readiness";
+            allow_stream_for_hub(&pipeline, stream, "ready").await;
+
+            let request = SubmitRequest {
+                stream: stream.to_string(),
+                client_id: hex::encode([0x33; 32]),
+                payload: json!({"ok": true}),
+                attachments: None,
+                auth_ref: None,
+                expires_at: None,
+                schema: None,
+                idem: None,
+                pow_cookie: None,
+            };
+            pipeline.submit(request).await.unwrap();
+
+            {
+                let mut guard = pipeline.inner.lock().await;
+                let runtime = guard.streams.get_mut(stream).expect("stream runtime");
+                let mut dup = runtime
+                    .state
+                    .messages
+                    .last()
+                    .cloned()
+                    .expect("message present");
+                dup.seq += 1;
+                runtime.state.messages.push(dup);
+            }
+
+            let report = pipeline.readiness_report().await;
+            assert!(!report.ok, "divergent indexes must fail readiness");
+            assert!(!report.indexes_initialised);
+            assert!(report.details.iter().any(|detail| detail.contains(stream)));
+        });
     }
 
     #[test]

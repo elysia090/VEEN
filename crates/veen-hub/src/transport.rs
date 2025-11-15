@@ -47,6 +47,7 @@ impl HubServerHandle {
             .route("/bridge", post(handle_bridge))
             .route("/revoke", post(handle_revoke))
             .route("/healthz", get(handle_health))
+            .route("/readyz", get(handle_ready))
             .route("/metrics", get(handle_metrics))
             .route("/profile", get(handle_profile))
             .route("/role", get(handle_role))
@@ -279,6 +280,16 @@ async fn handle_health(State(pipeline): State<HubPipeline>) -> impl IntoResponse
         "data_dir": data_dir,
     });
     (StatusCode::OK, Json(body)).into_response()
+}
+
+async fn handle_ready(State(pipeline): State<HubPipeline>) -> impl IntoResponse {
+    let report = pipeline.readiness_report().await;
+    let status = if report.ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(report)).into_response()
 }
 
 async fn handle_metrics(State(pipeline): State<HubPipeline>) -> impl IntoResponse {
