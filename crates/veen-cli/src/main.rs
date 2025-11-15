@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use ciborium::value::Value as CborValue;
+use ciborium::{de::Error as CborDeError, ser::Error as CborSerError, value::Value as CborValue};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
@@ -97,6 +97,169 @@ const TLS_INFO_FILE: &str = "tls_info.json";
 const ATTACHMENTS_DIR: &str = "attachments";
 
 type JsonMap = serde_json::Map<String, JsonValue>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliExitKind {
+    Usage,
+    Network,
+    Protocol,
+    Hub,
+    Selftest,
+    Other { code: i32, label: &'static str },
+}
+
+impl CliExitKind {
+    fn exit_code(self) -> i32 {
+        match self {
+            CliExitKind::Usage => 1,
+            CliExitKind::Network => 2,
+            CliExitKind::Protocol => 3,
+            CliExitKind::Hub => 4,
+            CliExitKind::Selftest => 5,
+            CliExitKind::Other { code, .. } => code,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            CliExitKind::Usage => "E.USAGE",
+            CliExitKind::Network => "E.NETWORK",
+            CliExitKind::Protocol => "E.PROTOCOL",
+            CliExitKind::Hub => "E.HUB",
+            CliExitKind::Selftest => "E.SELFTEST",
+            CliExitKind::Other { label, .. } => label,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CliUsageError {
+    message: String,
+}
+
+impl CliUsageError {
+    fn new(message: String) -> Self {
+        Self { message }
+    }
+}
+
+impl fmt::Display for CliUsageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for CliUsageError {}
+
+#[derive(Debug)]
+struct HubResponseError {
+    path: String,
+    status: reqwest::StatusCode,
+    body: String,
+}
+
+impl HubResponseError {
+    fn new(path: &str, status: reqwest::StatusCode, body: String) -> Self {
+        Self {
+            path: path.to_string(),
+            status,
+            body,
+        }
+    }
+}
+
+impl fmt::Display for HubResponseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "hub {path} failed with {status}: {body}",
+            path = self.path,
+            status = self.status,
+            body = self.body
+        )
+    }
+}
+
+impl std::error::Error for HubResponseError {}
+
+#[derive(Debug)]
+struct HubOperationError {
+    message: String,
+}
+
+impl HubOperationError {
+    fn new(message: String) -> Self {
+        Self { message }
+    }
+}
+
+impl fmt::Display for HubOperationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for HubOperationError {}
+
+#[derive(Debug)]
+struct SelftestFailure {
+    inner: anyhow::Error,
+}
+
+impl SelftestFailure {
+    fn new(inner: anyhow::Error) -> Self {
+        Self { inner }
+    }
+}
+
+impl fmt::Display for SelftestFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "self-test failure: {}", self.inner)
+    }
+}
+
+impl std::error::Error for SelftestFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.inner.as_ref())
+    }
+}
+
+#[derive(Debug)]
+struct ProtocolError {
+    message: String,
+}
+
+impl ProtocolError {
+    fn new(message: String) -> Self {
+        Self { message }
+    }
+}
+
+impl fmt::Display for ProtocolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for ProtocolError {}
+
+macro_rules! bail_usage {
+    ($($arg:tt)*) => {{
+        return Err(anyhow::Error::new(CliUsageError::new(format!($($arg)*))));
+    }};
+}
+
+macro_rules! bail_hub {
+    ($($arg:tt)*) => {{
+        return Err(anyhow::Error::new(HubOperationError::new(format!($($arg)*))));
+    }};
+}
+
+macro_rules! bail_protocol {
+    ($($arg:tt)*) => {{
+        return Err(anyhow::Error::new(ProtocolError::new(format!($($arg)*))));
+    }};
+}
 
 #[derive(Debug, Clone, Default, Args)]
 struct GlobalOptions {
@@ -1086,7 +1249,7 @@ impl HubRuntimeState {
             foreground,
         } = ctx;
         if self.running {
-            bail!("hub in {} is already marked as running", data_dir.display());
+            bail_usage!("hub in {} is already marked as running", data_dir.display());
         }
 
         self.data_dir = data_dir.to_string_lossy().into_owned();
@@ -1504,7 +1667,21 @@ struct ClientRotationRecord {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    let exit_code = match run_cli().await {
+        Ok(()) => 0,
+        Err(err) => {
+            let classification = classify_error(&err);
+            let detail = err.to_string();
+            let use_json = json_output_enabled(false);
+            emit_cli_error(classification.label(), Some(&detail), use_json);
+            classification.exit_code()
+        }
+    };
+    process::exit(exit_code);
+}
+
+async fn run_cli() -> Result<()> {
     let Cli { global, command } = Cli::parse();
     set_global_options(global);
     init_tracing();
@@ -1604,6 +1781,67 @@ async fn main() -> Result<()> {
             SelftestCommand::All => handle_selftest_all().await,
         },
     }
+}
+
+struct ErrorClassification {
+    kind: CliExitKind,
+}
+
+impl ErrorClassification {
+    fn new(kind: CliExitKind) -> Self {
+        Self { kind }
+    }
+
+    fn exit_code(&self) -> i32 {
+        self.kind.exit_code()
+    }
+
+    fn label(&self) -> &'static str {
+        self.kind.label()
+    }
+}
+
+fn classify_error(err: &anyhow::Error) -> ErrorClassification {
+    if error_chain_contains::<CliUsageError>(err) {
+        return ErrorClassification::new(CliExitKind::Usage);
+    }
+    if error_chain_contains::<SelftestFailure>(err) {
+        return ErrorClassification::new(CliExitKind::Selftest);
+    }
+    if error_chain_contains::<HubResponseError>(err)
+        || error_chain_contains::<HubOperationError>(err)
+    {
+        return ErrorClassification::new(CliExitKind::Hub);
+    }
+    if let Some(req_err) = find_reqwest_error(err) {
+        if req_err.is_connect() || req_err.is_timeout() || req_err.is_request() {
+            return ErrorClassification::new(CliExitKind::Network);
+        }
+    }
+    if error_chain_contains::<ProtocolError>(err)
+        || error_chain_contains::<serde_json::Error>(err)
+        || error_chain_contains::<CborDeError<std::io::Error>>(err)
+        || error_chain_contains::<CborSerError<std::io::Error>>(err)
+    {
+        return ErrorClassification::new(CliExitKind::Protocol);
+    }
+
+    ErrorClassification::new(CliExitKind::Other {
+        code: 70,
+        label: "E.CLI",
+    })
+}
+
+fn error_chain_contains<T>(err: &anyhow::Error) -> bool
+where
+    T: std::error::Error + 'static,
+{
+    err.chain().any(|cause| cause.is::<T>())
+}
+
+fn find_reqwest_error(err: &anyhow::Error) -> Option<&reqwest::Error> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
 }
 
 async fn handle_k8s_authority(args: K8sAuthorityArgs) -> Result<()> {
@@ -2344,7 +2582,7 @@ async fn run_hub_foreground(args: HubStartArgs) -> Result<()> {
             .await
             .with_context(|| format!("checking config {}", config.display()))?
         {
-            bail!("config file {} does not exist", config.display());
+            bail_usage!("config file {} does not exist", config.display());
         }
     }
 
@@ -2461,7 +2699,7 @@ async fn spawn_background_hub(args: &HubStartArgs) -> Result<()> {
         .try_wait()
         .context("checking hub process status after spawn")?
     {
-        bail!("hub process exited immediately with status {status}");
+        bail_hub!("hub process exited immediately with status {status}");
     }
     drop(child);
 
@@ -2498,7 +2736,7 @@ async fn wait_for_hub_ready(data_dir: &Path) -> Result<HubRuntimeState> {
         }
         sleep(Duration::from_millis(100)).await;
     }
-    bail!(
+    bail_hub!(
         "hub process in {} did not report ready state within timeout",
         data_dir.display()
     );
@@ -2538,7 +2776,7 @@ async fn signal_and_wait_for_exit(pid: u32) -> Result<()> {
         match kill(pid, None) {
             Ok(()) => {
                 if Instant::now() >= deadline {
-                    bail!("hub process {raw_pid} did not exit within 30 seconds");
+                    bail_hub!("hub process {raw_pid} did not exit within 30 seconds");
                 }
                 sleep(Duration::from_millis(100)).await;
             }
@@ -2556,13 +2794,13 @@ async fn signal_and_wait_for_exit(pid: u32) -> Result<()> {
 
 #[cfg(not(unix))]
 async fn signal_and_wait_for_exit(_pid: u32) -> Result<()> {
-    bail!("hub stop is not supported on this platform");
+    bail_hub!("hub stop is not supported on this platform");
 }
 
 async fn handle_hub_stop(args: HubStopArgs) -> Result<()> {
     let state = load_hub_state(&args.data_dir).await?;
     if !state.running {
-        bail!(
+        bail_usage!(
             "hub in {} is not marked as running",
             args.data_dir.display()
         );
@@ -2700,7 +2938,7 @@ async fn handle_hub_verify_rotation(args: HubVerifyRotationArgs) -> Result<()> {
     let checkpoint: Checkpoint = read_cbor_file(&args.checkpoint).await?;
 
     if !checkpoint.has_valid_version() {
-        bail!(
+        bail_protocol!(
             "checkpoint declares unsupported version {} (expected {})",
             checkpoint.ver,
             CHECKPOINT_VERSION
@@ -2724,7 +2962,7 @@ async fn handle_hub_verify_rotation(args: HubVerifyRotationArgs) -> Result<()> {
         .context("checkpoint does not contain witness signatures")?;
 
     if witnesses.len() < 2 {
-        bail!(
+        bail_protocol!(
             "expected at least two witness signatures (old and new hub keys); found {}",
             witnesses.len()
         );
@@ -2742,10 +2980,10 @@ async fn handle_hub_verify_rotation(args: HubVerifyRotationArgs) -> Result<()> {
     }
 
     if !old_verified {
-        bail!("no witness signature validated with the supplied old hub key");
+        bail_protocol!("no witness signature validated with the supplied old hub key");
     }
     if !new_verified {
-        bail!("no witness signature validated with the supplied new hub key");
+        bail_protocol!("no witness signature validated with the supplied new hub key");
     }
 
     println!(
@@ -2856,7 +3094,7 @@ async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
 async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
     let client = match parse_hub_reference(&args.hub)? {
         HubReference::Local(_) => {
-            bail!("hub profile requires an HTTP hub endpoint (e.g. http://host:port)");
+            bail_usage!("hub profile requires an HTTP hub endpoint (e.g. http://host:port)");
         }
         HubReference::Remote(client) => client,
     };
@@ -2940,7 +3178,7 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
 
     let client = match parse_hub_reference(&hub)? {
         HubReference::Local(_) => {
-            bail!("hub role requires an HTTP hub endpoint (e.g. http://host:port)");
+            bail_usage!("hub role requires an HTTP hub endpoint (e.g. http://host:port)");
         }
         HubReference::Remote(client) => client,
     };
@@ -3058,7 +3296,7 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
 async fn handle_hub_checkpoint_latest(args: HubCheckpointLatestArgs) -> Result<Checkpoint> {
     let client = match parse_hub_reference(&args.hub)? {
         HubReference::Local(_) => {
-            bail!("checkpoint commands require an HTTP hub endpoint (e.g. http://host:port)")
+            bail_usage!("checkpoint commands require an HTTP hub endpoint (e.g. http://host:port)")
         }
         HubReference::Remote(client) => client,
     };
@@ -3072,7 +3310,7 @@ async fn handle_hub_checkpoint_latest(args: HubCheckpointLatestArgs) -> Result<C
 async fn handle_hub_checkpoint_range(args: HubCheckpointRangeArgs) -> Result<Vec<Checkpoint>> {
     let client = match parse_hub_reference(&args.hub)? {
         HubReference::Local(_) => {
-            bail!("checkpoint commands require an HTTP hub endpoint (e.g. http://host:port)")
+            bail_usage!("checkpoint commands require an HTTP hub endpoint (e.g. http://host:port)")
         }
         HubReference::Remote(client) => client,
     };
@@ -3128,7 +3366,7 @@ async fn handle_hub_tls_info(args: HubTlsInfoArgs) -> Result<()> {
         .await
         .with_context(|| format!("checking TLS metadata in {}", tls_info_path.display()))?
     {
-        bail!(
+        bail_usage!(
             "hub at {} does not expose TLS metadata; start the hub at least once to bootstrap",
             hub.display()
         );
@@ -3383,10 +3621,10 @@ async fn handle_send_local(data_dir: PathBuf, args: SendArgs) -> Result<()> {
 
     if let Some(ref schema) = args.schema {
         if schema.len() != 32 && schema.len() != 64 {
-            bail!("schema identifiers must be 32 or 64 hex characters");
+            bail_usage!("schema identifiers must be 32 or 64 hex characters");
         }
         if !schema.chars().all(|c| c.is_ascii_hexdigit()) {
-            bail!("schema identifiers must be hexadecimal");
+            bail_usage!("schema identifiers must be hexadecimal");
         }
     }
 
@@ -3395,7 +3633,7 @@ async fn handle_send_local(data_dir: PathBuf, args: SendArgs) -> Result<()> {
             .await
             .with_context(|| format!("checking capability file {}", cap_path.display()))?
         {
-            bail!("capability file {} does not exist", cap_path.display());
+            bail_usage!("capability file {} does not exist", cap_path.display());
         }
     }
 
@@ -3501,7 +3739,7 @@ async fn handle_send_local(data_dir: PathBuf, args: SendArgs) -> Result<()> {
 
 async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()> {
     if args.pow_challenge.is_some() && args.pow_difficulty.is_none() {
-        bail!("--pow-challenge requires --pow-difficulty");
+        bail_usage!("--pow-challenge requires --pow-difficulty");
     }
 
     let identity_path = args.client.join("identity_card.pub");
@@ -3521,10 +3759,10 @@ async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()>
 
     if let Some(ref schema) = args.schema {
         if schema.len() != 32 && schema.len() != 64 {
-            bail!("schema identifiers must be 32 or 64 hex characters");
+            bail_usage!("schema identifiers must be 32 or 64 hex characters");
         }
         if !schema.chars().all(|c| c.is_ascii_hexdigit()) {
-            bail!("schema identifiers must be hexadecimal");
+            bail_usage!("schema identifiers must be hexadecimal");
         }
     }
 
@@ -3564,14 +3802,14 @@ async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()>
 
     let pow_cookie = if let Some(difficulty) = args.pow_difficulty {
         if difficulty == 0 {
-            bail!("--pow-difficulty must be greater than zero");
+            bail_usage!("--pow-difficulty must be greater than zero");
         }
 
         let challenge = if let Some(ref hex_value) = args.pow_challenge {
             let bytes = hex::decode(hex_value.trim())
                 .with_context(|| format!("decoding pow challenge {hex_value}"))?;
             if bytes.is_empty() {
-                bail!("--pow-challenge must not be empty");
+                bail_usage!("--pow-challenge must not be empty");
             }
             bytes
         } else {
@@ -3639,7 +3877,7 @@ fn solve_pow_cookie(challenge: Vec<u8>, difficulty: u8) -> Result<PowCookie> {
             return Ok(cookie);
         }
         if cookie.nonce == u64::MAX {
-            bail!("failed to find proof-of-work nonce (difficulty {difficulty})");
+            bail_hub!("failed to find proof-of-work nonce (difficulty {difficulty})");
         }
         cookie.nonce = cookie.nonce.checked_add(1).expect("nonce overflow checked");
     }
@@ -3774,7 +4012,7 @@ async fn handle_attachment_verify(args: AttachmentVerifyArgs) -> Result<()> {
     let message: StoredMessage = read_json_file(&args.msg).await?;
     let index: usize = args.index as usize;
     if index >= message.attachments.len() {
-        bail!(
+        bail_usage!(
             "message bundle {} does not have an attachment at index {}",
             args.msg.display(),
             args.index
@@ -3788,7 +4026,7 @@ async fn handle_attachment_verify(args: AttachmentVerifyArgs) -> Result<()> {
     let digest = compute_digest_hex(&data);
 
     if digest != attachment.digest {
-        bail!(
+        bail_protocol!(
             "attachment digest mismatch: expected {}, computed {}",
             attachment.digest,
             digest
@@ -3805,7 +4043,7 @@ async fn handle_attachment_verify(args: AttachmentVerifyArgs) -> Result<()> {
 
 async fn handle_cap_issue(args: CapIssueArgs) -> Result<()> {
     if args.ttl == 0 {
-        bail!("ttl must be greater than zero seconds");
+        bail_usage!("ttl must be greater than zero seconds");
     }
 
     let issuer_keystore = args.issuer.join("keystore.enc");
@@ -3863,7 +4101,7 @@ async fn handle_cap_issue(args: CapIssueArgs) -> Result<()> {
 async fn handle_cap_authorize(args: CapAuthorizeArgs) -> Result<()> {
     match parse_hub_reference(&args.hub)? {
         HubReference::Local(_) => {
-            bail!("cap authorize requires an HTTP hub endpoint (e.g. http://host:port)")
+            bail_usage!("cap authorize requires an HTTP hub endpoint (e.g. http://host:port)")
         }
         HubReference::Remote(client) => handle_cap_authorize_remote(client, args).await,
     }
@@ -3889,7 +4127,7 @@ async fn handle_cap_authorize_remote(client: HubHttpClient, args: CapAuthorizeAr
     if response.auth_ref != expected_auth_ref {
         let got_hex = hex::encode(response.auth_ref.as_ref());
         let expected_hex = hex::encode(expected_auth_ref.as_ref());
-        bail!("hub returned mismatched auth_ref {got_hex}; expected {expected_hex}");
+        bail_hub!("hub returned mismatched auth_ref {got_hex}; expected {expected_hex}");
     }
 
     let auth_ref_hex = hex::encode(response.auth_ref.as_ref());
@@ -3916,7 +4154,7 @@ async fn handle_authority_set(args: AuthoritySetArgs) -> Result<()> {
     match parse_hub_reference(&args.hub)? {
         HubReference::Remote(client) => handle_authority_set_remote(client, args).await,
         HubReference::Local(_) => {
-            bail!("authority set requires an HTTP hub endpoint (e.g. http://host:port)")
+            bail_usage!("authority set requires an HTTP hub endpoint (e.g. http://host:port)")
         }
     }
 }
@@ -3933,7 +4171,7 @@ async fn handle_authority_set_remote(client: HubHttpClient, args: AuthoritySetAr
     }
 
     if matches!(args.policy, AuthorityPolicyValue::MultiPrimary) && replica_hubs.is_empty() {
-        bail!("multi-primary policy requires at least one replica hub");
+        bail_usage!("multi-primary policy requires at least one replica hub");
     }
 
     let policy = match args.policy {
@@ -4072,7 +4310,7 @@ async fn handle_label_class_set(args: LabelClassSetArgs) -> Result<()> {
     match parse_hub_reference(&args.hub)? {
         HubReference::Remote(client) => handle_label_class_set_remote(client, args).await,
         HubReference::Local(_) => {
-            bail!("label-class set requires an HTTP hub endpoint (e.g. http://host:port)")
+            bail_usage!("label-class set requires an HTTP hub endpoint (e.g. http://host:port)")
         }
     }
 }
@@ -4120,7 +4358,7 @@ async fn handle_schema_register(args: SchemaRegisterArgs) -> Result<()> {
     match parse_hub_reference(&args.hub)? {
         HubReference::Remote(client) => handle_schema_register_remote(client, args).await,
         HubReference::Local(_) => {
-            bail!("schema register requires an HTTP hub endpoint (e.g. http://host:port)")
+            bail_usage!("schema register requires an HTTP hub endpoint (e.g. http://host:port)")
         }
     }
 }
@@ -4161,7 +4399,7 @@ async fn handle_schema_list(args: SchemaListArgs) -> Result<()> {
     match parse_hub_reference(&args.hub)? {
         HubReference::Remote(client) => handle_schema_list_remote(client).await,
         HubReference::Local(_) => {
-            bail!("schema list requires an HTTP hub endpoint (e.g. http://host:port)")
+            bail_usage!("schema list requires an HTTP hub endpoint (e.g. http://host:port)")
         }
     }
 }
@@ -4207,7 +4445,7 @@ async fn handle_wallet_transfer(args: WalletTransferArgs) -> Result<()> {
     match parse_hub_reference(&args.hub)? {
         HubReference::Remote(client) => handle_wallet_transfer_remote(client, args).await,
         HubReference::Local(_) => {
-            bail!("wallet transfer requires an HTTP hub endpoint (e.g. http://host:port)")
+            bail_usage!("wallet transfer requires an HTTP hub endpoint (e.g. http://host:port)")
         }
     }
 }
@@ -4270,7 +4508,7 @@ async fn handle_revoke_publish(args: RevokePublishArgs) -> Result<()> {
     match parse_hub_reference(&args.hub)? {
         HubReference::Remote(client) => handle_revoke_publish_remote(client, args).await,
         HubReference::Local(_) => {
-            bail!("revoke publish requires an HTTP hub endpoint (e.g. http://host:port)")
+            bail_usage!("revoke publish requires an HTTP hub endpoint (e.g. http://host:port)")
         }
     }
 }
@@ -4339,7 +4577,7 @@ async fn handle_resync_local(data_dir: PathBuf, args: ResyncArgs) -> Result<()> 
 
     if let Some(existing_profile) = &client_state.profile_id {
         if !existing_profile.is_empty() && *existing_profile != profile_id {
-            bail!(
+            bail_usage!(
                 "client profile {} does not match hub profile {}",
                 existing_profile,
                 profile_id
@@ -4402,7 +4640,7 @@ async fn handle_verify_state(args: VerifyStateArgs) -> Result<()> {
         .unwrap_or(0);
 
     if client_seq > hub_seq {
-        bail!(
+        bail_hub!(
             "client sequence {} is ahead of hub {} for stream {}",
             client_seq,
             hub_seq,
@@ -4430,7 +4668,7 @@ async fn handle_explain_error(args: ExplainErrorArgs) -> Result<()> {
         "E.DUP" => "duplicate leaf or message",
         "E.TIME" => "epoch or time-related failure",
         other => {
-            bail!("unknown VEEN error code `{other}`");
+            bail_usage!("unknown VEEN error code `{other}`");
         }
     };
 
@@ -4551,7 +4789,7 @@ async fn handle_crdt_orset_remove(args: CrdtOrsetRemoveArgs) -> Result<()> {
         }
     }
     if !removed {
-        bail!("element {} not present in OR-set", args.elem);
+        bail_usage!("element {} not present in OR-set", args.elem);
     }
     save_orset_state(&data_dir, &args.stream, &state).await?;
     println!(
@@ -4661,7 +4899,7 @@ async fn handle_anchor_publish(args: AnchorPublishArgs) -> Result<()> {
 async fn handle_anchor_verify(args: AnchorVerifyArgs) -> Result<()> {
     let checkpoint: Checkpoint = read_cbor_file(&args.checkpoint).await?;
     if !checkpoint.has_valid_version() {
-        bail!(
+        bail_protocol!(
             "checkpoint declares unsupported version {} (expected {})",
             checkpoint.ver,
             CHECKPOINT_VERSION
@@ -4732,38 +4970,46 @@ async fn handle_retention_show(args: RetentionShowArgs) -> Result<()> {
 
 async fn handle_selftest_core() -> Result<()> {
     println!("running VEEN core self-tests...");
-    let result = veen_selftest::run_core().await;
-    if result.is_ok() {
-        log_cli_goal("CLI.SELFTEST.CORE");
+    match veen_selftest::run_core().await {
+        Ok(()) => {
+            log_cli_goal("CLI.SELFTEST.CORE");
+            Ok(())
+        }
+        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
     }
-    result
 }
 
 async fn handle_selftest_props() -> Result<()> {
     println!("running VEEN property self-tests...");
-    let result = veen_selftest::run_props();
-    if result.is_ok() {
-        log_cli_goal("CLI.SELFTEST.PROPS");
+    match veen_selftest::run_props() {
+        Ok(()) => {
+            log_cli_goal("CLI.SELFTEST.PROPS");
+            Ok(())
+        }
+        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
     }
-    result
 }
 
 async fn handle_selftest_fuzz() -> Result<()> {
     println!("running VEEN fuzz self-tests...");
-    let result = veen_selftest::run_fuzz();
-    if result.is_ok() {
-        log_cli_goal("CLI.SELFTEST.FUZZ");
+    match veen_selftest::run_fuzz() {
+        Ok(()) => {
+            log_cli_goal("CLI.SELFTEST.FUZZ");
+            Ok(())
+        }
+        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
     }
-    result
 }
 
 async fn handle_selftest_all() -> Result<()> {
     println!("running full VEEN self-test suite...");
-    let result = veen_selftest::run_all().await;
-    if result.is_ok() {
-        log_cli_goal("CLI.SELFTEST.ALL");
+    match veen_selftest::run_all().await {
+        Ok(()) => {
+            log_cli_goal("CLI.SELFTEST.ALL");
+            Ok(())
+        }
+        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
     }
-    result
 }
 
 async fn ensure_data_dir_layout(data_dir: &Path) -> Result<()> {
@@ -5162,7 +5408,7 @@ fn validate_stream_proof(
     let computed_leaf = compute_message_leaf_hash(message)?;
     let expected_leaf_hex = hex::encode(computed_leaf.as_bytes());
     if receipt.leaf_hash != expected_leaf_hex {
-        bail!(
+        bail_protocol!(
             "receipt leaf hash mismatch for {}#{}: expected {}, got {}",
             message.stream,
             message.seq,
@@ -5172,7 +5418,7 @@ fn validate_stream_proof(
     }
 
     if proof.leaf_hash != computed_leaf {
-        bail!(
+        bail_protocol!(
             "proof leaf hash mismatch for {}#{}",
             message.stream,
             message.seq
@@ -5185,7 +5431,7 @@ fn validate_stream_proof(
         .with_context(|| format!("parsing mmr_root for {}#{}", message.stream, message.seq))?;
 
     if !proof.verify(&mmr_root) {
-        bail!(
+        bail_protocol!(
             "mmr proof verification failed for {}#{}",
             message.stream,
             message.seq
@@ -5198,7 +5444,7 @@ fn validate_stream_proof(
 fn parse_cap_rate(input: &str) -> Result<CapTokenRate> {
     let parts: Vec<&str> = input.split(',').collect();
     if parts.len() != 2 {
-        bail!("rate must be provided as per_sec,burst");
+        bail_usage!("rate must be provided as per_sec,burst");
     }
     let per_sec = parts[0]
         .trim()
@@ -5217,10 +5463,10 @@ fn ensure_capability_matches(
     stream_id: &StreamId,
 ) -> Result<()> {
     if &token.subject_pk != subject {
-        bail!("capability subject does not match client identity");
+        bail_usage!("capability subject does not match client identity");
     }
     if !token.allow.stream_ids.iter().any(|id| id == stream_id) {
-        bail!(
+        bail_usage!(
             "capability does not permit stream {}; allowed={:?}",
             hex::encode(stream_id.as_ref()),
             token
@@ -5974,7 +6220,7 @@ impl HubReference {
         match self {
             HubReference::Local(path) => Ok(path),
             HubReference::Remote(_) => {
-                bail!("command requires a local hub data directory reference")
+                bail_usage!("command requires a local hub data directory reference")
             }
         }
     }
@@ -6018,7 +6264,9 @@ impl HubHttpClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<failed to decode response>".to_string());
-            bail!("hub GET {path} failed with {status}: {body}");
+            return Err(anyhow::Error::new(HubResponseError::new(
+                path, status, body,
+            )));
         }
         response
             .json::<T>()
@@ -6047,7 +6295,9 @@ impl HubHttpClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<failed to decode response>".to_string());
-            bail!("hub GET {path} failed with {status}: {body}");
+            return Err(anyhow::Error::new(HubResponseError::new(
+                path, status, body,
+            )));
         }
         let bytes = response
             .bytes()
@@ -6076,7 +6326,9 @@ impl HubHttpClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<failed to decode response>".to_string());
-            bail!("hub POST {path} failed with {status}: {body}");
+            return Err(anyhow::Error::new(HubResponseError::new(
+                path, status, body,
+            )));
         }
         response
             .json::<R>()
@@ -6102,7 +6354,9 @@ impl HubHttpClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<failed to decode response>".to_string());
-            bail!("hub POST {path} failed with {status}: {body}");
+            return Err(anyhow::Error::new(HubResponseError::new(
+                path, status, body,
+            )));
         }
         Ok(())
     }
@@ -6123,7 +6377,9 @@ impl HubHttpClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<failed to decode response>".to_string());
-            bail!("hub POST {path} failed with {status}: {body}");
+            return Err(anyhow::Error::new(HubResponseError::new(
+                path, status, body,
+            )));
         }
         Ok(())
     }
@@ -6147,7 +6403,9 @@ impl HubHttpClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<failed to decode response>".to_string());
-            bail!("hub POST {path} failed with {status}: {body}");
+            return Err(anyhow::Error::new(HubResponseError::new(
+                path, status, body,
+            )));
         }
         let bytes = response
             .bytes()
@@ -6185,13 +6443,13 @@ fn resolve_profile_id(profile: Option<String>) -> Result<String> {
         Some(value) => {
             let trimmed = value.trim().to_ascii_lowercase();
             if trimmed.len() != 64 {
-                bail!(
+                bail_usage!(
                     "profile identifier must be 64 hex characters (32 bytes); got {}",
                     trimmed.len()
                 );
             }
             if !trimmed.chars().all(|ch| ch.is_ascii_hexdigit()) {
-                bail!("profile identifier must contain only hexadecimal characters");
+                bail_usage!("profile identifier must contain only hexadecimal characters");
             }
             Ok(trimmed)
         }
@@ -6238,7 +6496,7 @@ async fn read_hub_key_material(data_dir: &Path) -> Result<HubKeyInfo> {
     let material: HubKeyMaterial = read_cbor_file(&key_path).await?;
 
     if material.version != HUB_KEY_VERSION {
-        bail!(
+        bail_usage!(
             "unsupported hub key version {} (expected {})",
             material.version,
             HUB_KEY_VERSION
@@ -6273,7 +6531,7 @@ fn parse_hub_reference(reference: &str) -> Result<HubReference> {
                 return Ok(HubReference::Remote(HubHttpClient::new(url, client)));
             }
             other => {
-                bail!("unsupported hub scheme `{other}`; expected http or https");
+                bail_usage!("unsupported hub scheme `{other}`; expected http or https");
             }
         }
     }
@@ -6369,7 +6627,7 @@ fn parse_hex_key<const N: usize>(input: &str) -> Result<[u8; N]> {
     let data =
         hex::decode(input.trim()).with_context(|| format!("decoding {N}-byte hex string"))?;
     if data.len() != N {
-        bail!(
+        bail_usage!(
             "expected {N} bytes ({} hex chars), got {} bytes",
             N * 2,
             data.len()
@@ -6383,7 +6641,7 @@ async fn ensure_clean_directory(path: &Path) -> Result<()> {
     match fs::metadata(path).await {
         Ok(metadata) => {
             if !metadata.is_dir() {
-                bail!("{} exists and is not a directory", path.display());
+                bail_usage!("{} exists and is not a directory", path.display());
             }
             let mut entries = fs::read_dir(path)
                 .await
@@ -6394,7 +6652,7 @@ async fn ensure_clean_directory(path: &Path) -> Result<()> {
                 .with_context(|| format!("checking contents of {}", path.display()))?
                 .is_some()
             {
-                bail!("refusing to reuse non-empty directory {}", path.display());
+                bail_usage!("refusing to reuse non-empty directory {}", path.display());
             }
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -6414,7 +6672,7 @@ async fn ensure_absent(path: &Path) -> Result<()> {
         .await
         .with_context(|| format!("checking existence of {}", path.display()))?
     {
-        bail!("refusing to overwrite existing file {}", path.display());
+        bail_usage!("refusing to overwrite existing file {}", path.display());
     }
     Ok(())
 }
