@@ -416,7 +416,7 @@ enum Command {
     Selftest(SelftestCommand),
     /// Render Kubernetes manifests for VEEN profiles.
     #[command(subcommand)]
-    K8s(K8sCommand),
+    Kube(KubeCommand),
 }
 
 #[derive(Subcommand)]
@@ -590,15 +590,15 @@ enum SelftestCommand {
 }
 
 #[derive(Subcommand)]
-enum K8sCommand {
+enum KubeCommand {
     /// Render manifests for the authority hub profile.
-    Authority(K8sAuthorityArgs),
+    Authority(KubeAuthorityArgs),
     /// Render manifests for a tenant hub profile.
-    Tenant(K8sTenantArgs),
+    Tenant(KubeTenantArgs),
 }
 
 #[derive(Args)]
-struct K8sAuthorityArgs {
+struct KubeAuthorityArgs {
     /// Universe identifier assigned to the VEEN deployment.
     #[arg(long)]
     universe_id: String,
@@ -635,7 +635,7 @@ struct K8sAuthorityArgs {
 }
 
 #[derive(Args)]
-struct K8sTenantArgs {
+struct KubeTenantArgs {
     /// Tenant identifier used for labels and the namespace default.
     #[arg(long)]
     tenant_id: String,
@@ -1770,9 +1770,9 @@ async fn run_cli() -> Result<()> {
         Command::HubTls(cmd) => match cmd {
             HubTlsCommand::TlsInfo(args) => handle_hub_tls_info(args).await,
         },
-        Command::K8s(cmd) => match cmd {
-            K8sCommand::Authority(args) => handle_k8s_authority(args).await,
-            K8sCommand::Tenant(args) => handle_k8s_tenant(args).await,
+        Command::Kube(cmd) => match cmd {
+            KubeCommand::Authority(args) => handle_kube_authority(args).await,
+            KubeCommand::Tenant(args) => handle_kube_tenant(args).await,
         },
         Command::Selftest(cmd) => match cmd {
             SelftestCommand::Core => handle_selftest_core().await,
@@ -1844,8 +1844,8 @@ fn find_reqwest_error(err: &anyhow::Error) -> Option<&reqwest::Error> {
         .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
 }
 
-async fn handle_k8s_authority(args: K8sAuthorityArgs) -> Result<()> {
-    let K8sAuthorityArgs {
+async fn handle_kube_authority(args: KubeAuthorityArgs) -> Result<()> {
+    let KubeAuthorityArgs {
         universe_id,
         version,
         namespace,
@@ -2007,12 +2007,12 @@ async fn handle_k8s_authority(args: K8sAuthorityArgs) -> Result<()> {
 
     let output = render_yaml_documents(&docs)?;
     print!("{}", output);
-    log_cli_goal("CLI.K8S.AUTHORITY_RENDER");
+    log_cli_goal("CLI.KUBE.AUTHORITY_RENDER");
     Ok(())
 }
 
-async fn handle_k8s_tenant(args: K8sTenantArgs) -> Result<()> {
-    let K8sTenantArgs {
+async fn handle_kube_tenant(args: KubeTenantArgs) -> Result<()> {
+    let KubeTenantArgs {
         tenant_id,
         universe_id,
         version,
@@ -2188,7 +2188,7 @@ async fn handle_k8s_tenant(args: K8sTenantArgs) -> Result<()> {
 
     let output = render_yaml_documents(&docs)?;
     print!("{}", output);
-    log_cli_goal("CLI.K8S.TENANT_RENDER");
+    log_cli_goal("CLI.KUBE.TENANT_RENDER");
     Ok(())
 }
 
