@@ -135,6 +135,51 @@ verification, resynchronisation, overlay management (RPC, CRDT, wallet,
 revocation, schema), and TLS inspection. Run `veen --help` for the complete
 command tree.
 
+### Containerised deployment
+
+The repository ships with a Docker packaging that exposes the hub runtime via
+`docker compose`. The image builds the audited binaries, runs the hub as an
+unprivileged user, and persists receipts, payloads, checkpoints, and state in a
+named volume so the event history remains available for inspection.
+
+1. **Build and start the hub**
+   ```shell
+   docker compose up --build -d
+   ```
+   The service listens on `0.0.0.0:37411` by default, exports an HTTP health
+   endpoint, and is configured with `restart: unless-stopped`.
+2. **Check health or tail logs**
+   ```shell
+   docker compose logs -f hub
+   docker compose ps
+   ```
+   A built-in healthcheck uses `veen hub health` against the container-local
+   endpoint to confirm readiness.
+3. **Run CLI workflows inside the container**
+   Use the shared volume to keep client identities, receipts, and audit
+   artefacts alongside the hub data:
+   ```shell
+   docker compose run --rm hub veen keygen --out /var/lib/veen/clients/alice
+   docker compose exec hub veen send \
+     --hub /var/lib/veen \
+     --client /var/lib/veen/clients/alice \
+     --stream core/main \
+     --body '{"text":"hello-veens"}'
+   docker compose exec hub veen stream \
+     --hub /var/lib/veen \
+     --client /var/lib/veen/clients/alice \
+     --stream core/main \
+     --from 0
+   ```
+   Shut the hub down with `docker compose down` (add `--volumes` to remove the
+   persisted audit log).
+
+Environment variables such as `VEEN_LISTEN`, `VEEN_LOG_LEVEL`, or
+`VEEN_PROFILE_ID` can be overridden in `docker-compose.yml` (or via
+`docker compose run -e`) to adjust listening addresses, logging verbosity, or
+profile identifiers. To supply a custom hub configuration file, mount it into
+the container and set `VEEN_CONFIG_PATH` to the path inside the container.
+
 ## Manual installation
 
 Install the binaries into a traditional Unix layout after building:

@@ -1,0 +1,8 @@
+# Files not needed in the Docker build context
+.git
+.github
+target
+**/target
+**/*.rs.bk
+**/*.swp
+**/*.swo
