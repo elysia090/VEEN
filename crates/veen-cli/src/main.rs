@@ -3843,7 +3843,6 @@ async fn handle_cap_authorize_remote(client: HubHttpClient, args: CapAuthorizeAr
         .verify()
         .map_err(|err| anyhow!("capability token verification failed: {err}"))?;
     let expected_auth_ref = token.auth_ref().context("computing capability auth_ref")?;
-    let expected_hex = hex::encode(expected_auth_ref.as_ref());
     let encoded = token
         .to_cbor()
         .context("serializing capability token for submission")?;
@@ -3853,15 +3852,15 @@ async fn handle_cap_authorize_remote(client: HubHttpClient, args: CapAuthorizeAr
         .await
         .context("authorizing capability with hub")?;
 
-    if response.auth_ref != expected_hex {
-        bail!(
-            "hub returned mismatched auth_ref {}; expected {expected_hex}",
-            response.auth_ref
-        );
+    if response.auth_ref != expected_auth_ref {
+        let got_hex = hex::encode(response.auth_ref.as_ref());
+        let expected_hex = hex::encode(expected_auth_ref.as_ref());
+        bail!("hub returned mismatched auth_ref {got_hex}; expected {expected_hex}");
     }
 
+    let auth_ref_hex = hex::encode(response.auth_ref.as_ref());
     println!("authorised capability");
-    println!("  auth_ref: {}", response.auth_ref);
+    println!("  auth_ref: {}", auth_ref_hex);
     println!("  expires_at: {}", response.expires_at);
     Ok(())
 }
@@ -6093,10 +6092,12 @@ impl HubHttpClient {
                 .unwrap_or_else(|_| "<failed to decode response>".to_string());
             bail!("hub POST {path} failed with {status}: {body}");
         }
-        response
-            .json::<R>()
+        let bytes = response
+            .bytes()
             .await
-            .context("decoding hub response body")
+            .context("reading hub response body")?;
+        let mut cursor = Cursor::new(bytes.as_ref());
+        ciborium::de::from_reader(&mut cursor).context("decoding hub response body")
     }
 }
 

@@ -159,7 +159,21 @@ async fn handle_resync(
 
 async fn handle_authorize(State(pipeline): State<HubPipeline>, body: Bytes) -> impl IntoResponse {
     match pipeline.authorize_capability(&body).await {
-        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(response) => {
+            let mut encoded = Vec::new();
+            if let Err(err) = into_writer(&response, &mut encoded) {
+                tracing::error!(error = ?err, "failed to encode authorize response as CBOR");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to encode authorize response",
+                )
+                    .into_response();
+            }
+            let mut resp = (StatusCode::OK, encoded).into_response();
+            resp.headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/cbor"));
+            resp
+        }
         Err(err) => {
             tracing::warn!(error = ?err, "authorize failed");
             (StatusCode::BAD_REQUEST, err.to_string()).into_response()
