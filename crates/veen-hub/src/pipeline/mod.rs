@@ -956,7 +956,7 @@ impl HubPipeline {
         let selected = active.or_else(|| sorted.first());
 
         let primary_hub =
-            selected.and_then(|record| Some(hex::encode(record.primary_hub.as_ref())));
+            selected.map(|record| hex::encode(record.primary_hub.as_ref()));
         let replica_hubs = selected
             .map(|record| {
                 record

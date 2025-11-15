@@ -3400,28 +3400,26 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&JsonValue::Object(root))?
         );
+    } else if let Some(ref stream) = stream_info {
+        println!("hub_id: {hub_id}");
+        println!("role: {role}");
+        let realm_out = stream
+            .realm_id
+            .clone()
+            .unwrap_or_else(|| "unspecified".to_string());
+        println!("realm_id: {realm_out}");
+        println!("stream_id: {}", stream.stream_id);
+        println!("label: {}", stream.label);
+        println!("policy: {}", stream.policy);
+        let primary = stream
+            .primary_hub
+            .clone()
+            .unwrap_or_else(|| "none".to_string());
+        println!("primary_hub: {primary}");
+        println!("local_is_primary: {}", stream.local_is_primary);
     } else {
-        if let Some(ref stream) = stream_info {
-            println!("hub_id: {hub_id}");
-            println!("role: {role}");
-            let realm_out = stream
-                .realm_id
-                .clone()
-                .unwrap_or_else(|| "unspecified".to_string());
-            println!("realm_id: {realm_out}");
-            println!("stream_id: {}", stream.stream_id);
-            println!("label: {}", stream.label);
-            println!("policy: {}", stream.policy);
-            let primary = stream
-                .primary_hub
-                .clone()
-                .unwrap_or_else(|| "none".to_string());
-            println!("primary_hub: {primary}");
-            println!("local_is_primary: {}", stream.local_is_primary);
-        } else {
-            println!("role: {role}");
-            println!("hub_id: {hub_id}");
-        }
+        println!("role: {role}");
+        println!("hub_id: {hub_id}");
     }
 
     log_cli_goal("CLI.AUTH1.ROLE");
