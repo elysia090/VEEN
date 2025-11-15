@@ -95,6 +95,7 @@ const ANCHOR_LOG_FILE: &str = "anchor_log.json";
 const RETENTION_CONFIG_FILE: &str = "retention.json";
 const TLS_INFO_FILE: &str = "tls_info.json";
 const ATTACHMENTS_DIR: &str = "attachments";
+const HUB_CONFIG_FILE: &str = "hub-config.toml";
 
 type JsonMap = serde_json::Map<String, JsonValue>;
 
@@ -626,7 +627,7 @@ struct KubeAuthorityArgs {
     /// Optional override for the Kubernetes namespace. Defaults to veen-system.
     #[arg(long)]
     namespace: Option<String>,
-    /// Path to the authority hub configuration file that becomes hub.yaml.
+    /// Path to the authority hub configuration file that becomes hub-config.toml.
     #[arg(long)]
     config: PathBuf,
     /// Path to the authority hub key bundle encoded into the Secret.
@@ -650,6 +651,9 @@ struct KubeAuthorityArgs {
     /// Log level exported via VEEN_LOG_LEVEL.
     #[arg(long, default_value = "info")]
     log_level: String,
+    /// Optional profile identifier override (HEX32).
+    #[arg(long, value_name = "HEX32")]
+    profile_id: Option<String>,
 }
 
 #[derive(Args)]
@@ -666,7 +670,7 @@ struct KubeTenantArgs {
     /// Optional override for the namespace. Defaults to veen-tenant-<tenant-id>.
     #[arg(long)]
     namespace: Option<String>,
-    /// Path to the tenant hub configuration file rendered as hub.yaml.
+    /// Path to the tenant hub configuration file rendered as hub-config.toml.
     #[arg(long)]
     config: PathBuf,
     /// Path to the tenant hub key bundle encoded into the Secret.
@@ -693,6 +697,9 @@ struct KubeTenantArgs {
     /// Log level exported via VEEN_LOG_LEVEL.
     #[arg(long, default_value = "info")]
     log_level: String,
+    /// Optional profile identifier override (HEX32).
+    #[arg(long, value_name = "HEX32")]
+    profile_id: Option<String>,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -1933,11 +1940,13 @@ async fn handle_kube_authority(args: KubeAuthorityArgs) -> Result<()> {
         storage_size,
         port,
         log_level,
+        profile_id,
     } = args;
 
     let namespace = namespace.unwrap_or_else(|| "veen-system".to_string());
     let image = image.unwrap_or_else(|| format!("veen-hub:{version}"));
     let selftest_image = selftest_image.unwrap_or_else(|| format!("veen-selftest:{version}"));
+    let profile_id = normalize_optional_profile_id(profile_id)?;
 
     let config_contents = fs::read_to_string(&config)
         .await
@@ -1967,7 +1976,7 @@ async fn handle_kube_authority(args: KubeAuthorityArgs) -> Result<()> {
         &namespace,
         base_labels.clone(),
         default_annotations("authority", &version, Some(&config_hash)),
-        "hub.yaml",
+        HUB_CONFIG_FILE,
         &config_contents,
     ));
 
@@ -1999,16 +2008,28 @@ async fn handle_kube_authority(args: KubeAuthorityArgs) -> Result<()> {
     ));
 
     let pod_annotations = default_annotations("authority", &version, Some(&combined_hash));
+    let mut hub_args = vec![
+        "hub".to_string(),
+        "start".to_string(),
+        "--listen".to_string(),
+        format!("0.0.0.0:{port}"),
+        "--data-dir".to_string(),
+        "/var/lib/veen".to_string(),
+        "--config".to_string(),
+        format!("/etc/veen/{HUB_CONFIG_FILE}"),
+        "--foreground".to_string(),
+    ];
+    if let Some(ref profile) = profile_id {
+        hub_args.push("--profile-id".to_string());
+        hub_args.push(profile.clone());
+    }
+
     let container = json!({
         "name": "veen-authority-hub",
         "image": image,
         "imagePullPolicy": "IfNotPresent",
-        "command": ["veen-hub"],
-        "args": [
-            "--profile=authority",
-            "--config=/etc/veen/hub.yaml",
-            "--data-dir=/var/lib/veen"
-        ],
+        "command": ["veen"],
+        "args": hub_args,
         "env": [
             {"name": "VEEN_ROLE", "value": "authority"},
             {"name": "VEEN_UNIVERSE_ID", "value": universe_id.clone()},
@@ -2024,13 +2045,21 @@ async fn handle_kube_authority(args: KubeAuthorityArgs) -> Result<()> {
         ],
         "livenessProbe": {
             "httpGet": {"path": "/healthz", "port": "http"},
-            "initialDelaySeconds": 5,
-            "periodSeconds": 10
+            "initialDelaySeconds": 10,
+            "periodSeconds": 10,
+            "failureThreshold": 6
         },
         "readinessProbe": {
-            "httpGet": {"path": "/readyz", "port": "http"},
+            "httpGet": {"path": "/healthz", "port": "http"},
             "initialDelaySeconds": 5,
-            "periodSeconds": 10
+            "periodSeconds": 10,
+            "failureThreshold": 3,
+            "successThreshold": 1
+        },
+        "securityContext": {
+            "runAsNonRoot": true,
+            "readOnlyRootFilesystem": true,
+            "allowPrivilegeEscalation": false
         }
     });
 
@@ -2102,11 +2131,13 @@ async fn handle_kube_tenant(args: KubeTenantArgs) -> Result<()> {
         storage_class,
         port,
         log_level,
+        profile_id,
     } = args;
 
     let namespace = namespace.unwrap_or_else(|| format!("veen-tenant-{tenant_id}"));
     let hub_image = hub_image.unwrap_or_else(|| format!("veen-hub:{version}"));
     let selftest_image = selftest_image.unwrap_or_else(|| format!("veen-selftest:{version}"));
+    let profile_id = normalize_optional_profile_id(profile_id)?;
 
     let config_contents = fs::read_to_string(&config)
         .await
@@ -2136,7 +2167,7 @@ async fn handle_kube_tenant(args: KubeTenantArgs) -> Result<()> {
         &namespace,
         base_labels.clone(),
         default_annotations("tenant", &version, Some(&config_hash)),
-        "hub.yaml",
+        HUB_CONFIG_FILE,
         &config_contents,
     ));
 
@@ -2176,16 +2207,28 @@ async fn handle_kube_tenant(args: KubeTenantArgs) -> Result<()> {
     ];
     volume_mounts.push(json!({"name": "veen-data", "mountPath": "/var/lib/veen"}));
 
+    let mut hub_args = vec![
+        "hub".to_string(),
+        "start".to_string(),
+        "--listen".to_string(),
+        format!("0.0.0.0:{port}"),
+        "--data-dir".to_string(),
+        "/var/lib/veen".to_string(),
+        "--config".to_string(),
+        format!("/etc/veen/{HUB_CONFIG_FILE}"),
+        "--foreground".to_string(),
+    ];
+    if let Some(ref profile) = profile_id {
+        hub_args.push("--profile-id".to_string());
+        hub_args.push(profile.clone());
+    }
+
     let container = json!({
         "name": "veen-tenant-hub",
         "image": hub_image,
         "imagePullPolicy": "IfNotPresent",
-        "command": ["veen-hub"],
-        "args": [
-            "--profile=tenant",
-            "--config=/etc/veen/hub.yaml",
-            "--data-dir=/var/lib/veen"
-        ],
+        "command": ["veen"],
+        "args": hub_args,
         "env": [
             {"name": "VEEN_ROLE", "value": "tenant"},
             {"name": "VEEN_TENANT_ID", "value": tenant_id.clone()},
@@ -2198,13 +2241,21 @@ async fn handle_kube_tenant(args: KubeTenantArgs) -> Result<()> {
         "volumeMounts": volume_mounts,
         "livenessProbe": {
             "httpGet": {"path": "/healthz", "port": "http"},
-            "initialDelaySeconds": 5,
-            "periodSeconds": 10
+            "initialDelaySeconds": 10,
+            "periodSeconds": 10,
+            "failureThreshold": 6
         },
         "readinessProbe": {
-            "httpGet": {"path": "/readyz", "port": "http"},
+            "httpGet": {"path": "/healthz", "port": "http"},
             "initialDelaySeconds": 5,
-            "periodSeconds": 10
+            "periodSeconds": 10,
+            "failureThreshold": 3,
+            "successThreshold": 1
+        },
+        "securityContext": {
+            "runAsNonRoot": true,
+            "readOnlyRootFilesystem": true,
+            "allowPrivilegeEscalation": false
         }
     });
 
@@ -6789,6 +6840,23 @@ async fn remove_pid_file(data_dir: &Path) -> Result<()> {
             .with_context(|| format!("removing pid file {}", pid_path.display()))?;
     }
     Ok(())
+}
+
+fn normalize_optional_profile_id(raw: Option<String>) -> Result<Option<String>> {
+    raw.map(|value| {
+        let trimmed = value.trim().to_ascii_lowercase();
+        if trimmed.len() != 64 {
+            bail_usage!(
+                "profile identifier must be 64 hex characters (32 bytes); got {}",
+                trimmed.len()
+            );
+        }
+        if !trimmed.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            bail_usage!("profile identifier must contain only hexadecimal characters");
+        }
+        Ok(trimmed)
+    })
+    .transpose()
 }
 
 fn resolve_profile_id(profile: Option<String>) -> Result<String> {
