@@ -847,8 +847,10 @@ async fn stream_job_logs(pod_api: Api<Pod>, job_name: String) -> Result<()> {
     let pod_name = wait_for_job_pod(&pod_api, &job_name).await?;
     let mut attempts = 0;
     loop {
-        let mut params = LogParams::default();
-        params.follow = true;
+        let params = LogParams {
+            follow: true,
+            ..Default::default()
+        };
         match pod_api.log_stream(&pod_name, &params).await {
             Ok(reader) => {
                 let mut stream = ReaderStream::new(reader.compat());
@@ -904,28 +906,42 @@ fn format_hub_url(service: &str) -> String {
     }
 }
 
+struct CliJobConfig<'a> {
+    namespace: &'a str,
+    generate_name: &'a str,
+    image: &'a str,
+    env: &'a [EnvVar],
+    client_secret: &'a str,
+    cap_secret: Option<&'a str>,
+    state_pvc: Option<&'a str>,
+}
+
 fn build_job_send_manifest(args: &KubeJobSendArgs, env: &[EnvVar]) -> Result<Job> {
     build_cli_job(
-        &args.namespace,
-        JOB_SEND_GENERATE_NAME,
-        &args.image,
-        env,
-        &args.client_secret,
-        args.cap_secret.as_deref(),
-        args.state_pvc.as_deref(),
+        CliJobConfig {
+            namespace: &args.namespace,
+            generate_name: JOB_SEND_GENERATE_NAME,
+            image: &args.image,
+            env,
+            client_secret: &args.client_secret,
+            cap_secret: args.cap_secret.as_deref(),
+            state_pvc: args.state_pvc.as_deref(),
+        },
         build_send_command_args(args),
     )
 }
 
 fn build_job_stream_manifest(args: &KubeJobStreamArgs, env: &[EnvVar]) -> Result<Job> {
     build_cli_job(
-        &args.namespace,
-        JOB_STREAM_GENERATE_NAME,
-        &args.image,
-        env,
-        &args.client_secret,
-        None,
-        args.state_pvc.as_deref(),
+        CliJobConfig {
+            namespace: &args.namespace,
+            generate_name: JOB_STREAM_GENERATE_NAME,
+            image: &args.image,
+            env,
+            client_secret: &args.client_secret,
+            cap_secret: None,
+            state_pvc: args.state_pvc.as_deref(),
+        },
         build_stream_command_args(args),
     )
 }
@@ -981,26 +997,17 @@ fn build_stream_command_args(args: &KubeJobStreamArgs) -> Vec<String> {
     command
 }
 
-fn build_cli_job(
-    namespace: &str,
-    generate_name: &str,
-    image: &str,
-    env: &[EnvVar],
-    client_secret: &str,
-    cap_secret: Option<&str>,
-    state_pvc: Option<&str>,
-    cli_args: Vec<String>,
-) -> Result<Job> {
-    if client_secret.is_empty() {
+fn build_cli_job(config: CliJobConfig<'_>, cli_args: Vec<String>) -> Result<Job> {
+    if config.client_secret.is_empty() {
         return Err(CliUsageError::new("--client-secret is required".to_string()).into());
     }
-    let script = job_bootstrap_script(cap_secret.is_some());
+    let script = job_bootstrap_script(config.cap_secret.is_some());
     let mut container_args = Vec::new();
     container_args.push(script);
     container_args.extend(cli_args);
 
     let mut env_vars = Vec::new();
-    for var in env {
+    for var in config.env {
         env_vars.push(K8sEnvVar {
             name: var.name.clone(),
             value: Some(var.value.clone()),
@@ -1026,15 +1033,15 @@ fn build_cli_job(
         Volume {
             name: CLIENT_SECRET_VOLUME.to_string(),
             secret: Some(SecretVolumeSource {
-                secret_name: Some(client_secret.to_string()),
+                secret_name: Some(config.client_secret.to_string()),
                 ..Default::default()
             }),
             ..Default::default()
         },
-        client_state_volume(state_pvc),
+        client_state_volume(config.state_pvc),
     ];
 
-    if let Some(secret_name) = cap_secret {
+    if let Some(secret_name) = config.cap_secret {
         volume_mounts.push(VolumeMount {
             mount_path: CAP_SECRET_PATH.to_string(),
             name: CAP_SECRET_VOLUME.to_string(),
@@ -1069,7 +1076,7 @@ fn build_cli_job(
     let pod_spec = PodSpec {
         containers: vec![Container {
             name: "veen-cli".to_string(),
-            image: Some(image.to_string()),
+            image: Some(config.image.to_string()),
             command: Some(vec!["/bin/sh".to_string(), "-c".to_string()]),
             args: Some(container_args),
             env: if env_vars.is_empty() {
@@ -1087,8 +1094,8 @@ fn build_cli_job(
 
     let job = Job {
         metadata: ObjectMeta {
-            namespace: Some(namespace.to_string()),
-            generate_name: Some(generate_name.to_string()),
+            namespace: Some(config.namespace.to_string()),
+            generate_name: Some(config.generate_name.to_string()),
             labels: Some(labels.clone()),
             ..Default::default()
         },
