@@ -1,0 +1,15 @@
+{
+  "paid.operation.v1": "e7ca17e7da0f5539e02fb89a234c58e8808d84e832a97e7c70d95fa4376469a5",
+  "access.grant.v1": "d069a2baa097837df1e6fc27f07a43ac9b9ed6717ac71f2dd72f977685d7c8c0",
+  "access.revoke.v1": "c2e4253b2ed25212b0c4e6fb192083b6597562f8636502940f1e2e85cae5c380",
+  "delegated.execution.v1": "69ceb5040a2b77e7d674c5d267f59c5c4ac6d5e4783ec1135b3babf921e38356",
+  "agreement.definition.v1": "43677781ec866ae7ef696fb76027cb74f78a651ac75e04c7bc0a255c4568e85d",
+  "agreement.confirmation.v1": "21b3cccd9b213437d20e570fe99a0c809a54822e3c0c1367f82a0b06308803d2",
+  "data.publication.v1": "4a73c04facf15ce395992ac5ff5ed68f5a1ce4edb4e4913646780d3e7c01375b",
+  "state.checkpoint.v1": "38d54b9a599a8b6fbd433b715fb23999bb37b12a0f1b62a8e7505e58cd462788",
+  "recovery.request.v1": "69799ac3b7694cce78a089b50c6fc473937061e08b4e6c2eb857143bcbe7c6bf",
+  "recovery.approval.v1": "b7c21bd0ea5c615f490cf369a26c4f7f7545dcf2692e04824626c26ae74c15f7",
+  "recovery.execution.v1": "a8ac8216ad4037eb8f8d23b9df047ccd9e6370204939daf01ec28b4907bde2f3",
+  "query.audit.v1": "9acfbdd772c4fae67434622bb786f071fd8f385f9435b00835b5c9f791f7e6ae",
+  "federation.mirror.v1": "995000e25ee8ac0c3dce004c974f6fac3b0e23b916184fe4279a93568e123b9b"
+}
