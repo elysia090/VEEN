@@ -30,11 +30,14 @@ use veen_hub::storage::HUB_PID_FILE;
 
 const HUB_HEALTH_MAX_ATTEMPTS: usize = 120;
 const HUB_HEALTH_RETRY_DELAY_MS: u64 = 250;
+#[allow(dead_code)]
 const REPLICATION_MAX_ATTEMPTS: usize = 120;
+#[allow(dead_code)]
 const REPLICATION_RETRY_DELAY_MS: u64 = 250;
 const HUB_KEY_VERSION: u8 = 1;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct BinaryPaths {
     hub: PathBuf,
     cli: PathBuf,
@@ -437,6 +440,7 @@ impl IntegrationHarness {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn run_federation_suite(&mut self) -> Result<()> {
         let primary = self
             .spawn_hub("overlay-primary", HubRole::Primary, &[])
@@ -838,6 +842,7 @@ impl IntegrationHarness {
         })
     }
 
+    #[allow(dead_code)]
     async fn spawn_bridge(
         &self,
         name: &str,
@@ -925,6 +930,7 @@ impl IntegrationHarness {
         bail!("hub at {url} did not become healthy within timeout");
     }
 
+    #[allow(dead_code)]
     async fn wait_for_replication(&self, replica_url: &str) -> Result<()> {
         for attempt in 0..REPLICATION_MAX_ATTEMPTS {
             let response = self
@@ -965,6 +971,7 @@ impl IntegrationHarness {
         bail!("replica did not observe federated message within timeout");
     }
 
+    #[allow(dead_code)]
     async fn verify_federated_mmr(&self, primary: &str, replica: &str) -> Result<()> {
         let primary_metrics = self.fetch_metrics(primary).await?;
         let replica_metrics = self.fetch_metrics(replica).await?;
@@ -1028,6 +1035,7 @@ pub struct HubProcess {
     data_dir: PathBuf,
 }
 
+#[allow(dead_code)]
 pub struct BridgeProcess {
     handle: ManagedProcess,
 }
@@ -1405,6 +1413,7 @@ pub async fn run_core_suite() -> Result<()> {
     harness.run_core_suite().await
 }
 
+#[allow(dead_code)]
 pub async fn run_overlay_suite() -> Result<()> {
     let mut harness = IntegrationHarness::new().await?;
     harness.run_federation_suite().await
