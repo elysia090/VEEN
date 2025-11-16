@@ -463,8 +463,10 @@ async fn handle_logs(args: KubeLogsArgs) -> Result<()> {
 
     for pod_name in pods {
         println!("==> logs for pod {pod_name}");
-        let mut params = LogParams::default();
-        params.follow = follow;
+        let mut params = LogParams {
+            follow,
+            ..LogParams::default()
+        };
         if let Some(since) = since.as_deref() {
             let duration = parse_duration(since)
                 .map_err(|_| CliUsageError::new("invalid --since duration".to_string()))?;
@@ -669,15 +671,16 @@ fn parse_resource_quantity(value: Option<&str>) -> Result<Option<ResourceQuantit
 }
 
 fn build_manifests(spec: &RenderSpec) -> Result<Vec<JsonValue>> {
-    let mut docs = Vec::new();
-    docs.push(namespace_manifest(&spec.namespace));
-    docs.push(service_account_manifest(spec));
-    docs.push(role_manifest(spec));
-    docs.push(role_binding_manifest(spec));
-    docs.push(config_map_manifest(spec));
-    docs.push(secret_manifest(spec));
-    docs.push(deployment_manifest(spec));
-    docs.push(service_manifest(spec));
+    let docs = vec![
+        namespace_manifest(&spec.namespace),
+        service_account_manifest(spec),
+        role_manifest(spec),
+        role_binding_manifest(spec),
+        config_map_manifest(spec),
+        secret_manifest(spec),
+        deployment_manifest(spec),
+        service_manifest(spec),
+    ];
     Ok(docs)
 }
 
