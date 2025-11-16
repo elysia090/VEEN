@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::convert::TryInto;
 use std::io::Cursor;
 use std::str::FromStr;
@@ -42,6 +42,8 @@ use thiserror::Error;
 use crate::config::{AdmissionConfig, FederationConfig, HubRole, HubRuntimeConfig};
 use crate::observability::{HubObservability, ObservabilitySnapshot};
 use crate::storage::HubStorage;
+use rand::rngs::OsRng;
+use rand::RngCore;
 
 #[derive(Clone)]
 pub struct HubPipeline {
@@ -61,6 +63,7 @@ struct HubState {
     anchors: AnchorLog,
     revocations: RevocationView,
     revocation_log: Vec<RevocationRecord>,
+    admission_events: VecDeque<AdmissionLogEvent>,
     authority_records: Vec<AuthorityRecord>,
     authority_view: AuthorityView,
     label_class_records: Vec<LabelClassRecord>,
@@ -84,6 +87,8 @@ impl StreamRuntime {
         Ok(Self { state, mmr })
     }
 }
+
+const MAX_ADMISSION_EVENTS: usize = 512;
 
 impl HubPipeline {
     pub async fn initialise(config: &HubRuntimeConfig, storage: &HubStorage) -> Result<Self> {
@@ -114,6 +119,7 @@ impl HubPipeline {
             label_class_index,
             schema_descriptors,
             schema_registry,
+            admission_events: VecDeque::new(),
         };
 
         if config.anchors.enabled && state.anchors.entries.is_empty() {
@@ -934,6 +940,260 @@ impl HubPipeline {
         }
     }
 
+    pub async fn kex_policy_descriptor(&self) -> HubKexPolicyDescriptor {
+        let guard = self.inner.lock().await;
+        let default_cap_ttl_sec = guard
+            .capabilities
+            .records
+            .values()
+            .next()
+            .map(|record| record.ttl);
+        let max_cap_ttl_sec = guard
+            .capabilities
+            .records
+            .values()
+            .map(|record| record.ttl)
+            .max();
+
+        HubKexPolicyDescriptor {
+            ok: true,
+            max_client_id_lifetime_sec: self.admission.max_client_id_lifetime_sec,
+            max_msgs_per_client_id_per_label: self.admission.max_msgs_per_client_id_per_label,
+            default_cap_ttl_sec,
+            max_cap_ttl_sec,
+            revocation_stream: None,
+            rotation_window_sec: self.admission.max_client_id_lifetime_sec,
+        }
+    }
+
+    pub async fn admission_report(&self) -> HubAdmissionReport {
+        let guard = self.inner.lock().await;
+        let mut stages = Vec::new();
+        let mut recent_err_rates = BTreeMap::new();
+        recent_err_rates.insert("E.AUTH".to_string(), 0.0);
+        recent_err_rates.insert("E.CAP".to_string(), 0.0);
+
+        stages.push(HubAdmissionStage {
+            name: "capability-gating".to_string(),
+            enabled: self.admission.capability_gating_enabled,
+            responsibilities: vec![
+                "verify capability auth_ref".to_string(),
+                "enforce per-stream grants".to_string(),
+            ],
+            queue_depth: 0,
+            max_queue_depth: 0,
+            recent_err_rates: recent_err_rates.clone(),
+        });
+
+        if self.admission.max_client_id_lifetime_sec.is_some()
+            || self.admission.max_msgs_per_client_id_per_label.is_some()
+        {
+            let usage_entries = guard.capabilities.client_usage.len();
+            stages.push(HubAdmissionStage {
+                name: "client-usage".to_string(),
+                enabled: true,
+                responsibilities: vec![
+                    "track client lifetime".to_string(),
+                    "enforce per-label quotas".to_string(),
+                ],
+                queue_depth: usage_entries as u64,
+                max_queue_depth: usage_entries.saturating_add(1) as u64,
+                recent_err_rates: BTreeMap::new(),
+            });
+        }
+
+        stages.push(HubAdmissionStage {
+            name: "revocation-enforcement".to_string(),
+            enabled: true,
+            responsibilities: vec!["apply client/capability revocations".to_string()],
+            queue_depth: guard.revocation_log.len() as u64,
+            max_queue_depth: guard.revocation_log.len() as u64,
+            recent_err_rates: BTreeMap::new(),
+        });
+
+        if let Some(difficulty) = self.admission.pow_difficulty {
+            stages.push(HubAdmissionStage {
+                name: "proof-of-work".to_string(),
+                enabled: true,
+                responsibilities: vec![format!("require cookie with difficulty >= {difficulty}")],
+                queue_depth: 0,
+                max_queue_depth: 0,
+                recent_err_rates: BTreeMap::new(),
+            });
+        }
+
+        HubAdmissionReport { ok: true, stages }
+    }
+
+    pub async fn admission_log(
+        &self,
+        limit: Option<usize>,
+        codes: Option<Vec<String>>,
+    ) -> HubAdmissionLogResponse {
+        let guard = self.inner.lock().await;
+        let code_filter = codes.map(|values| {
+            values
+                .into_iter()
+                .map(|value| value.trim().to_ascii_uppercase())
+                .collect::<BTreeSet<_>>()
+        });
+
+        let mut events: Vec<AdmissionLogEvent> = guard
+            .admission_events
+            .iter()
+            .rev()
+            .cloned()
+            .filter(|event| match &code_filter {
+                Some(set) => set.contains(&event.code),
+                None => true,
+            })
+            .collect();
+        if let Some(limit) = limit {
+            events.truncate(limit);
+        }
+
+        HubAdmissionLogResponse { ok: true, events }
+    }
+
+    pub async fn record_admission_failure(
+        &self,
+        label: &str,
+        client_id: &str,
+        code: &str,
+        detail: &str,
+    ) {
+        let mut guard = self.inner.lock().await;
+        if guard.admission_events.len() >= MAX_ADMISSION_EVENTS {
+            guard.admission_events.pop_front();
+        }
+        guard.admission_events.push_back(AdmissionLogEvent {
+            ts: current_unix_timestamp(),
+            code: code.trim().to_ascii_uppercase(),
+            label_prefix: identifier_prefix(label),
+            client_id_prefix: identifier_prefix(client_id),
+            detail: detail.to_string(),
+        });
+    }
+
+    pub async fn capability_status(&self, auth_ref_hex: &str) -> Result<HubCapStatusResponse> {
+        if auth_ref_hex.is_empty() {
+            bail!("auth_ref must not be empty");
+        }
+        let auth_target = revocation_target_from_hex_str(auth_ref_hex)?;
+        let now = current_unix_timestamp();
+        let guard = self.inner.lock().await;
+        let record = guard.capabilities.records.get(auth_ref_hex);
+        let mut revocation_detail: Option<(RevocationKind, RevocationRecord)> = guard
+            .revocation_log
+            .iter()
+            .rev()
+            .find(|rev| rev.kind == RevocationKind::AuthRef && rev.target == auth_target)
+            .cloned()
+            .map(|record| (RevocationKind::AuthRef, record));
+
+        if revocation_detail.is_none() {
+            if let Some(cap_record) = record {
+                if let Some(token_hash) = cap_record.token_hash.as_ref() {
+                    if let Ok(target) = revocation_target_from_hex_str(token_hash) {
+                        if let Some(entry) = guard
+                            .revocation_log
+                            .iter()
+                            .rev()
+                            .find(|rev| {
+                                rev.kind == RevocationKind::CapToken && rev.target == target
+                            })
+                            .cloned()
+                        {
+                            revocation_detail = Some((RevocationKind::CapToken, entry));
+                        }
+                    }
+                }
+            }
+        }
+
+        let (revocation_kind, revocation_ts, reason) =
+            if let Some((kind, entry)) = revocation_detail {
+                (
+                    Some(revocation_kind_label(kind).to_string()),
+                    Some(entry.ts),
+                    entry.reason.clone(),
+                )
+            } else {
+                (None, None, None)
+            };
+
+        Ok(HubCapStatusResponse {
+            ok: true,
+            auth_ref: auth_ref_hex.to_string(),
+            hub_known: record.is_some(),
+            currently_valid: record.map(|rec| rec.expires_at > now).unwrap_or(false),
+            revoked: revocation_kind.is_some(),
+            expires_at: record.map(|rec| rec.expires_at),
+            revocation_kind,
+            revocation_ts,
+            reason,
+        })
+    }
+
+    pub async fn revocation_list(
+        &self,
+        kind: Option<RevocationKind>,
+        since: Option<u64>,
+        active_only: bool,
+        limit: Option<usize>,
+    ) -> HubRevocationList {
+        let now = current_unix_timestamp();
+        let guard = self.inner.lock().await;
+        let mut entries: Vec<HubRevocationEntry> = guard
+            .revocation_log
+            .iter()
+            .filter(|record| match kind {
+                Some(expected) => record.kind == expected,
+                None => true,
+            })
+            .filter(|record| match since {
+                Some(ts) => record.ts >= ts,
+                None => true,
+            })
+            .filter_map(|record| {
+                let active_now = record.is_active_at(now);
+                if active_only && !active_now {
+                    return None;
+                }
+                Some(HubRevocationEntry {
+                    kind: revocation_kind_label(record.kind).to_string(),
+                    target: hex::encode(record.target.as_bytes()),
+                    ts: record.ts,
+                    ttl: record.ttl,
+                    reason: record.reason.clone(),
+                    active_now,
+                })
+            })
+            .collect();
+        entries.sort_by(|a, b| b.ts.cmp(&a.ts));
+        if let Some(limit) = limit {
+            entries.truncate(limit);
+        }
+        HubRevocationList {
+            ok: true,
+            revocations: entries,
+        }
+    }
+
+    pub async fn pow_challenge(&self, requested: Option<u8>) -> Result<HubPowChallengeDescriptor> {
+        let difficulty = requested.or(self.admission.pow_difficulty).unwrap_or(1);
+        if difficulty == 0 {
+            bail!("pow difficulty must be greater than zero");
+        }
+        let mut challenge = [0u8; 32];
+        OsRng.fill_bytes(&mut challenge);
+        Ok(HubPowChallengeDescriptor {
+            ok: true,
+            challenge: hex::encode(challenge),
+            difficulty,
+        })
+    }
+
     pub async fn authority_view_descriptor(
         &self,
         realm_id: RealmId,
@@ -1574,6 +1834,96 @@ pub struct HubLabelAuthorityDescriptor {
     pub replica_hubs: Vec<String>,
     pub local_hub_id: String,
     pub local_is_authorized: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubKexPolicyDescriptor {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_client_id_lifetime_sec: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_msgs_per_client_id_per_label: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_cap_ttl_sec: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cap_ttl_sec: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revocation_stream: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation_window_sec: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubAdmissionReport {
+    pub ok: bool,
+    pub stages: Vec<HubAdmissionStage>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct HubAdmissionStage {
+    pub name: String,
+    pub enabled: bool,
+    pub responsibilities: Vec<String>,
+    pub queue_depth: u64,
+    pub max_queue_depth: u64,
+    pub recent_err_rates: BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct AdmissionLogEvent {
+    pub ts: u64,
+    pub code: String,
+    pub label_prefix: String,
+    pub client_id_prefix: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubAdmissionLogResponse {
+    pub ok: bool,
+    pub events: Vec<AdmissionLogEvent>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubCapStatusResponse {
+    pub ok: bool,
+    pub auth_ref: String,
+    pub hub_known: bool,
+    pub currently_valid: bool,
+    pub revoked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revocation_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revocation_ts: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubRevocationList {
+    pub ok: bool,
+    pub revocations: Vec<HubRevocationEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubRevocationEntry {
+    pub kind: String,
+    pub target: String,
+    pub ts: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub active_now: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubPowChallengeDescriptor {
+    pub ok: bool,
+    pub challenge: String,
+    pub difficulty: u8,
 }
 
 const HUB_KEY_VERSION: u8 = 1;
@@ -2298,6 +2648,22 @@ fn revocation_target_from_hex_str(value: &str) -> Result<RevocationTarget> {
     })
 }
 
+fn revocation_kind_label(kind: RevocationKind) -> &'static str {
+    match kind {
+        RevocationKind::ClientId => "client-id",
+        RevocationKind::AuthRef => "auth-ref",
+        RevocationKind::CapToken => "cap-token",
+    }
+}
+
+fn identifier_prefix(value: &str) -> String {
+    const PREFIX_LEN: usize = 16;
+    if value.len() <= PREFIX_LEN {
+        return value.to_string();
+    }
+    format!("{}…", &value[..PREFIX_LEN])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2315,7 +2681,9 @@ mod tests {
     use veen_core::federation::AuthorityPolicy;
     use veen_core::meta::SchemaId;
     use veen_core::realm::RealmId;
+    use veen_core::revocation::{RevocationKind, RevocationRecord, RevocationTarget};
     use veen_core::HubId;
+    use veen_core::REVOCATION_TARGET_LEN;
 
     async fn write_test_hub_key(data_dir: &Path) -> Result<()> {
         let path = data_dir.join(crate::storage::HUB_KEY_FILE);
@@ -2402,6 +2770,95 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&envelope, &mut buf).unwrap();
         buf
+    }
+
+    #[test]
+    fn kex_policy_descriptor_reflects_admission_overrides() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let overrides = HubConfigOverrides {
+                max_client_id_lifetime_sec: Some(86_400),
+                max_msgs_per_client_id_per_label: Some(5),
+                ..HubConfigOverrides::default()
+            };
+            let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
+
+            {
+                let mut guard = pipeline.inner.lock().await;
+                guard.capabilities.records.insert(
+                    "deadbeef".to_string(),
+                    CapabilityRecord {
+                        subject: "client".into(),
+                        stream_ids: vec!["core/test".into()],
+                        expires_at: current_unix_timestamp() + 600,
+                        ttl: 600,
+                        rate: None,
+                        bucket_state: None,
+                        uses: 0,
+                        token_hash: Some("cafebabe".into()),
+                    },
+                );
+            }
+
+            let descriptor = pipeline.kex_policy_descriptor().await;
+            assert_eq!(descriptor.max_client_id_lifetime_sec, Some(86_400));
+            assert_eq!(descriptor.max_msgs_per_client_id_per_label, Some(5));
+            assert_eq!(descriptor.default_cap_ttl_sec, Some(600));
+            assert_eq!(descriptor.max_cap_ttl_sec, Some(600));
+        });
+    }
+
+    #[test]
+    fn admission_log_filters_results() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let pipeline = init_pipeline(temp.path()).await;
+
+            pipeline
+                .record_admission_failure("core/test", "aa", "E.AUTH", "missing auth")
+                .await;
+            pipeline
+                .record_admission_failure("core/test", "bb", "E.CAP", "expired")
+                .await;
+
+            let filtered = pipeline
+                .admission_log(Some(1), Some(vec!["E.CAP".to_string()]))
+                .await;
+            assert_eq!(filtered.events.len(), 1);
+            assert_eq!(filtered.events[0].code, "E.CAP");
+            assert!(filtered.events[0].detail.contains("expired"));
+        });
+    }
+
+    #[test]
+    fn revocation_list_respects_filters() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let pipeline = init_pipeline(temp.path()).await;
+            let target = RevocationTarget::new([0x11; REVOCATION_TARGET_LEN]);
+            let record = RevocationRecord {
+                kind: RevocationKind::AuthRef,
+                target,
+                reason: Some("compromised".into()),
+                ts: current_unix_timestamp(),
+                ttl: Some(60),
+            };
+            let payload = encode_envelope(schema_revocation(), record.clone());
+            pipeline.publish_revocation(&payload).await.unwrap();
+
+            let response = pipeline
+                .revocation_list(Some(RevocationKind::AuthRef), None, true, None)
+                .await;
+            assert_eq!(response.revocations.len(), 1);
+            assert_eq!(response.revocations[0].kind, "auth-ref");
+            assert_eq!(
+                response.revocations[0].reason.as_deref(),
+                Some("compromised")
+            );
+        });
     }
 
     #[test]
