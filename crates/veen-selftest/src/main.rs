@@ -19,6 +19,16 @@ enum Suite {
     Fuzz,
     /// Execute all suites.
     All,
+    /// Execute federated overlay acceptance scenarios.
+    Federated,
+    /// Execute lifecycle and revocation (KEX1+) scenarios.
+    Kex1,
+    /// Execute hardened-profile (SH1+) scenarios.
+    Hardened,
+    /// Execute META0+/label overlay scenarios.
+    Meta,
+    /// Execute the aggregated v0.0.1+ suite.
+    Plus,
     /// Execute overlay integration scenarios.
     Overlays(OverlaysArgs),
 }
@@ -40,6 +50,11 @@ async fn main() -> Result<()> {
         Suite::Props => veen_selftest::run_props(),
         Suite::Fuzz => veen_selftest::run_fuzz(),
         Suite::All => veen_selftest::run_all().await,
+        Suite::Federated => veen_selftest::run_federated().await,
+        Suite::Kex1 => veen_selftest::run_kex1().await,
+        Suite::Hardened => veen_selftest::run_hardened().await,
+        Suite::Meta => veen_selftest::run_meta().await,
+        Suite::Plus => veen_selftest::run_plus().await,
         Suite::Overlays(args) => veen_selftest::run_overlays(args.subset.as_deref()).await,
     }?;
 

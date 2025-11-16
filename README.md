@@ -267,6 +267,17 @@ via `cargo test`.
   ```shell
   target/release/veen selftest all
   ```
+- Exercise the v0.0.1+ overlay suites individually:
+  ```shell
+  target/release/veen selftest federated
+  target/release/veen selftest kex1
+  target/release/veen selftest hardened
+  target/release/veen selftest meta
+  ```
+- Run the aggregated "plus" flow (core + overlays + lifecycle + meta):
+  ```shell
+  target/release/veen selftest plus
+  ```
 
 The self-test harness leaves temporary directories under `/tmp` and removes
 them automatically on success or failure.
