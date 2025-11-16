@@ -638,6 +638,89 @@ fn format_label_class_list_output(list: &RemoteLabelClassList, use_json: bool) -
     }
 }
 
+fn format_schema_descriptor_output(
+    descriptor: &RemoteSchemaDescriptorEntry,
+    usage: Option<&RemoteSchemaUsage>,
+    use_json: bool,
+) -> String {
+    if use_json {
+        let usage_json = usage.map(|stats| {
+            json!({
+                "used_labels": stats.used_labels,
+                "used_count": stats.used_count,
+                "first_used_ts": stats.first_used_ts,
+                "last_used_ts": stats.last_used_ts,
+            })
+        });
+        let output = json!({
+            "ok": true,
+            "schema_id": descriptor.schema_id,
+            "name": descriptor.name,
+            "version": descriptor.version,
+            "doc_url": descriptor.doc_url,
+            "owner": descriptor.owner,
+            "ts": descriptor.ts,
+            "created_at": descriptor.created_at,
+            "updated_at": descriptor.updated_at,
+            "usage": usage_json,
+        });
+        pretty_json(output)
+    } else {
+        let doc_url = descriptor
+            .doc_url
+            .clone()
+            .unwrap_or_else(|| "none".to_string());
+        let owner = descriptor
+            .owner
+            .clone()
+            .unwrap_or_else(|| "none".to_string());
+        let created_at = descriptor
+            .created_at
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let updated_at = descriptor
+            .updated_at
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let usage_labels = usage
+            .map(|stats| {
+                if stats.used_labels.is_empty() {
+                    "none".to_string()
+                } else {
+                    format!("[{}]", stats.used_labels.join(","))
+                }
+            })
+            .unwrap_or_else(|| "none".to_string());
+        let used_count = usage
+            .and_then(|stats| stats.used_count)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "0".to_string());
+        let first_used = usage
+            .and_then(|stats| stats.first_used_ts)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let last_used = usage
+            .and_then(|stats| stats.last_used_ts)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        [
+            format!("schema_id: {}", descriptor.schema_id),
+            format!("name: {}", descriptor.name),
+            format!("version: {}", descriptor.version),
+            format!("doc_url: {doc_url}"),
+            format!("owner: {owner}"),
+            format!("ts: {}", descriptor.ts),
+            format!("created_at: {created_at}"),
+            format!("updated_at: {updated_at}"),
+            format!("used_labels: {usage_labels}"),
+            format!("used_count: {used_count}"),
+            format!("first_used_ts: {first_used}"),
+            format!("last_used_ts: {last_used}"),
+        ]
+        .join("\n")
+    }
+}
+
 #[cfg(test)]
 fn json_output_enabled_with(explicit: bool, global: &GlobalOptions) -> bool {
     explicit || global.json
@@ -850,6 +933,8 @@ enum SchemaCommand {
     Id(SchemaIdArgs),
     /// Register or update schema metadata.
     Register(SchemaRegisterArgs),
+    /// Show schema metadata and usage details.
+    Show(SchemaShowArgs),
     /// Fetch schema descriptors from the hub.
     List(SchemaListArgs),
 }
@@ -1426,6 +1511,16 @@ struct SchemaRegisterArgs {
     owner: Option<String>,
     #[arg(long)]
     ts: Option<u64>,
+}
+
+#[derive(Args)]
+struct SchemaShowArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long = "schema-id", value_name = "HEX32")]
+    schema_id: String,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -2081,6 +2176,43 @@ struct RemoteLabelClassEntry {
     retention_hint: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+struct RemoteSchemaRegistryEntry {
+    ok: bool,
+    #[serde(default)]
+    descriptor: Option<RemoteSchemaDescriptorEntry>,
+    #[serde(default)]
+    usage: Option<RemoteSchemaUsage>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+struct RemoteSchemaDescriptorEntry {
+    schema_id: String,
+    name: String,
+    version: String,
+    #[serde(default)]
+    doc_url: Option<String>,
+    #[serde(default)]
+    owner: Option<String>,
+    ts: u64,
+    #[serde(default)]
+    created_at: Option<u64>,
+    #[serde(default)]
+    updated_at: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+struct RemoteSchemaUsage {
+    #[serde(default)]
+    used_labels: Vec<String>,
+    #[serde(default)]
+    used_count: Option<u64>,
+    #[serde(default)]
+    first_used_ts: Option<u64>,
+    #[serde(default)]
+    last_used_ts: Option<u64>,
+}
+
 #[derive(Debug, Deserialize)]
 struct RemoteHealthStatus {
     ok: bool,
@@ -2462,6 +2594,7 @@ async fn run_cli() -> Result<()> {
         Command::Schema(cmd) => match cmd {
             SchemaCommand::Id(args) => handle_schema_id(args).await,
             SchemaCommand::Register(args) => handle_schema_register(args).await,
+            SchemaCommand::Show(args) => handle_schema_show(args).await,
             SchemaCommand::List(args) => handle_schema_list(args).await,
         },
         Command::Wallet(cmd) => match cmd {
@@ -5762,6 +5895,32 @@ fn render_label_class_list(list: &RemoteLabelClassList, use_json: bool) {
     println!("{output}");
 }
 
+fn render_schema_descriptor(response: &RemoteSchemaRegistryEntry, use_json: bool) {
+    if !response.ok {
+        emit_cli_error(
+            "E.PROFILE",
+            Some("hub declined to provide schema descriptor"),
+            use_json,
+        );
+        process::exit(4);
+    }
+
+    let descriptor = match response.descriptor.as_ref() {
+        Some(descriptor) => descriptor,
+        None => {
+            emit_cli_error(
+                "E.SEQ",
+                Some("schema identifier is not registered"),
+                use_json,
+            );
+            process::exit(4);
+        }
+    };
+
+    let output = format_schema_descriptor_output(descriptor, response.usage.as_ref(), use_json);
+    println!("{output}");
+}
+
 fn encode_signed_envelope<T>(
     schema: [u8; 32],
     body: &T,
@@ -6011,6 +6170,28 @@ async fn handle_schema_register_remote(
     Ok(())
 }
 
+async fn handle_schema_show(args: SchemaShowArgs) -> Result<()> {
+    let SchemaShowArgs {
+        hub,
+        schema_id,
+        json,
+    } = args;
+
+    let client = match parse_hub_reference(&hub)? {
+        HubReference::Remote(client) => client,
+        HubReference::Local(_) => {
+            bail_usage!("schema show requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    };
+
+    let schema = parse_schema_id_hex(&schema_id)?;
+    let schema_hex = hex::encode(schema.as_bytes());
+    let descriptor = fetch_schema_registry_entry(&client, &schema_hex).await?;
+    render_schema_descriptor(&descriptor, json_output_enabled(json));
+    log_cli_goal("CLI.META0_PLUS.SCHEMA_SHOW");
+    Ok(())
+}
+
 async fn handle_schema_list(args: SchemaListArgs) -> Result<()> {
     match parse_hub_reference(&args.hub)? {
         HubReference::Remote(client) => handle_schema_list_remote(client).await,
@@ -6055,6 +6236,17 @@ async fn fetch_schema_descriptors(client: &HubHttpClient) -> Result<Vec<SchemaDe
         .get_json("/schema", &[])
         .await
         .context("fetching schema descriptors from hub")
+}
+
+async fn fetch_schema_registry_entry(
+    client: &HubHttpClient,
+    schema_id_hex: &str,
+) -> Result<RemoteSchemaRegistryEntry> {
+    let path = format!("/schema/{schema_id_hex}");
+    client
+        .get_json(&path, &[])
+        .await
+        .context("fetching schema descriptor from hub registry")
 }
 
 async fn handle_wallet_transfer(args: WalletTransferArgs) -> Result<()> {
@@ -7502,6 +7694,72 @@ mod tests {
     }
 
     #[test]
+    fn schema_show_text_output_matches_cli_goals() {
+        let descriptor = RemoteSchemaDescriptorEntry {
+            schema_id: "abcd".to_string(),
+            name: "test.operation.v1".to_string(),
+            version: "1".to_string(),
+            doc_url: Some("https://schemas/test".to_string()),
+            owner: Some("0123".to_string()),
+            ts: 123,
+            created_at: Some(100),
+            updated_at: Some(120),
+        };
+        let usage = RemoteSchemaUsage {
+            used_labels: vec!["core/example".to_string(), "core/audit".to_string()],
+            used_count: Some(7),
+            first_used_ts: Some(101),
+            last_used_ts: Some(125),
+        };
+
+        let text = super::format_schema_descriptor_output(&descriptor, Some(&usage), false);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "schema_id: abcd");
+        assert_eq!(lines[1], "name: test.operation.v1");
+        assert_eq!(lines[2], "version: 1");
+        assert_eq!(lines[3], "doc_url: https://schemas/test");
+        assert_eq!(lines[4], "owner: 0123");
+        assert_eq!(lines[5], "ts: 123");
+        assert_eq!(lines[6], "created_at: 100");
+        assert_eq!(lines[7], "updated_at: 120");
+        assert_eq!(lines[8], "used_labels: [core/example,core/audit]");
+        assert_eq!(lines[9], "used_count: 7");
+        assert_eq!(lines[10], "first_used_ts: 101");
+        assert_eq!(lines[11], "last_used_ts: 125");
+    }
+
+    #[test]
+    fn schema_show_json_output_matches_cli_goals() {
+        let descriptor = RemoteSchemaDescriptorEntry {
+            schema_id: "a1b2".to_string(),
+            name: "audit.record.v1".to_string(),
+            version: "1".to_string(),
+            doc_url: None,
+            owner: None,
+            ts: 42,
+            created_at: None,
+            updated_at: None,
+        };
+        let usage = RemoteSchemaUsage {
+            used_labels: vec!["core/main".to_string()],
+            used_count: Some(1),
+            first_used_ts: Some(10),
+            last_used_ts: Some(20),
+        };
+
+        let json = super::format_schema_descriptor_output(&descriptor, Some(&usage), true);
+        let value: Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(value["schema_id"], "a1b2");
+        assert_eq!(value["name"], "audit.record.v1");
+        assert_eq!(value["doc_url"], Value::Null);
+        assert_eq!(value["owner"], Value::Null);
+        assert_eq!(value["usage"]["used_labels"], json!(["core/main"]));
+        assert_eq!(value["usage"]["used_count"], 1);
+        assert_eq!(value["usage"]["first_used_ts"], 10);
+        assert_eq!(value["usage"]["last_used_ts"], 20);
+    }
+
+    #[test]
     fn label_authority_output_matches_cli_goals() {
         let descriptor = RemoteLabelAuthorityDescriptor {
             ok: true,
@@ -8405,6 +8663,38 @@ mod tests {
         let fetched = fetch_schema_descriptors(&client).await?;
         server.abort();
         assert_eq!(fetched, vec![descriptor]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn schema_show_fetches_descriptor() -> anyhow::Result<()> {
+        let schema_hex = hex::encode([0x42u8; SCHEMA_ID_LEN]);
+        let response = RemoteSchemaRegistryEntry {
+            ok: true,
+            descriptor: Some(RemoteSchemaDescriptorEntry {
+                schema_id: schema_hex.clone(),
+                name: "test.operation.v1".to_string(),
+                version: "1".to_string(),
+                doc_url: Some("https://schemas/test".to_string()),
+                owner: Some("abcd".to_string()),
+                ts: 55,
+                created_at: Some(50),
+                updated_at: Some(55),
+            }),
+            usage: Some(RemoteSchemaUsage {
+                used_labels: vec!["core/example".to_string()],
+                used_count: Some(3),
+                first_used_ts: Some(51),
+                last_used_ts: Some(55),
+            }),
+        };
+        let body_bytes = serde_json::to_vec(&response)?;
+        let path = Box::leak(format!("/schema/{schema_hex}").into_boxed_str());
+        let (url, server) = spawn_fixed_response_server(path, body_bytes).await?;
+        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
+        let fetched = fetch_schema_registry_entry(&client, &schema_hex).await?;
+        server.abort();
+        assert_eq!(fetched, response);
         Ok(())
     }
 }
