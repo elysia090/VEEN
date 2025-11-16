@@ -101,6 +101,7 @@ const RETENTION_CONFIG_FILE: &str = "retention.json";
 const TLS_INFO_FILE: &str = "tls_info.json";
 const ATTACHMENTS_DIR: &str = "attachments";
 const REVOCATIONS_FILE: &str = "revocations.json";
+const ENV_DESCRIPTOR_VERSION: u64 = 1;
 
 type JsonMap = serde_json::Map<String, JsonValue>;
 
@@ -802,9 +803,26 @@ enum Command {
     /// Run VEEN self-test suites.
     #[command(subcommand)]
     Selftest(SelftestCommand),
+    /// Environment descriptor helpers.
+    #[command(subcommand)]
+    Env(EnvCommand),
     /// Render Kubernetes manifests for VEEN profiles.
     #[command(subcommand)]
     Kube(KubeCommand),
+}
+
+#[derive(Subcommand)]
+enum EnvCommand {
+    /// Initialise an environment descriptor.
+    Init(EnvInitArgs),
+    /// Insert or update a hub entry in the descriptor.
+    #[command(name = "add-hub")]
+    AddHub(EnvAddHubArgs),
+    /// Insert or update a tenant entry in the descriptor.
+    #[command(name = "add-tenant")]
+    AddTenant(EnvAddTenantArgs),
+    /// Show descriptor contents.
+    Show(EnvShowArgs),
 }
 
 #[derive(Subcommand)]
@@ -1052,6 +1070,27 @@ impl fmt::Display for HubLogLevel {
     }
 }
 
+#[derive(Debug, Clone, Default, Args)]
+struct HubLocatorArgs {
+    #[arg(long, value_name = "URL|PATH")]
+    hub: Option<String>,
+    #[arg(long, value_name = "PATH")]
+    env: Option<PathBuf>,
+    #[arg(long = "hub-name", value_name = "NAME")]
+    hub_name: Option<String>,
+}
+
+impl HubLocatorArgs {
+    #[cfg(test)]
+    fn from_url(url: String) -> Self {
+        Self {
+            hub: Some(url),
+            env: None,
+            hub_name: None,
+        }
+    }
+}
+
 #[derive(Args, Clone)]
 struct HubStartArgs {
     #[arg(long, value_parser = clap::value_parser!(SocketAddr))]
@@ -1076,14 +1115,14 @@ struct HubStopArgs {
 
 #[derive(Args)]
 struct HubStatusArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
 }
 
 #[derive(Args)]
 struct HubKeyArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
 }
 
 #[derive(Args)]
@@ -1098,30 +1137,30 @@ struct HubVerifyRotationArgs {
 
 #[derive(Args)]
 struct HubHealthArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
 }
 
 #[derive(Args)]
 struct HubMetricsArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     raw: bool,
 }
 
 #[derive(Args)]
 struct HubProfileArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Args)]
 struct HubRoleArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long, value_name = "HEX32")]
     realm: Option<String>,
     #[arg(long)]
@@ -1132,24 +1171,24 @@ struct HubRoleArgs {
 
 #[derive(Args)]
 struct HubKexPolicyArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Args)]
 struct HubAdmissionArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Args)]
 struct HubAdmissionLogArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     limit: Option<u64>,
     #[arg(long)]
@@ -1160,14 +1199,14 @@ struct HubAdmissionLogArgs {
 
 #[derive(Args)]
 struct HubCheckpointLatestArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
 }
 
 #[derive(Args)]
 struct HubCheckpointRangeArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long, value_name = "EPOCH")]
     from_epoch: Option<u64>,
     #[arg(long, value_name = "EPOCH")]
@@ -1176,8 +1215,8 @@ struct HubCheckpointRangeArgs {
 
 #[derive(Args)]
 struct HubTlsInfoArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
 }
 
 #[derive(Args)]
@@ -1202,16 +1241,16 @@ struct IdRotateArgs {
 struct IdUsageArgs {
     #[arg(long)]
     client: PathBuf,
-    #[arg(long)]
-    hub: Option<String>,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     json: bool,
 }
 
 #[derive(Args)]
 struct SendArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     client: PathBuf,
     #[arg(long)]
@@ -1242,9 +1281,128 @@ struct SendArgs {
 }
 
 #[derive(Args)]
-struct StreamArgs {
+struct EnvInitArgs {
     #[arg(long)]
-    hub: String,
+    root: PathBuf,
+    #[arg(long)]
+    name: String,
+    #[arg(long, value_name = "CONTEXT")]
+    cluster_context: String,
+    #[arg(long)]
+    namespace: String,
+    #[arg(long)]
+    description: Option<String>,
+}
+
+#[derive(Args)]
+struct EnvAddHubArgs {
+    #[arg(long)]
+    env: PathBuf,
+    #[arg(long = "hub-name")]
+    hub_name: String,
+    #[arg(long)]
+    service_url: String,
+    #[arg(long, value_name = "HEX32")]
+    profile_id: String,
+    #[arg(long, value_name = "HEX32")]
+    realm: Option<String>,
+}
+
+#[derive(ValueEnum, Clone, Debug)]
+enum EnvTenantLabelClass {
+    User,
+    Wallet,
+    Log,
+    Admin,
+    Bulk,
+}
+
+impl EnvTenantLabelClass {
+    fn as_str(&self) -> &'static str {
+        match self {
+            EnvTenantLabelClass::User => "user",
+            EnvTenantLabelClass::Wallet => "wallet",
+            EnvTenantLabelClass::Log => "log",
+            EnvTenantLabelClass::Admin => "admin",
+            EnvTenantLabelClass::Bulk => "bulk",
+        }
+    }
+}
+
+#[derive(Args)]
+struct EnvAddTenantArgs {
+    #[arg(long)]
+    env: PathBuf,
+    #[arg(long = "tenant-id")]
+    tenant_id: String,
+    #[arg(long = "stream-prefix")]
+    stream_prefix: String,
+    #[arg(long = "label-class", value_enum)]
+    label_class: Option<EnvTenantLabelClass>,
+}
+
+#[derive(Args)]
+struct EnvShowArgs {
+    #[arg(long)]
+    env: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct EnvDescriptor {
+    version: u64,
+    name: String,
+    cluster_context: String,
+    namespace: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    hubs: BTreeMap<String, EnvHubDescriptor>,
+    #[serde(default)]
+    tenants: BTreeMap<String, EnvTenantDescriptor>,
+}
+
+impl EnvDescriptor {
+    fn validate(&self) -> Result<()> {
+        if self.version != ENV_DESCRIPTOR_VERSION {
+            bail_usage!(
+                "unsupported env descriptor version {} (expected {})",
+                self.version,
+                ENV_DESCRIPTOR_VERSION
+            );
+        }
+        if self.name.trim().is_empty() {
+            bail_usage!("name must not be empty");
+        }
+        if self.cluster_context.trim().is_empty() {
+            bail_usage!("cluster_context must not be empty");
+        }
+        if self.namespace.trim().is_empty() {
+            bail_usage!("namespace must not be empty");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct EnvHubDescriptor {
+    service_url: String,
+    profile_id: String,
+    #[serde(default)]
+    realm_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct EnvTenantDescriptor {
+    stream_prefix: String,
+    label_class: String,
+}
+
+#[derive(Args)]
+struct StreamArgs {
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     client: PathBuf,
     #[arg(long)]
@@ -1283,16 +1441,16 @@ struct CapIssueArgs {
 
 #[derive(Args)]
 struct CapAuthorizeArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     cap: PathBuf,
 }
 
 #[derive(Args)]
 struct CapStatusArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     cap: PathBuf,
     #[arg(long)]
@@ -1301,8 +1459,8 @@ struct CapStatusArgs {
 
 #[derive(Args)]
 struct CapRevocationsArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long, value_enum)]
     kind: Option<RevocationKindValue>,
     #[arg(long)]
@@ -1317,8 +1475,8 @@ struct CapRevocationsArgs {
 
 #[derive(Args)]
 struct FedAuthorityPublishArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     signer: PathBuf,
     #[arg(long)]
@@ -1347,8 +1505,8 @@ enum AuthorityPolicyValue {
 
 #[derive(Args)]
 struct FedAuthorityShowArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long, value_name = "HEX32")]
     realm: String,
     #[arg(long)]
@@ -1359,8 +1517,8 @@ struct FedAuthorityShowArgs {
 
 #[derive(Args)]
 struct LabelAuthorityArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long, value_name = "HEX32")]
     label: String,
     #[arg(long)]
@@ -1369,8 +1527,8 @@ struct LabelAuthorityArgs {
 
 #[derive(Args)]
 struct LabelClassSetArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     signer: PathBuf,
     #[arg(long)]
@@ -1387,8 +1545,8 @@ struct LabelClassSetArgs {
 
 #[derive(Args)]
 struct LabelClassShowArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long, value_name = "HEX32")]
     label: String,
     #[arg(long)]
@@ -1397,8 +1555,8 @@ struct LabelClassShowArgs {
 
 #[derive(Args)]
 struct LabelClassListArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long, value_name = "HEX32")]
     realm: Option<String>,
     #[arg(long)]
@@ -1415,8 +1573,8 @@ struct SchemaIdArgs {
 
 #[derive(Args)]
 struct SchemaRegisterArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     signer: PathBuf,
     #[arg(long = "schema-id")]
@@ -1435,8 +1593,8 @@ struct SchemaRegisterArgs {
 
 #[derive(Args)]
 struct SchemaShowArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long = "schema-id", value_name = "HEX32")]
     schema_id: String,
     #[arg(long)]
@@ -1445,14 +1603,14 @@ struct SchemaShowArgs {
 
 #[derive(Args)]
 struct SchemaListArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
 }
 
 #[derive(Args)]
 struct WalletTransferArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     signer: PathBuf,
     #[arg(long = "wallet-id")]
@@ -1507,8 +1665,8 @@ impl From<RevocationKindValue> for RevocationKind {
 
 #[derive(Args)]
 struct RevokePublishArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     signer: PathBuf,
     #[arg(long, value_enum)]
@@ -1525,8 +1683,8 @@ struct RevokePublishArgs {
 
 #[derive(Args)]
 struct PowRequestArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long, value_name = "BITS")]
     difficulty: Option<u8>,
     #[arg(long)]
@@ -1547,8 +1705,8 @@ struct PowSolveArgs {
 
 #[derive(Args)]
 struct ResyncArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     client: PathBuf,
     #[arg(long)]
@@ -1557,8 +1715,8 @@ struct ResyncArgs {
 
 #[derive(Args)]
 struct VerifyStateArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     client: PathBuf,
     #[arg(long)]
@@ -1573,8 +1731,8 @@ struct ExplainErrorArgs {
 
 #[derive(Args)]
 struct RpcCallArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     client: PathBuf,
     #[arg(long)]
@@ -1600,8 +1758,8 @@ struct RpcCallArgs {
 
 #[derive(Args)]
 struct CrdtLwwSetArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     client: PathBuf,
     #[arg(long)]
@@ -1616,8 +1774,8 @@ struct CrdtLwwSetArgs {
 
 #[derive(Args)]
 struct CrdtLwwGetArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     client: PathBuf,
     #[arg(long)]
@@ -1628,8 +1786,8 @@ struct CrdtLwwGetArgs {
 
 #[derive(Args)]
 struct CrdtOrsetAddArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     client: PathBuf,
     #[arg(long)]
@@ -1640,8 +1798,8 @@ struct CrdtOrsetAddArgs {
 
 #[derive(Args)]
 struct CrdtOrsetRemoveArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     client: PathBuf,
     #[arg(long)]
@@ -1652,8 +1810,8 @@ struct CrdtOrsetRemoveArgs {
 
 #[derive(Args)]
 struct CrdtOrsetListArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     client: PathBuf,
     #[arg(long)]
@@ -1662,8 +1820,8 @@ struct CrdtOrsetListArgs {
 
 #[derive(Args)]
 struct CrdtCounterAddArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     client: PathBuf,
     #[arg(long)]
@@ -1674,8 +1832,8 @@ struct CrdtCounterAddArgs {
 
 #[derive(Args)]
 struct CrdtCounterGetArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     client: PathBuf,
     #[arg(long)]
@@ -1684,8 +1842,8 @@ struct CrdtCounterGetArgs {
 
 #[derive(Args)]
 struct AnchorPublishArgs {
-    #[arg(long)]
-    hub: String,
+    #[command(flatten)]
+    hub: HubLocatorArgs,
     #[arg(long)]
     stream: String,
     #[arg(long)]
@@ -2557,6 +2715,12 @@ async fn run_cli() -> Result<()> {
         Command::HubTls(cmd) => match cmd {
             HubTlsCommand::TlsInfo(args) => handle_hub_tls_info(args).await,
         },
+        Command::Env(cmd) => match cmd {
+            EnvCommand::Init(args) => handle_env_init(args).await,
+            EnvCommand::AddHub(args) => handle_env_add_hub(args).await,
+            EnvCommand::AddTenant(args) => handle_env_add_tenant(args).await,
+            EnvCommand::Show(args) => handle_env_show(args).await,
+        },
         Command::Kube(cmd) => kube::handle_kube_command(cmd).await,
         Command::Selftest(cmd) => match cmd {
             SelftestCommand::Core => handle_selftest_core().await,
@@ -2912,7 +3076,8 @@ async fn handle_hub_stop(args: HubStopArgs) -> Result<()> {
 }
 
 async fn handle_hub_status(args: HubStatusArgs) -> Result<()> {
-    let result = match parse_hub_reference(&args.hub)? {
+    let reference = hub_reference_from_locator(&args.hub, "hub status").await?;
+    let result = match reference {
         HubReference::Local(data_dir) => {
             let state = load_hub_state(&data_dir).await?;
 
@@ -2982,7 +3147,7 @@ async fn handle_hub_status(args: HubStatusArgs) -> Result<()> {
 }
 
 async fn handle_hub_key(args: HubKeyArgs) -> Result<()> {
-    match parse_hub_reference(&args.hub)? {
+    match hub_reference_from_locator(&args.hub, "hub key").await? {
         HubReference::Local(data_dir) => {
             let key_info = read_hub_key_material(&data_dir).await?;
 
@@ -3072,7 +3237,7 @@ async fn handle_hub_verify_rotation(args: HubVerifyRotationArgs) -> Result<()> {
 }
 
 async fn handle_hub_health(args: HubHealthArgs) -> Result<()> {
-    match parse_hub_reference(&args.hub)? {
+    match hub_reference_from_locator(&args.hub, "hub health").await? {
         HubReference::Local(data_dir) => {
             let state = load_hub_state(&data_dir).await?;
             let now = current_unix_timestamp()?;
@@ -3143,7 +3308,7 @@ async fn handle_hub_health(args: HubHealthArgs) -> Result<()> {
 }
 
 async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
-    match parse_hub_reference(&args.hub)? {
+    match hub_reference_from_locator(&args.hub, "hub metrics").await? {
         HubReference::Local(data_dir) => {
             let state = load_hub_state(&data_dir).await?;
             let metrics = state.metrics.clone();
@@ -3170,7 +3335,7 @@ async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
 }
 
 async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
-    let client = match parse_hub_reference(&args.hub)? {
+    let client = match hub_reference_from_locator(&args.hub, "hub profile").await? {
         HubReference::Local(_) => {
             bail_usage!("hub profile requires an HTTP hub endpoint (e.g. http://host:port)");
         }
@@ -3223,7 +3388,7 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
         json,
     } = args;
 
-    let client = match parse_hub_reference(&hub)? {
+    let client = match hub_reference_from_locator(&hub, "hub role").await? {
         HubReference::Local(_) => {
             bail_usage!("hub role requires an HTTP hub endpoint (e.g. http://host:port)");
         }
@@ -3287,7 +3452,7 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
 }
 
 async fn handle_hub_kex_policy(args: HubKexPolicyArgs) -> Result<()> {
-    let client = match parse_hub_reference(&args.hub)? {
+    let client = match hub_reference_from_locator(&args.hub, "hub kex-policy").await? {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("hub kex-policy requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -3301,7 +3466,7 @@ async fn handle_hub_kex_policy(args: HubKexPolicyArgs) -> Result<()> {
 }
 
 async fn handle_hub_admission(args: HubAdmissionArgs) -> Result<()> {
-    let client = match parse_hub_reference(&args.hub)? {
+    let client = match hub_reference_from_locator(&args.hub, "hub admission").await? {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("hub admission requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -3315,7 +3480,7 @@ async fn handle_hub_admission(args: HubAdmissionArgs) -> Result<()> {
 }
 
 async fn handle_hub_admission_log(args: HubAdmissionLogArgs) -> Result<()> {
-    let client = match parse_hub_reference(&args.hub)? {
+    let client = match hub_reference_from_locator(&args.hub, "hub admission-log").await? {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("hub admission-log requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -3482,7 +3647,7 @@ where
 }
 
 async fn handle_hub_checkpoint_latest(args: HubCheckpointLatestArgs) -> Result<Checkpoint> {
-    let client = match parse_hub_reference(&args.hub)? {
+    let client = match hub_reference_from_locator(&args.hub, "hub checkpoint-latest").await? {
         HubReference::Local(_) => {
             bail_usage!("checkpoint commands require an HTTP hub endpoint (e.g. http://host:port)")
         }
@@ -3496,7 +3661,7 @@ async fn handle_hub_checkpoint_latest(args: HubCheckpointLatestArgs) -> Result<C
 }
 
 async fn handle_hub_checkpoint_range(args: HubCheckpointRangeArgs) -> Result<Vec<Checkpoint>> {
-    let client = match parse_hub_reference(&args.hub)? {
+    let client = match hub_reference_from_locator(&args.hub, "hub checkpoint-range").await? {
         HubReference::Local(_) => {
             bail_usage!("checkpoint commands require an HTTP hub endpoint (e.g. http://host:port)")
         }
@@ -3548,7 +3713,9 @@ fn print_checkpoint_summary(checkpoint: &Checkpoint) {
 }
 
 async fn handle_hub_tls_info(args: HubTlsInfoArgs) -> Result<()> {
-    let hub = parse_hub_reference(&args.hub)?.into_local()?;
+    let hub = hub_reference_from_locator(&args.hub, "hub tls-info")
+        .await?
+        .into_local()?;
     let tls_info_path = hub.join(STATE_DIR).join(TLS_INFO_FILE);
     if !fs::try_exists(&tls_info_path)
         .await
@@ -3781,14 +3948,15 @@ async fn handle_id_usage(args: IdUsageArgs) -> Result<()> {
     let identity: ClientPublicBundle = read_cbor_file(&identity_path).await?;
     let state: ClientStateFile = read_json_file(&state_path).await?;
 
-    let policy_descriptor = if let Some(hub) = args.hub.as_deref() {
-        let client = match parse_hub_reference(hub)? {
-            HubReference::Remote(client) => client,
+    let policy_descriptor = if let Some(resolved) = resolve_optional_hub(&args.hub).await? {
+        match resolved.reference {
+            HubReference::Remote(client) => {
+                Some(fetch_remote_kex_policy_descriptor(&client).await?)
+            }
             HubReference::Local(_) => {
                 bail_usage!("id usage policy requires an HTTP hub endpoint (e.g. http://host:port)")
             }
-        };
-        Some(fetch_remote_kex_policy_descriptor(&client).await?)
+        }
     } else {
         None
     };
@@ -3888,7 +4056,8 @@ fn render_id_usage(entries: &[IdUsageEntry], use_json: bool) {
 }
 
 async fn handle_send(args: SendArgs) -> Result<()> {
-    let result = match parse_hub_reference(&args.hub)? {
+    let reference = hub_reference_from_locator(&args.hub, "send").await?;
+    let result = match reference {
         HubReference::Local(data_dir) => handle_send_local(data_dir, args).await,
         HubReference::Remote(client) => handle_send_remote(client, args).await,
     };
@@ -4291,7 +4460,7 @@ fn render_revocations(entries: &[RenderedRevocation], use_json: bool) {
 }
 
 async fn handle_stream(args: StreamArgs) -> Result<()> {
-    let hub = parse_hub_reference(&args.hub)?;
+    let hub = hub_reference_from_locator(&args.hub, "stream").await?;
     let result = match hub {
         HubReference::Local(data_dir) => {
             let stream_state = load_stream_state(&data_dir, &args.stream).await?;
@@ -4506,7 +4675,7 @@ async fn handle_cap_issue(args: CapIssueArgs) -> Result<()> {
 }
 
 async fn handle_cap_authorize(args: CapAuthorizeArgs) -> Result<()> {
-    match parse_hub_reference(&args.hub)? {
+    match hub_reference_from_locator(&args.hub, "cap authorize").await? {
         HubReference::Local(_) => {
             bail_usage!("cap authorize requires an HTTP hub endpoint (e.g. http://host:port)")
         }
@@ -4546,7 +4715,7 @@ async fn handle_cap_authorize_remote(client: HubHttpClient, args: CapAuthorizeAr
 }
 
 async fn handle_cap_status(args: CapStatusArgs) -> Result<()> {
-    let client = match parse_hub_reference(&args.hub)? {
+    let client = match hub_reference_from_locator(&args.hub, "cap status").await? {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("cap status requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -4581,7 +4750,7 @@ async fn handle_cap_status(args: CapStatusArgs) -> Result<()> {
 }
 
 async fn handle_cap_revocations(args: CapRevocationsArgs) -> Result<()> {
-    match parse_hub_reference(&args.hub)? {
+    match hub_reference_from_locator(&args.hub, "cap revocations").await? {
         HubReference::Remote(client) => handle_cap_revocations_remote(client, args).await?,
         HubReference::Local(data_dir) => handle_cap_revocations_local(data_dir, args).await?,
     };
@@ -4743,7 +4912,7 @@ fn render_cap_status(response: &RemoteCapStatusResponse, auth_ref_hex: &str, use
 }
 
 async fn handle_pow_request(args: PowRequestArgs) -> Result<()> {
-    let client = match parse_hub_reference(&args.hub)? {
+    let client = match hub_reference_from_locator(&args.hub, "pow request").await? {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("pow request requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -4840,7 +5009,7 @@ const ADMIN_SIGNING_DOMAIN: &str = "veen/admin";
 const WALLET_TRANSFER_DOMAIN: &str = "veen/cli-wallet-transfer";
 
 async fn handle_fed_authority_publish(args: FedAuthorityPublishArgs) -> Result<()> {
-    match parse_hub_reference(&args.hub)? {
+    match hub_reference_from_locator(&args.hub, "fed authority publish").await? {
         HubReference::Remote(client) => handle_fed_authority_publish_remote(client, args).await,
         HubReference::Local(_) => {
             bail_usage!(
@@ -4918,7 +5087,7 @@ async fn handle_fed_authority_show(args: FedAuthorityShowArgs) -> Result<()> {
         json,
     } = args;
 
-    let client = match parse_hub_reference(&hub)? {
+    let client = match hub_reference_from_locator(&hub, "fed authority show").await? {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("fed authority show requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -4939,7 +5108,7 @@ async fn handle_fed_authority_show(args: FedAuthorityShowArgs) -> Result<()> {
 async fn handle_label_authority(args: LabelAuthorityArgs) -> Result<()> {
     let LabelAuthorityArgs { hub, label, json } = args;
 
-    let client = match parse_hub_reference(&hub)? {
+    let client = match hub_reference_from_locator(&hub, "label authority").await? {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("label authority requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -5191,7 +5360,7 @@ fn parse_metadata_value(input: Option<String>) -> Result<Option<CborValue>> {
 }
 
 async fn handle_label_class_set(args: LabelClassSetArgs) -> Result<()> {
-    match parse_hub_reference(&args.hub)? {
+    match hub_reference_from_locator(&args.hub, "label-class set").await? {
         HubReference::Remote(client) => handle_label_class_set_remote(client, args).await,
         HubReference::Local(_) => {
             bail_usage!("label-class set requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -5233,7 +5402,7 @@ async fn handle_label_class_set_remote(
 
 async fn handle_label_class_show(args: LabelClassShowArgs) -> Result<()> {
     let LabelClassShowArgs { hub, label, json } = args;
-    let client = match parse_hub_reference(&hub)? {
+    let client = match hub_reference_from_locator(&hub, "label-class show").await? {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("label-class show requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -5261,7 +5430,7 @@ async fn handle_label_class_list(args: LabelClassListArgs) -> Result<()> {
         class,
         json,
     } = args;
-    let client = match parse_hub_reference(&hub)? {
+    let client = match hub_reference_from_locator(&hub, "label-class list").await? {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("label-class list requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -5297,7 +5466,7 @@ async fn handle_schema_id(args: SchemaIdArgs) -> Result<()> {
 }
 
 async fn handle_schema_register(args: SchemaRegisterArgs) -> Result<()> {
-    match parse_hub_reference(&args.hub)? {
+    match hub_reference_from_locator(&args.hub, "schema register").await? {
         HubReference::Remote(client) => handle_schema_register_remote(client, args).await,
         HubReference::Local(_) => {
             bail_usage!("schema register requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -5344,7 +5513,7 @@ async fn handle_schema_show(args: SchemaShowArgs) -> Result<()> {
         json,
     } = args;
 
-    let client = match parse_hub_reference(&hub)? {
+    let client = match hub_reference_from_locator(&hub, "schema show").await? {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("schema show requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -5360,7 +5529,7 @@ async fn handle_schema_show(args: SchemaShowArgs) -> Result<()> {
 }
 
 async fn handle_schema_list(args: SchemaListArgs) -> Result<()> {
-    match parse_hub_reference(&args.hub)? {
+    match hub_reference_from_locator(&args.hub, "schema list").await? {
         HubReference::Remote(client) => handle_schema_list_remote(client).await,
         HubReference::Local(_) => {
             bail_usage!("schema list requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -5417,7 +5586,7 @@ async fn fetch_schema_registry_entry(
 }
 
 async fn handle_wallet_transfer(args: WalletTransferArgs) -> Result<()> {
-    match parse_hub_reference(&args.hub)? {
+    match hub_reference_from_locator(&args.hub, "wallet transfer").await? {
         HubReference::Remote(client) => handle_wallet_transfer_remote(client, args).await,
         HubReference::Local(_) => {
             bail_usage!("wallet transfer requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -5480,7 +5649,7 @@ async fn operation_id_from_bundle(path: &Path) -> Result<OperationId> {
 }
 
 async fn handle_revoke_publish(args: RevokePublishArgs) -> Result<()> {
-    match parse_hub_reference(&args.hub)? {
+    match hub_reference_from_locator(&args.hub, "revoke publish").await? {
         HubReference::Remote(client) => handle_revoke_publish_remote(client, args).await,
         HubReference::Local(_) => {
             bail_usage!("revoke publish requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -5522,7 +5691,7 @@ async fn handle_revoke_publish_remote(
 }
 
 async fn handle_resync(args: ResyncArgs) -> Result<()> {
-    match parse_hub_reference(&args.hub)? {
+    match hub_reference_from_locator(&args.hub, "resync").await? {
         HubReference::Local(data_dir) => {
             handle_resync_local(data_dir, args).await?;
         }
@@ -5593,7 +5762,7 @@ async fn handle_resync_remote(client: HubHttpClient, args: ResyncArgs) -> Result
 }
 
 async fn handle_verify_state(args: VerifyStateArgs) -> Result<()> {
-    let hub = parse_hub_reference(&args.hub)?;
+    let hub = hub_reference_from_locator(&args.hub, "verify-state").await?;
     let client_state: ClientStateFile = read_json_file(&args.client.join("state.json")).await?;
 
     let hub_seq = match hub {
@@ -5706,7 +5875,9 @@ async fn handle_rpc_call(args: RpcCallArgs) -> Result<()> {
 }
 
 async fn handle_crdt_lww_set(args: CrdtLwwSetArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
+    let data_dir = hub_reference_from_locator(&args.hub, "crdt lww set")
+        .await?
+        .into_local()?;
     ensure_crdt_stream_dir(&data_dir, &args.stream).await?;
     let mut state = load_lww_state(&data_dir, &args.stream).await?;
     let timestamp = args.ts.unwrap_or(current_unix_timestamp()?);
@@ -5730,7 +5901,9 @@ async fn handle_crdt_lww_set(args: CrdtLwwSetArgs) -> Result<()> {
 }
 
 async fn handle_crdt_lww_get(args: CrdtLwwGetArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
+    let data_dir = hub_reference_from_locator(&args.hub, "crdt lww get")
+        .await?
+        .into_local()?;
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let state = load_lww_state(&data_dir, &args.stream).await?;
     if let Some(value) = state.entries.get(&args.key) {
@@ -5744,7 +5917,9 @@ async fn handle_crdt_lww_get(args: CrdtLwwGetArgs) -> Result<()> {
 }
 
 async fn handle_crdt_orset_add(args: CrdtOrsetAddArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
+    let data_dir = hub_reference_from_locator(&args.hub, "crdt orset add")
+        .await?
+        .into_local()?;
     ensure_crdt_stream_dir(&data_dir, &args.stream).await?;
     let mut state = load_orset_state(&data_dir, &args.stream).await?;
     let now = current_unix_timestamp()?;
@@ -5764,7 +5939,9 @@ async fn handle_crdt_orset_add(args: CrdtOrsetAddArgs) -> Result<()> {
 }
 
 async fn handle_crdt_orset_remove(args: CrdtOrsetRemoveArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
+    let data_dir = hub_reference_from_locator(&args.hub, "crdt orset remove")
+        .await?
+        .into_local()?;
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let mut state = load_orset_state(&data_dir, &args.stream).await?;
     let now = current_unix_timestamp()?;
@@ -5789,7 +5966,9 @@ async fn handle_crdt_orset_remove(args: CrdtOrsetRemoveArgs) -> Result<()> {
 }
 
 async fn handle_crdt_orset_list(args: CrdtOrsetListArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
+    let data_dir = hub_reference_from_locator(&args.hub, "crdt orset list")
+        .await?
+        .into_local()?;
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let state = load_orset_state(&data_dir, &args.stream).await?;
     let mut visible: BTreeSet<&String> = BTreeSet::new();
@@ -5811,7 +5990,9 @@ async fn handle_crdt_orset_list(args: CrdtOrsetListArgs) -> Result<()> {
 }
 
 async fn handle_crdt_counter_add(args: CrdtCounterAddArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
+    let data_dir = hub_reference_from_locator(&args.hub, "crdt counter add")
+        .await?
+        .into_local()?;
     ensure_crdt_stream_dir(&data_dir, &args.stream).await?;
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let mut state = load_counter_state(&data_dir, &args.stream).await?;
@@ -5823,7 +6004,9 @@ async fn handle_crdt_counter_add(args: CrdtCounterAddArgs) -> Result<()> {
 }
 
 async fn handle_crdt_counter_get(args: CrdtCounterGetArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
+    let data_dir = hub_reference_from_locator(&args.hub, "crdt counter get")
+        .await?
+        .into_local()?;
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let state = load_counter_state(&data_dir, &args.stream).await?;
     println!("counter value={}", state.value);
@@ -5832,7 +6015,7 @@ async fn handle_crdt_counter_get(args: CrdtCounterGetArgs) -> Result<()> {
 }
 
 async fn handle_anchor_publish(args: AnchorPublishArgs) -> Result<()> {
-    match parse_hub_reference(&args.hub)? {
+    match hub_reference_from_locator(&args.hub, "anchor publish").await? {
         HubReference::Local(data_dir) => {
             let mut log = load_anchor_log(&data_dir).await?;
             let ts = args.ts.unwrap_or(current_unix_timestamp()?);
@@ -6004,6 +6187,96 @@ fn record_selftest_stub_marker(suite: SelftestSuite) -> Result<()> {
             writeln!(&mut file, "{name}").context("writing selftest stub marker")?;
         }
         println!("stubbed selftest suite: {name}");
+    }
+    Ok(())
+}
+
+async fn handle_env_init(args: EnvInitArgs) -> Result<()> {
+    ensure_non_empty_field(&args.name, "name")?;
+    ensure_non_empty_field(&args.cluster_context, "cluster-context")?;
+    ensure_non_empty_field(&args.namespace, "namespace")?;
+    if args.name.contains('/') || args.name.contains("\\") {
+        bail_usage!("environment name must not contain path separators");
+    }
+
+    fs::create_dir_all(&args.root)
+        .await
+        .with_context(|| format!("creating {}", args.root.display()))?;
+    let path = env_descriptor_path(&args.root, &args.name);
+    ensure_absent(&path).await?;
+
+    let descriptor = EnvDescriptor {
+        version: ENV_DESCRIPTOR_VERSION,
+        name: args.name,
+        cluster_context: args.cluster_context,
+        namespace: args.namespace,
+        description: args.description,
+        hubs: BTreeMap::new(),
+        tenants: BTreeMap::new(),
+    };
+    write_env_descriptor(&path, &descriptor).await?;
+    println!("wrote {}", path.display());
+    Ok(())
+}
+
+async fn handle_env_add_hub(args: EnvAddHubArgs) -> Result<()> {
+    ensure_non_empty_field(&args.hub_name, "hub-name")?;
+    ensure_non_empty_field(&args.service_url, "service-url")?;
+    let mut descriptor = read_env_descriptor(&args.env).await?;
+    let profile_id = normalize_hex32_field(&args.profile_id, "profile-id")?;
+    let realm_id = match args.realm {
+        Some(ref value) => Some(normalize_hex32_field(value, "realm")?),
+        None => None,
+    };
+
+    descriptor.hubs.insert(
+        args.hub_name.clone(),
+        EnvHubDescriptor {
+            service_url: args.service_url.clone(),
+            profile_id,
+            realm_id,
+        },
+    );
+    write_env_descriptor(&args.env, &descriptor).await?;
+    println!("recorded hub `{}` in {}", args.hub_name, args.env.display());
+    Ok(())
+}
+
+async fn handle_env_add_tenant(args: EnvAddTenantArgs) -> Result<()> {
+    ensure_non_empty_field(&args.tenant_id, "tenant-id")?;
+    ensure_non_empty_field(&args.stream_prefix, "stream-prefix")?;
+    let mut descriptor = read_env_descriptor(&args.env).await?;
+    let label_class = args
+        .label_class
+        .as_ref()
+        .map(EnvTenantLabelClass::as_str)
+        .unwrap_or("user")
+        .to_string();
+
+    descriptor.tenants.insert(
+        args.tenant_id.clone(),
+        EnvTenantDescriptor {
+            stream_prefix: args.stream_prefix.clone(),
+            label_class,
+        },
+    );
+    write_env_descriptor(&args.env, &descriptor).await?;
+    println!(
+        "recorded tenant `{}` in {}",
+        args.tenant_id,
+        args.env.display()
+    );
+    Ok(())
+}
+
+async fn handle_env_show(args: EnvShowArgs) -> Result<()> {
+    let descriptor = read_env_descriptor(&args.env).await?;
+    if json_output_enabled(args.json) {
+        let json = serde_json::to_string_pretty(&descriptor)
+            .with_context(|| format!("serialising {}", args.env.display()))?;
+        println!("{json}");
+    } else {
+        render_env_descriptor_summary(&descriptor);
     }
     Ok(())
 }
@@ -6675,6 +6948,85 @@ enum HubReference {
     Remote(HubHttpClient),
 }
 
+struct ResolvedHubRef {
+    reference: HubReference,
+    profile_id: Option<String>,
+}
+
+impl ResolvedHubRef {
+    fn into_reference(self) -> HubReference {
+        self.reference
+    }
+
+    fn profile_id(&self) -> Option<&str> {
+        self.profile_id.as_deref()
+    }
+}
+
+async fn require_hub(locator: &HubLocatorArgs, context: &str) -> Result<ResolvedHubRef> {
+    match resolve_optional_hub(locator).await? {
+        Some(value) => Ok(value),
+        None => bail_usage!(
+            "{context} requires --hub URL or --env/--hub-name",
+            context = context
+        ),
+    }
+}
+
+async fn resolve_optional_hub(locator: &HubLocatorArgs) -> Result<Option<ResolvedHubRef>> {
+    if locator.hub.is_some() && (locator.env.is_some() || locator.hub_name.is_some()) {
+        bail_usage!("--hub cannot be combined with --env or --hub-name");
+    }
+
+    if let Some(ref reference) = locator.hub {
+        let hub = parse_hub_reference(reference)?;
+        return Ok(Some(ResolvedHubRef {
+            reference: hub,
+            profile_id: None,
+        }));
+    }
+
+    if locator.env.is_some() || locator.hub_name.is_some() {
+        let env_path = locator
+            .env
+            .as_ref()
+            .ok_or_else(|| CliUsageError::new("--env is required when using --hub-name".into()))?;
+        let hub_name = locator
+            .hub_name
+            .as_deref()
+            .ok_or_else(|| CliUsageError::new("--hub-name is required when using --env".into()))?;
+        let descriptor = read_env_descriptor(env_path).await?;
+        let hub_descriptor = descriptor.hubs.get(hub_name).ok_or_else(|| {
+            CliUsageError::new(format!(
+                "hub `{hub_name}` not found in {}",
+                env_path.display()
+            ))
+        })?;
+        let reference = parse_hub_reference(&hub_descriptor.service_url)?;
+        return Ok(Some(ResolvedHubRef {
+            reference,
+            profile_id: Some(hub_descriptor.profile_id.clone()),
+        }));
+    }
+
+    Ok(None)
+}
+
+async fn hub_reference_from_locator(
+    locator: &HubLocatorArgs,
+    context: &str,
+) -> Result<HubReference> {
+    let resolved = require_hub(locator, context).await?;
+    if let Some(profile_id) = resolved.profile_id() {
+        tracing::debug!(
+            %profile_id,
+            context = context,
+            "resolved hub profile via env descriptor"
+        );
+    }
+    Ok(resolved.into_reference())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6727,6 +7079,87 @@ mod tests {
         tokio::fs::write(&path, encoded)
             .await
             .with_context(|| format!("writing hub key material to {}", path.display()))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn env_descriptor_round_trip() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("alpha.env.json");
+        let descriptor = EnvDescriptor {
+            version: ENV_DESCRIPTOR_VERSION,
+            name: "alpha".to_string(),
+            cluster_context: "kind-test".to_string(),
+            namespace: "veen".to_string(),
+            description: Some("test".to_string()),
+            hubs: BTreeMap::new(),
+            tenants: BTreeMap::new(),
+        };
+        write_env_descriptor(&path, &descriptor).await?;
+        let loaded = read_env_descriptor(&path).await?;
+        assert_eq!(loaded.name, "alpha");
+        assert_eq!(loaded.cluster_context, "kind-test");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn env_descriptor_mutations_persist() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path().join("env");
+        let init_args = EnvInitArgs {
+            root: root.clone(),
+            name: "demo".to_string(),
+            cluster_context: "kind-demo".to_string(),
+            namespace: "veen-demo".to_string(),
+            description: None,
+        };
+        handle_env_init(init_args).await?;
+        let env_path = root.join("demo.env.json");
+
+        let add_hub = EnvAddHubArgs {
+            env: env_path.clone(),
+            hub_name: "primary".to_string(),
+            service_url: "http://hub.demo".to_string(),
+            profile_id: "a".repeat(64),
+            realm: Some("b".repeat(64)),
+        };
+        handle_env_add_hub(add_hub).await?;
+
+        let add_tenant = EnvAddTenantArgs {
+            env: env_path.clone(),
+            tenant_id: "tenant-a".to_string(),
+            stream_prefix: "app".to_string(),
+            label_class: Some(EnvTenantLabelClass::Wallet),
+        };
+        handle_env_add_tenant(add_tenant).await?;
+
+        let descriptor = read_env_descriptor(&env_path).await?;
+        let hub = descriptor.hubs.get("primary").expect("hub recorded");
+        assert_eq!(hub.service_url, "http://hub.demo");
+        assert_eq!(hub.profile_id, "a".repeat(64));
+        let tenant = descriptor.tenants.get("tenant-a").expect("tenant recorded");
+        assert_eq!(tenant.label_class, "wallet");
+        assert_eq!(tenant.stream_prefix, "app");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn env_descriptor_validation_detects_empty_namespace() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("broken.env.json");
+        let invalid = json!({
+            "version": ENV_DESCRIPTOR_VERSION,
+            "name": "broken",
+            "cluster_context": "ctx",
+            "namespace": "",
+            "hubs": {},
+            "tenants": {}
+        });
+        tokio::fs::write(&path, serde_json::to_vec_pretty(&invalid)?).await?;
+        let err = read_env_descriptor(&path)
+            .await
+            .expect_err("expected namespace validation failure");
+        assert!(err.to_string().contains("namespace"));
         Ok(())
     }
 
@@ -7213,7 +7646,7 @@ mod tests {
         .await?;
 
         handle_send(SendArgs {
-            hub: hub_url.clone(),
+            hub: HubLocatorArgs::from_url(hub_url.clone()),
             client: client_dir.path().to_path_buf(),
             stream: "test".to_string(),
             body: json!({ "msg": "hello" }).to_string(),
@@ -7230,7 +7663,7 @@ mod tests {
         .await?;
 
         handle_stream(StreamArgs {
-            hub: hub_url.clone(),
+            hub: HubLocatorArgs::from_url(hub_url.clone()),
             client: client_dir.path().to_path_buf(),
             stream: "test".to_string(),
             from: 0,
@@ -7239,7 +7672,7 @@ mod tests {
         .await?;
 
         handle_resync(ResyncArgs {
-            hub: hub_url,
+            hub: HubLocatorArgs::from_url(hub_url),
             client: client_dir.path().to_path_buf(),
             stream: "test".to_string(),
         })
@@ -7276,7 +7709,7 @@ mod tests {
 
         let challenge_hex = "0abc".to_string();
         handle_send(SendArgs {
-            hub: url.clone(),
+            hub: HubLocatorArgs::from_url(url.clone()),
             client: client_dir.path().to_path_buf(),
             stream: "pow".to_string(),
             body: json!({ "msg": "pow" }).to_string(),
@@ -7326,7 +7759,7 @@ mod tests {
         let solved = super::solve_pow_cookie(challenge_bytes.clone(), 5)?;
 
         handle_send(SendArgs {
-            hub: url.clone(),
+            hub: HubLocatorArgs::from_url(url.clone()),
             client: client_dir.path().to_path_buf(),
             stream: "pow".to_string(),
             body: json!({ "msg": "provided" }).to_string(),
@@ -7386,7 +7819,7 @@ mod tests {
         .await?;
 
         handle_send(SendArgs {
-            hub: hub_url.clone(),
+            hub: HubLocatorArgs::from_url(hub_url.clone()),
             client: client_dir.path().to_path_buf(),
             stream: "proofs".to_string(),
             body: json!({ "msg": "hello" }).to_string(),
@@ -7403,7 +7836,7 @@ mod tests {
         .await?;
 
         handle_stream(StreamArgs {
-            hub: hub_url.clone(),
+            hub: HubLocatorArgs::from_url(hub_url.clone()),
             client: client_dir.path().to_path_buf(),
             stream: "proofs".to_string(),
             from: 0,
@@ -7492,13 +7925,13 @@ mod tests {
         sleep(Duration::from_millis(50)).await;
 
         let latest = handle_hub_checkpoint_latest(HubCheckpointLatestArgs {
-            hub: hub_url.clone(),
+            hub: HubLocatorArgs::from_url(hub_url.clone()),
         })
         .await?;
         assert_eq!(latest, checkpoint2);
 
         let range = handle_hub_checkpoint_range(HubCheckpointRangeArgs {
-            hub: hub_url.clone(),
+            hub: HubLocatorArgs::from_url(hub_url.clone()),
             from_epoch: Some(1),
             to_epoch: Some(3),
         })
@@ -7626,7 +8059,7 @@ mod tests {
         let url = format!("http://{}", addr);
         let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
         let args = FedAuthorityPublishArgs {
-            hub: url.clone(),
+            hub: HubLocatorArgs::from_url(url.clone()),
             signer: signer_dir.path().to_path_buf(),
             realm: realm_hex,
             stream: stream_name,
@@ -7674,7 +8107,7 @@ mod tests {
         let (url, mut body_rx, server) = spawn_cbor_capture_server("/label-class").await?;
         let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
         let args = LabelClassSetArgs {
-            hub: url.clone(),
+            hub: HubLocatorArgs::from_url(url.clone()),
             signer: signer_dir.path().to_path_buf(),
             realm: "default".to_string(),
             label: "chat/general".to_string(),
@@ -7763,7 +8196,7 @@ mod tests {
 
         let url = format!("http://{addr}");
         handle_label_class_show(LabelClassShowArgs {
-            hub: url,
+            hub: HubLocatorArgs::from_url(url),
             label: expected_label.clone(),
             json: true,
         })
@@ -7834,7 +8267,7 @@ mod tests {
 
         let url = format!("http://{addr}");
         handle_label_class_list(LabelClassListArgs {
-            hub: url,
+            hub: HubLocatorArgs::from_url(url),
             realm: Some(realm.clone()),
             class: Some("user".to_string()),
             json: true,
@@ -7858,7 +8291,7 @@ mod tests {
         let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
         let schema_id_hex = hex::encode([0xAAu8; SCHEMA_ID_LEN]);
         let args = SchemaRegisterArgs {
-            hub: url.clone(),
+            hub: HubLocatorArgs::from_url(url.clone()),
             signer: signer_dir.path().to_path_buf(),
             schema_id: schema_id_hex.clone(),
             name: "wallet.transfer.v1".to_string(),
@@ -7909,7 +8342,7 @@ mod tests {
         let wallet_hex = hex::encode([0x55u8; WALLET_ID_LEN]);
         let to_wallet_hex = hex::encode([0x66u8; WALLET_ID_LEN]);
         let args = WalletTransferArgs {
-            hub: url.clone(),
+            hub: HubLocatorArgs::from_url(url.clone()),
             signer: signer_dir.path().to_path_buf(),
             wallet_id: wallet_hex.clone(),
             to_wallet_id: to_wallet_hex.clone(),
@@ -7984,7 +8417,7 @@ mod tests {
         let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
         let target_hex = hex::encode([0x77u8; REVOCATION_TARGET_LEN]);
         let args = RevokePublishArgs {
-            hub: url.clone(),
+            hub: HubLocatorArgs::from_url(url.clone()),
             signer: signer_dir.path().to_path_buf(),
             kind: RevocationKindValue::ClientId,
             target: target_hex.clone(),
@@ -8575,6 +9008,112 @@ where
         .await
         .with_context(|| format!("persisting {}", path.display()))?;
     Ok(())
+}
+
+async fn write_env_descriptor(path: &Path, descriptor: &EnvDescriptor) -> Result<()> {
+    descriptor.validate()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut rng = OsRng;
+    let suffix = rng.next_u64();
+    let tmp_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| format!(".{name}.tmp-{suffix:x}"))
+        .unwrap_or_else(|| format!(".env.tmp-{suffix:x}"));
+    let tmp_path = path.with_file_name(tmp_name);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&tmp_path)
+        .await
+        .with_context(|| format!("creating {}", tmp_path.display()))?;
+    let data = serde_json::to_vec_pretty(descriptor)
+        .with_context(|| format!("serialising JSON for {}", path.display()))?;
+    file.write_all(&data)
+        .await
+        .with_context(|| format!("writing {}", tmp_path.display()))?;
+    file.flush().await?;
+    file.sync_all().await?;
+    drop(file);
+    if let Err(err) = fs::rename(&tmp_path, path).await {
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err(err).with_context(|| format!("replacing {}", path.display()));
+    }
+    Ok(())
+}
+
+async fn read_env_descriptor(path: &Path) -> Result<EnvDescriptor> {
+    let descriptor: EnvDescriptor = read_json_file(path).await?;
+    descriptor.validate()?;
+    Ok(descriptor)
+}
+
+fn env_descriptor_path(root: &Path, name: &str) -> PathBuf {
+    root.join(format!("{name}.env.json"))
+}
+
+fn ensure_non_empty_field(value: &str, field: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail_usage!("{field} must not be empty", field = field);
+    }
+    Ok(())
+}
+
+fn normalize_hex32_field(value: &str, field: &str) -> Result<String> {
+    let trimmed = value.trim().to_ascii_lowercase();
+    if trimmed.len() != 64 {
+        bail_usage!("{field} must be 64 hex characters", field = field);
+    }
+    if !trimmed.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        bail_usage!(
+            "{field} must contain only hexadecimal characters",
+            field = field
+        );
+    }
+    Ok(trimmed)
+}
+
+fn render_env_descriptor_summary(descriptor: &EnvDescriptor) {
+    println!("name: {}", descriptor.name);
+    println!("version: {}", descriptor.version);
+    println!("cluster_context: {}", descriptor.cluster_context);
+    println!("namespace: {}", descriptor.namespace);
+    match descriptor
+        .description
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(value) => println!("description: {value}"),
+        None => println!("description: (none)"),
+    }
+    if descriptor.hubs.is_empty() {
+        println!("hubs: (none)");
+    } else {
+        println!("hubs:");
+        for (name, hub) in descriptor.hubs.iter() {
+            let realm = hub.realm_id.as_deref().unwrap_or("(none)");
+            println!(
+                "  {name}: url={} profile_id={} realm={realm}",
+                hub.service_url, hub.profile_id
+            );
+        }
+    }
+    if descriptor.tenants.is_empty() {
+        println!("tenants: (none)");
+    } else {
+        println!("tenants:");
+        for (tenant, tenant_desc) in descriptor.tenants.iter() {
+            println!(
+                "  {tenant}: stream_prefix={} label_class={}",
+                tenant_desc.stream_prefix, tenant_desc.label_class
+            );
+        }
+    }
 }
 
 async fn read_cbor_file<T>(path: &Path) -> Result<T>
