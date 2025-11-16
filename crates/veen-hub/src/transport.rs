@@ -23,6 +23,7 @@ use crate::pipeline::{
 };
 use std::str::FromStr;
 use veen_core::label::StreamId;
+use veen_core::revocation::RevocationKind;
 use veen_core::RealmId;
 
 pub struct HubServerHandle {
@@ -55,6 +56,12 @@ impl HubServerHandle {
             .route("/metrics", get(handle_metrics))
             .route("/profile", get(handle_profile))
             .route("/role", get(handle_role))
+            .route("/kex_policy", get(handle_kex_policy))
+            .route("/admission", get(handle_admission))
+            .route("/admission_log", get(handle_admission_log))
+            .route("/cap_status", post(handle_cap_status))
+            .route("/revocations", get(handle_revocations))
+            .route("/pow_request", get(handle_pow_request))
             .route("/checkpoint_latest", get(handle_checkpoint_latest))
             .route("/checkpoint_range", get(handle_checkpoint_range))
             .with_state(pipeline);
@@ -112,10 +119,36 @@ struct LabelAuthorityQuery {
     label: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct AdmissionLogQuery {
+    limit: Option<usize>,
+    codes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CapStatusRequest {
+    auth_ref: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RevocationListQuery {
+    kind: Option<String>,
+    since: Option<u64>,
+    active_only: Option<bool>,
+    limit: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PowRequestQuery {
+    difficulty: Option<u8>,
+}
+
 async fn handle_submit(
     State(pipeline): State<HubPipeline>,
     Json(request): Json<SubmitRequest>,
 ) -> impl IntoResponse {
+    let stream_label = request.stream.clone();
+    let client_id = request.client_id.clone();
     match pipeline.submit(request).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(err) => {
@@ -123,6 +156,14 @@ async fn handle_submit(
                 tracing::warn!(error = ?cap_err, "submit failed");
                 let code = cap_err.code();
                 pipeline.observability().record_submit_err(code);
+                pipeline
+                    .record_admission_failure(
+                        &stream_label,
+                        &client_id,
+                        cap_err.code(),
+                        &cap_err.to_string(),
+                    )
+                    .await;
                 let status = match code {
                     "E.RATE" => StatusCode::TOO_MANY_REQUESTS,
                     "E.SIZE" => StatusCode::PAYLOAD_TOO_LARGE,
@@ -192,6 +233,80 @@ async fn handle_authorize(State(pipeline): State<HubPipeline>, body: Bytes) -> i
         }
         Err(err) => {
             tracing::warn!(error = ?err, "authorize failed");
+            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+        }
+    }
+}
+
+async fn handle_kex_policy(State(pipeline): State<HubPipeline>) -> impl IntoResponse {
+    let descriptor = pipeline.kex_policy_descriptor().await;
+    (StatusCode::OK, Json(descriptor)).into_response()
+}
+
+async fn handle_admission(State(pipeline): State<HubPipeline>) -> impl IntoResponse {
+    let report = pipeline.admission_report().await;
+    (StatusCode::OK, Json(report)).into_response()
+}
+
+async fn handle_admission_log(
+    State(pipeline): State<HubPipeline>,
+    Query(query): Query<AdmissionLogQuery>,
+) -> impl IntoResponse {
+    let codes = query.codes.as_ref().map(|raw| {
+        raw.split(',')
+            .filter_map(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+    let response = pipeline.admission_log(query.limit, codes).await;
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+async fn handle_cap_status(
+    State(pipeline): State<HubPipeline>,
+    Json(request): Json<CapStatusRequest>,
+) -> impl IntoResponse {
+    match pipeline.capability_status(&request.auth_ref).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "cap status failed");
+            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+        }
+    }
+}
+
+async fn handle_revocations(
+    State(pipeline): State<HubPipeline>,
+    Query(query): Query<RevocationListQuery>,
+) -> impl IntoResponse {
+    let kind = match query.kind {
+        Some(ref value) => match parse_revocation_kind(value) {
+            Ok(kind) => Some(kind),
+            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        },
+        None => None,
+    };
+    let limit = query.limit.map(|value| value as usize);
+    let response = pipeline
+        .revocation_list(kind, query.since, query.active_only.unwrap_or(false), limit)
+        .await;
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+async fn handle_pow_request(
+    State(pipeline): State<HubPipeline>,
+    Query(query): Query<PowRequestQuery>,
+) -> impl IntoResponse {
+    match pipeline.pow_challenge(query.difficulty).await {
+        Ok(descriptor) => (StatusCode::OK, Json(descriptor)).into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "pow request failed");
             (StatusCode::BAD_REQUEST, err.to_string()).into_response()
         }
     }
@@ -443,6 +558,15 @@ fn parse_realm_id_hex(input: &str) -> Result<RealmId, String> {
 fn parse_stream_id_hex(input: &str) -> Result<StreamId, String> {
     let bytes = hex::decode(input).map_err(|err| format!("invalid stream identifier: {err}"))?;
     StreamId::from_slice(&bytes).map_err(|err| format!("invalid stream identifier length: {err}"))
+}
+
+fn parse_revocation_kind(value: &str) -> Result<RevocationKind, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "client-id" => Ok(RevocationKind::ClientId),
+        "auth-ref" => Ok(RevocationKind::AuthRef),
+        "cap-token" => Ok(RevocationKind::CapToken),
+        other => Err(format!("invalid revocation kind: {other}")),
+    }
 }
 
 fn cbor_response<T>(value: &T) -> Result<Response>

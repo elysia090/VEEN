@@ -29,6 +29,7 @@ hex.workspace = true
 thiserror.workspace = true
 veen-core = { path = "../veen-core" }
 serde_bytes.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

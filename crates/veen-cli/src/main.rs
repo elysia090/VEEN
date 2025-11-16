@@ -96,6 +96,7 @@ const RETENTION_CONFIG_FILE: &str = "retention.json";
 const TLS_INFO_FILE: &str = "tls_info.json";
 const ATTACHMENTS_DIR: &str = "attachments";
 const HUB_CONFIG_FILE: &str = "hub-config.toml";
+const REVOCATIONS_FILE: &str = "revocations.json";
 
 type JsonMap = serde_json::Map<String, JsonValue>;
 
@@ -371,6 +372,9 @@ enum Command {
     /// Capability management.
     #[command(subcommand)]
     Cap(CapCommand),
+    /// Proof-of-work helpers.
+    #[command(subcommand)]
+    Pow(PowCommand),
     /// Federation and authority helpers.
     #[command(subcommand)]
     Fed(FedCommand),
@@ -444,6 +448,14 @@ enum HubCommand {
     Profile(HubProfileArgs),
     /// Inspect hub role information.
     Role(HubRoleArgs),
+    /// Inspect hub key and capability lifecycle policy.
+    #[command(name = "kex-policy")]
+    KexPolicy(HubKexPolicyArgs),
+    /// Inspect admission pipeline configuration and metrics.
+    Admission(HubAdmissionArgs),
+    /// Inspect recent admission failures.
+    #[command(name = "admission-log")]
+    AdmissionLog(HubAdmissionLogArgs),
     /// Fetch the latest checkpoint from a hub.
     #[command(name = "checkpoint-latest")]
     CheckpointLatest(HubCheckpointLatestArgs),
@@ -465,6 +477,8 @@ enum IdCommand {
     Show(IdShowArgs),
     /// Rotate the client identifier key material.
     Rotate(IdRotateArgs),
+    /// Inspect client identifier usage statistics.
+    Usage(IdUsageArgs),
 }
 
 #[derive(Subcommand)]
@@ -479,6 +493,12 @@ enum CapCommand {
     Issue(CapIssueArgs),
     /// Authorise a capability token with the hub.
     Authorize(CapAuthorizeArgs),
+    /// Inspect hub view for a capability token.
+    Status(CapStatusArgs),
+    /// Publish a revocation record via the capability surface.
+    Revoke(RevokePublishArgs),
+    /// Inspect revocation records.
+    Revocations(CapRevocationsArgs),
 }
 
 #[derive(Subcommand)]
@@ -554,6 +574,14 @@ enum OperationCommand {
 enum RevokeCommand {
     /// Publish a revocation record.
     Publish(RevokePublishArgs),
+}
+
+#[derive(Subcommand)]
+enum PowCommand {
+    /// Request a proof-of-work challenge from a hub.
+    Request(PowRequestArgs),
+    /// Solve a proof-of-work challenge locally.
+    Solve(PowSolveArgs),
 }
 
 #[derive(Subcommand)]
@@ -801,6 +829,34 @@ struct HubRoleArgs {
 }
 
 #[derive(Args)]
+struct HubKexPolicyArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct HubAdmissionArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct HubAdmissionLogArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long)]
+    limit: Option<u64>,
+    #[arg(long)]
+    codes: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
 struct HubCheckpointLatestArgs {
     #[arg(long)]
     hub: String,
@@ -838,6 +894,16 @@ struct IdShowArgs {
 struct IdRotateArgs {
     #[arg(long)]
     client: PathBuf,
+}
+
+#[derive(Args)]
+struct IdUsageArgs {
+    #[arg(long)]
+    client: PathBuf,
+    #[arg(long)]
+    hub: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -914,6 +980,32 @@ struct CapAuthorizeArgs {
     hub: String,
     #[arg(long)]
     cap: PathBuf,
+}
+
+#[derive(Args)]
+struct CapStatusArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long)]
+    cap: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct CapRevocationsArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long, value_enum)]
+    kind: Option<RevocationKindValue>,
+    #[arg(long)]
+    since: Option<u64>,
+    #[arg(long)]
+    active_only: bool,
+    #[arg(long)]
+    limit: Option<u64>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -1054,6 +1146,26 @@ enum RevocationKindValue {
     CapToken,
 }
 
+impl RevocationKindValue {
+    fn as_str(&self) -> &'static str {
+        match self {
+            RevocationKindValue::ClientId => "client-id",
+            RevocationKindValue::AuthRef => "auth-ref",
+            RevocationKindValue::CapToken => "cap-token",
+        }
+    }
+}
+
+impl From<RevocationKindValue> for RevocationKind {
+    fn from(value: RevocationKindValue) -> Self {
+        match value {
+            RevocationKindValue::ClientId => RevocationKind::ClientId,
+            RevocationKindValue::AuthRef => RevocationKind::AuthRef,
+            RevocationKindValue::CapToken => RevocationKind::CapToken,
+        }
+    }
+}
+
 #[derive(Args)]
 struct RevokePublishArgs {
     #[arg(long)]
@@ -1070,6 +1182,28 @@ struct RevokePublishArgs {
     ttl: Option<u64>,
     #[arg(long)]
     ts: Option<u64>,
+}
+
+#[derive(Args)]
+struct PowRequestArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long, value_name = "BITS")]
+    difficulty: Option<u8>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct PowSolveArgs {
+    #[arg(long, value_name = "HEX")]
+    challenge: String,
+    #[arg(long, value_name = "BITS")]
+    difficulty: u8,
+    #[arg(long)]
+    max_iterations: Option<u64>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -1477,6 +1611,85 @@ struct RemoteHubRoleStream {
 }
 
 #[derive(Debug, Deserialize)]
+struct RemoteKexPolicyDescriptor {
+    ok: bool,
+    max_client_id_lifetime_sec: Option<u64>,
+    max_msgs_per_client_id_per_label: Option<u64>,
+    default_cap_ttl_sec: Option<u64>,
+    max_cap_ttl_sec: Option<u64>,
+    revocation_stream: Option<String>,
+    rotation_window_sec: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct RemoteAdmissionReport {
+    ok: bool,
+    stages: Vec<RemoteAdmissionStage>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct RemoteAdmissionStage {
+    name: String,
+    enabled: bool,
+    responsibilities: Vec<String>,
+    queue_depth: u64,
+    max_queue_depth: u64,
+    recent_err_rates: BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct RemoteAdmissionLogResponse {
+    ok: bool,
+    events: Vec<RemoteAdmissionEvent>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct RemoteAdmissionEvent {
+    ts: u64,
+    code: String,
+    label_prefix: String,
+    client_id_prefix: String,
+    detail: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemotePowChallenge {
+    ok: bool,
+    challenge: String,
+    difficulty: u8,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteCapStatusResponse {
+    ok: bool,
+    #[allow(dead_code)]
+    auth_ref: String,
+    hub_known: bool,
+    currently_valid: bool,
+    revoked: bool,
+    expires_at: Option<u64>,
+    revocation_kind: Option<String>,
+    revocation_ts: Option<u64>,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteRevocationList {
+    ok: bool,
+    revocations: Vec<RemoteRevocationEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteRevocationEntry {
+    kind: String,
+    target: String,
+    ts: u64,
+    ttl: Option<u64>,
+    reason: Option<String>,
+    active_now: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct RemoteAuthorityRecordDescriptor {
     ok: bool,
     realm_id: String,
@@ -1576,6 +1789,12 @@ struct ClientLabelState {
     last_stream_seq: u64,
     last_mmr_root: String,
     prev_ack: u64,
+    #[serde(default)]
+    msgs_sent: u64,
+    #[serde(default)]
+    first_sent_at: Option<u64>,
+    #[serde(default)]
+    last_sent_at: Option<u64>,
 }
 
 impl Default for ClientLabelState {
@@ -1584,6 +1803,9 @@ impl Default for ClientLabelState {
             last_stream_seq: 0,
             last_mmr_root: "0".repeat(64),
             prev_ack: 0,
+            msgs_sent: 0,
+            first_sent_at: None,
+            last_sent_at: None,
         }
     }
 }
@@ -1591,6 +1813,23 @@ impl Default for ClientLabelState {
 impl ClientStateFile {
     fn ensure_label_state(&mut self, label: &str) -> &mut ClientLabelState {
         self.labels.entry(label.to_string()).or_default()
+    }
+}
+
+impl ClientLabelState {
+    fn record_send(&mut self, seq: u64, sent_at: u64) {
+        self.last_stream_seq = seq;
+        self.prev_ack = seq;
+        self.msgs_sent = self.msgs_sent.saturating_add(1);
+        if self.first_sent_at.is_none() {
+            self.first_sent_at = Some(sent_at);
+        }
+        self.last_sent_at = Some(sent_at);
+    }
+
+    fn record_sync(&mut self, seq: u64) {
+        self.last_stream_seq = seq;
+        self.prev_ack = seq;
     }
 }
 
@@ -1743,6 +1982,41 @@ struct ClientRotationRecord {
     previous_dh_public: String,
 }
 
+struct KexPolicyThresholds {
+    max_client_id_lifetime_sec: Option<u64>,
+    max_msgs_per_client_id_per_label: Option<u64>,
+}
+
+struct IdUsageEntry {
+    stream: String,
+    label_hex: String,
+    client_id: String,
+    created_at: u64,
+    msgs_sent: u64,
+    approx_lifetime_sec: u64,
+    exceeds_msg_bound: bool,
+    exceeds_lifetime_bound: bool,
+    rotation_recommended: bool,
+}
+
+fn revocation_kind_label(kind: RevocationKind) -> &'static str {
+    match kind {
+        RevocationKind::ClientId => "client-id",
+        RevocationKind::AuthRef => "auth-ref",
+        RevocationKind::CapToken => "cap-token",
+    }
+}
+
+#[derive(Serialize)]
+struct RenderedRevocation {
+    kind: String,
+    target: String,
+    ts: u64,
+    ttl: Option<u64>,
+    reason: Option<String>,
+    active_now: bool,
+}
+
 #[tokio::main]
 async fn main() {
     let exit_code = match run_cli().await {
@@ -1774,6 +2048,9 @@ async fn run_cli() -> Result<()> {
             HubCommand::Metrics(args) => handle_hub_metrics(args).await,
             HubCommand::Profile(args) => handle_hub_profile(args).await,
             HubCommand::Role(args) => handle_hub_role(args).await,
+            HubCommand::KexPolicy(args) => handle_hub_kex_policy(args).await,
+            HubCommand::Admission(args) => handle_hub_admission(args).await,
+            HubCommand::AdmissionLog(args) => handle_hub_admission_log(args).await,
             HubCommand::CheckpointLatest(args) => {
                 handle_hub_checkpoint_latest(args).await.map(|_| ())
             }
@@ -1785,6 +2062,7 @@ async fn run_cli() -> Result<()> {
         Command::Id(cmd) => match cmd {
             IdCommand::Show(args) => handle_id_show(args).await,
             IdCommand::Rotate(args) => handle_id_rotate(args).await,
+            IdCommand::Usage(args) => handle_id_usage(args).await,
         },
         Command::Send(args) => handle_send(args).await,
         Command::Authorize(args) => handle_cap_authorize(args).await,
@@ -1795,6 +2073,13 @@ async fn run_cli() -> Result<()> {
         Command::Cap(cmd) => match cmd {
             CapCommand::Issue(args) => handle_cap_issue(args).await,
             CapCommand::Authorize(args) => handle_cap_authorize(args).await,
+            CapCommand::Status(args) => handle_cap_status(args).await,
+            CapCommand::Revoke(args) => handle_revoke_publish(args).await,
+            CapCommand::Revocations(args) => handle_cap_revocations(args).await,
+        },
+        Command::Pow(cmd) => match cmd {
+            PowCommand::Request(args) => handle_pow_request(args).await,
+            PowCommand::Solve(args) => handle_pow_solve(args).await,
         },
         Command::Fed(cmd) => match cmd {
             FedCommand::Authority(sub) => match sub {
@@ -3426,6 +3711,201 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
     Ok(())
 }
 
+async fn handle_hub_kex_policy(args: HubKexPolicyArgs) -> Result<()> {
+    let client = match parse_hub_reference(&args.hub)? {
+        HubReference::Remote(client) => client,
+        HubReference::Local(_) => {
+            bail_usage!("hub kex-policy requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    };
+
+    let descriptor = fetch_remote_kex_policy_descriptor(&client).await?;
+    render_kex_policy(&descriptor, json_output_enabled(args.json));
+    log_cli_goal("CLI.KEX1_PLUS.POLICY");
+    Ok(())
+}
+
+async fn handle_hub_admission(args: HubAdmissionArgs) -> Result<()> {
+    let client = match parse_hub_reference(&args.hub)? {
+        HubReference::Remote(client) => client,
+        HubReference::Local(_) => {
+            bail_usage!("hub admission requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    };
+
+    let report: RemoteAdmissionReport = client.get_json("/admission", &[]).await?;
+    render_admission_report(&report, json_output_enabled(args.json));
+    log_cli_goal("CLI.SH1_PLUS.ADMISSION");
+    Ok(())
+}
+
+async fn handle_hub_admission_log(args: HubAdmissionLogArgs) -> Result<()> {
+    let client = match parse_hub_reference(&args.hub)? {
+        HubReference::Remote(client) => client,
+        HubReference::Local(_) => {
+            bail_usage!("hub admission-log requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    };
+
+    let mut query = Vec::new();
+    if let Some(limit) = args.limit {
+        query.push(("limit", limit.to_string()));
+    }
+    if let Some(codes) = args.codes {
+        query.push(("codes", codes));
+    }
+
+    let response: RemoteAdmissionLogResponse = client.get_json("/admission_log", &query).await?;
+    render_admission_log(&response, json_output_enabled(args.json));
+    log_cli_goal("CLI.SH1_PLUS.ADMISSION_LOG");
+    Ok(())
+}
+
+async fn fetch_remote_kex_policy_descriptor(
+    client: &HubHttpClient,
+) -> Result<RemoteKexPolicyDescriptor> {
+    client.get_json("/kex_policy", &[]).await
+}
+
+fn render_kex_policy(descriptor: &RemoteKexPolicyDescriptor, use_json: bool) {
+    if !descriptor.ok {
+        emit_cli_error(
+            "E.PROFILE",
+            Some("hub declined to provide key lifecycle policy information"),
+            use_json,
+        );
+        process::exit(4);
+    }
+
+    if use_json {
+        let output = json!({
+            "ok": true,
+            "max_client_id_lifetime_sec": descriptor.max_client_id_lifetime_sec,
+            "max_msgs_per_client_id_per_label": descriptor.max_msgs_per_client_id_per_label,
+            "default_cap_ttl_sec": descriptor.default_cap_ttl_sec,
+            "max_cap_ttl_sec": descriptor.max_cap_ttl_sec,
+            "revocation_stream": descriptor.revocation_stream,
+            "rotation_window_sec": descriptor.rotation_window_sec,
+        });
+        match serde_json::to_string_pretty(&output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => println!("{output}"),
+        }
+    } else {
+        println!(
+            "max_client_id_lifetime_sec: {}",
+            display_or_unspecified(descriptor.max_client_id_lifetime_sec)
+        );
+        println!(
+            "max_msgs_per_client_id_per_label: {}",
+            display_or_unspecified(descriptor.max_msgs_per_client_id_per_label)
+        );
+        println!(
+            "default_cap_ttl_sec: {}",
+            display_or_unspecified(descriptor.default_cap_ttl_sec)
+        );
+        println!(
+            "max_cap_ttl_sec: {}",
+            display_or_unspecified(descriptor.max_cap_ttl_sec)
+        );
+        println!(
+            "revocation_stream: {}",
+            descriptor
+                .revocation_stream
+                .clone()
+                .unwrap_or_else(|| "unspecified".to_string())
+        );
+        println!(
+            "rotation_window_sec: {}",
+            display_or_unspecified(descriptor.rotation_window_sec)
+        );
+    }
+}
+
+fn render_admission_report(report: &RemoteAdmissionReport, use_json: bool) {
+    if !report.ok {
+        emit_cli_error(
+            "E.PROFILE",
+            Some("hub declined to provide admission data"),
+            use_json,
+        );
+        process::exit(4);
+    }
+
+    if use_json {
+        let output = json!({ "ok": true, "stages": report.stages });
+        match serde_json::to_string_pretty(&output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => println!("{output}"),
+        }
+    } else if report.stages.is_empty() {
+        println!("admission stages: (none)");
+    } else {
+        println!("admission stages:");
+        for stage in &report.stages {
+            println!("- name: {}", stage.name);
+            println!("  enabled: {}", stage.enabled);
+            if stage.responsibilities.is_empty() {
+                println!("  responsibilities: (none)");
+            } else {
+                println!("  responsibilities:");
+                for resp in &stage.responsibilities {
+                    println!("    - {resp}");
+                }
+            }
+            println!("  queue_depth: {}", stage.queue_depth);
+            println!("  max_queue_depth: {}", stage.max_queue_depth);
+            if stage.recent_err_rates.is_empty() {
+                println!("  recent_err_rates: (none)");
+            } else {
+                println!("  recent_err_rates:");
+                for (code, rate) in stage.recent_err_rates.iter() {
+                    println!("    {code}: {rate}");
+                }
+            }
+        }
+    }
+}
+
+fn render_admission_log(response: &RemoteAdmissionLogResponse, use_json: bool) {
+    if !response.ok {
+        emit_cli_error(
+            "E.PROFILE",
+            Some("hub declined to provide admission log data"),
+            use_json,
+        );
+        process::exit(4);
+    }
+
+    if use_json {
+        let output = json!({ "ok": true, "events": response.events });
+        match serde_json::to_string_pretty(&output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => println!("{output}"),
+        }
+    } else if response.events.is_empty() {
+        println!("admission failures: (none)");
+    } else {
+        println!("admission failures:");
+        for event in &response.events {
+            println!("- ts: {}", event.ts);
+            println!("  code: {}", event.code);
+            println!("  label_prefix: {}", event.label_prefix);
+            println!("  client_id_prefix: {}", event.client_id_prefix);
+            println!("  detail: {}", event.detail);
+        }
+    }
+}
+
+fn display_or_unspecified<T>(value: Option<T>) -> String
+where
+    T: ToString,
+{
+    value
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "unspecified".to_string())
+}
+
 async fn handle_hub_checkpoint_latest(args: HubCheckpointLatestArgs) -> Result<Checkpoint> {
     let client = match parse_hub_reference(&args.hub)? {
         HubReference::Local(_) => {
@@ -3718,6 +4198,120 @@ async fn handle_id_rotate(args: IdRotateArgs) -> Result<()> {
     Ok(())
 }
 
+async fn handle_id_usage(args: IdUsageArgs) -> Result<()> {
+    let client_dir = args.client;
+    let identity_path = client_dir.join("identity_card.pub");
+    let state_path = client_dir.join("state.json");
+
+    let identity: ClientPublicBundle = read_cbor_file(&identity_path).await?;
+    let state: ClientStateFile = read_json_file(&state_path).await?;
+
+    let policy_descriptor = if let Some(hub) = args.hub.as_deref() {
+        let client = match parse_hub_reference(hub)? {
+            HubReference::Remote(client) => client,
+            HubReference::Local(_) => {
+                bail_usage!("id usage policy requires an HTTP hub endpoint (e.g. http://host:port)")
+            }
+        };
+        Some(fetch_remote_kex_policy_descriptor(&client).await?)
+    } else {
+        None
+    };
+
+    if let Some(descriptor) = policy_descriptor.as_ref() {
+        if !descriptor.ok {
+            bail_hub!("hub declined to provide key lifecycle policy information");
+        }
+    }
+
+    let policy = policy_descriptor
+        .as_ref()
+        .map(|descriptor| KexPolicyThresholds {
+            max_client_id_lifetime_sec: descriptor.max_client_id_lifetime_sec,
+            max_msgs_per_client_id_per_label: descriptor.max_msgs_per_client_id_per_label,
+        });
+
+    let now = current_unix_timestamp()?;
+    let client_id_hex = hex::encode(identity.client_id.as_ref());
+    let mut entries = Vec::new();
+    for (stream, label_state) in state.labels.iter() {
+        let label_hex = match cap_stream_id_from_label(stream) {
+            Ok(stream_id) => hex::encode(stream_id.as_ref()),
+            Err(_) => "unspecified".to_string(),
+        };
+        let approx_lifetime_sec = label_state
+            .first_sent_at
+            .map(|ts| now.saturating_sub(ts))
+            .unwrap_or(0);
+        let exceeds_msg_bound = policy
+            .as_ref()
+            .and_then(|p| p.max_msgs_per_client_id_per_label)
+            .map(|max| label_state.msgs_sent > max)
+            .unwrap_or(false);
+        let exceeds_lifetime_bound = policy
+            .as_ref()
+            .and_then(|p| p.max_client_id_lifetime_sec)
+            .map(|max| approx_lifetime_sec > max)
+            .unwrap_or(false);
+        entries.push(IdUsageEntry {
+            stream: stream.clone(),
+            label_hex,
+            client_id: client_id_hex.clone(),
+            created_at: identity.created_at,
+            msgs_sent: label_state.msgs_sent,
+            approx_lifetime_sec,
+            exceeds_msg_bound,
+            exceeds_lifetime_bound,
+            rotation_recommended: exceeds_msg_bound || exceeds_lifetime_bound,
+        });
+    }
+
+    render_id_usage(&entries, json_output_enabled(args.json));
+    log_cli_goal("CLI.KEX1_PLUS.ID_USAGE");
+    Ok(())
+}
+
+fn render_id_usage(entries: &[IdUsageEntry], use_json: bool) {
+    if use_json {
+        let rendered: Vec<_> = entries
+            .iter()
+            .map(|entry| {
+                json!({
+                    "stream": entry.stream,
+                    "label": entry.label_hex,
+                    "client_id": entry.client_id,
+                    "created_at": entry.created_at,
+                    "msgs_sent": entry.msgs_sent,
+                    "approx_lifetime_sec": entry.approx_lifetime_sec,
+                    "exceeds_msg_bound": entry.exceeds_msg_bound,
+                    "exceeds_lifetime_bound": entry.exceeds_lifetime_bound,
+                    "rotation_recommended": entry.rotation_recommended,
+                })
+            })
+            .collect();
+        let output = json!({ "ok": true, "entries": rendered });
+        match serde_json::to_string_pretty(&output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => println!("{output}"),
+        }
+    } else if entries.is_empty() {
+        println!("client usage: (no recorded sends)");
+    } else {
+        println!("client usage:");
+        for entry in entries {
+            println!("- stream: {}", entry.stream);
+            println!("  label: {}", entry.label_hex);
+            println!("  client_id: {}", entry.client_id);
+            println!("  created_at: {}", entry.created_at);
+            println!("  msgs_sent: {}", entry.msgs_sent);
+            println!("  approx_lifetime_sec: {}", entry.approx_lifetime_sec);
+            println!("  exceeds_msg_bound: {}", entry.exceeds_msg_bound);
+            println!("  exceeds_lifetime_bound: {}", entry.exceeds_lifetime_bound);
+            println!("  rotation_recommended: {}", entry.rotation_recommended);
+        }
+    }
+}
+
 async fn handle_send(args: SendArgs) -> Result<()> {
     let result = match parse_hub_reference(&args.hub)? {
         HubReference::Local(data_dir) => handle_send_local(data_dir, args).await,
@@ -3847,11 +4441,7 @@ async fn handle_send_local(data_dir: PathBuf, args: SendArgs) -> Result<()> {
     hub_state.record_message(&args.stream, seq, now);
     save_hub_state(&data_dir, &hub_state).await?;
 
-    let mut client_state: ClientStateFile = read_json_file(&args.client.join("state.json")).await?;
-    let label_state = client_state.ensure_label_state(&args.stream);
-    label_state.last_stream_seq = seq;
-    label_state.prev_ack = seq;
-    write_json_file(&args.client.join("state.json"), &client_state).await?;
+    update_client_label_send_state(&args.client, &args.stream, seq, now).await?;
 
     println!(
         "sent message seq={seq} stream={} client_id={client_id_hex}",
@@ -3995,24 +4585,97 @@ async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()>
         }
     }
 
+    let send_ts = current_unix_timestamp()?;
+    update_client_label_send_state(&args.client, &args.stream, response.seq, send_ts).await?;
+
     Ok(())
 }
 
 fn solve_pow_cookie(challenge: Vec<u8>, difficulty: u8) -> Result<PowCookie> {
+    solve_pow_cookie_with_limit(challenge, difficulty, None)
+}
+
+fn solve_pow_cookie_with_limit(
+    challenge: Vec<u8>,
+    difficulty: u8,
+    max_iterations: Option<u64>,
+) -> Result<PowCookie> {
     let mut cookie = PowCookie {
         challenge,
         nonce: 0,
         difficulty,
     };
+    let mut attempts = 0u64;
 
     loop {
         if cookie.meets_difficulty() {
             return Ok(cookie);
         }
+        attempts = attempts.saturating_add(1);
+        if let Some(limit) = max_iterations {
+            if attempts >= limit {
+                bail_hub!(
+                    "failed to find proof-of-work nonce within {limit} iterations (difficulty {difficulty})"
+                );
+            }
+        }
         if cookie.nonce == u64::MAX {
             bail_hub!("failed to find proof-of-work nonce (difficulty {difficulty})");
         }
         cookie.nonce = cookie.nonce.checked_add(1).expect("nonce overflow checked");
+    }
+}
+
+async fn update_client_label_send_state(
+    client_dir: &Path,
+    stream: &str,
+    seq: u64,
+    sent_at: u64,
+) -> Result<()> {
+    let state_path = client_dir.join("state.json");
+    let mut client_state: ClientStateFile = read_json_file(&state_path).await?;
+    let label_state = client_state.ensure_label_state(stream);
+    label_state.record_send(seq, sent_at);
+    write_json_file(&state_path, &client_state).await?;
+    Ok(())
+}
+
+async fn load_local_revocations(data_dir: &Path) -> Result<Vec<RevocationRecord>> {
+    let path = data_dir.join(STATE_DIR).join(REVOCATIONS_FILE);
+    if !fs::try_exists(&path)
+        .await
+        .with_context(|| format!("checking revocation log {}", path.display()))?
+    {
+        return Ok(Vec::new());
+    }
+    read_json_file(&path).await
+}
+
+fn render_revocations(entries: &[RenderedRevocation], use_json: bool) {
+    if use_json {
+        let output = json!({ "ok": true, "revocations": entries });
+        match serde_json::to_string_pretty(&output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => println!("{output}"),
+        }
+    } else if entries.is_empty() {
+        println!("revocations: (none)");
+    } else {
+        println!("revocations:");
+        for entry in entries {
+            println!("- kind: {}", entry.kind);
+            println!("  target: {}", entry.target);
+            println!("  ts: {}", entry.ts);
+            if let Some(ttl) = entry.ttl {
+                println!("  ttl: {}", ttl);
+            } else {
+                println!("  ttl: none");
+            }
+            println!("  active_now: {}", entry.active_now);
+            if let Some(reason) = &entry.reason {
+                println!("  reason: {}", reason);
+            }
+        }
     }
 }
 
@@ -4269,6 +4932,288 @@ async fn handle_cap_authorize_remote(client: HubHttpClient, args: CapAuthorizeAr
     println!("  expires_at: {}", response.expires_at);
     log_cli_goal("CLI.CAP0.AUTHORIZE");
     Ok(())
+}
+
+async fn handle_cap_status(args: CapStatusArgs) -> Result<()> {
+    let client = match parse_hub_reference(&args.hub)? {
+        HubReference::Remote(client) => client,
+        HubReference::Local(_) => {
+            bail_usage!("cap status requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    };
+
+    let token: CapToken = read_cbor_file(&args.cap)
+        .await
+        .with_context(|| format!("reading capability token from {}", args.cap.display()))?;
+    token
+        .verify()
+        .map_err(|err| anyhow!("capability token verification failed: {err}"))?;
+    let auth_ref = token.auth_ref().context("computing capability auth_ref")?;
+    let auth_ref_hex = hex::encode(auth_ref.as_ref());
+
+    #[derive(Serialize)]
+    struct CapStatusRequest {
+        auth_ref: String,
+    }
+
+    let request = CapStatusRequest {
+        auth_ref: auth_ref_hex.clone(),
+    };
+
+    let response: RemoteCapStatusResponse = client
+        .post_json("/cap_status", &request)
+        .await
+        .context("requesting capability status from hub")?;
+    render_cap_status(&response, &auth_ref_hex, json_output_enabled(args.json));
+    log_cli_goal("CLI.KEX1_PLUS.CAP_STATUS");
+    Ok(())
+}
+
+async fn handle_cap_revocations(args: CapRevocationsArgs) -> Result<()> {
+    match parse_hub_reference(&args.hub)? {
+        HubReference::Remote(client) => handle_cap_revocations_remote(client, args).await?,
+        HubReference::Local(data_dir) => handle_cap_revocations_local(data_dir, args).await?,
+    };
+
+    log_cli_goal("CLI.KEX1_PLUS.REVOCATIONS");
+    Ok(())
+}
+
+async fn handle_cap_revocations_remote(
+    client: HubHttpClient,
+    args: CapRevocationsArgs,
+) -> Result<()> {
+    let CapRevocationsArgs {
+        kind,
+        since,
+        active_only,
+        limit,
+        json,
+        ..
+    } = args;
+
+    let mut query = Vec::new();
+    if let Some(kind_value) = kind {
+        query.push(("kind", kind_value.as_str().to_string()));
+    }
+    if let Some(since) = since {
+        query.push(("since", since.to_string()));
+    }
+    if active_only {
+        query.push(("active_only", "true".to_string()));
+    }
+    if let Some(limit) = limit {
+        query.push(("limit", limit.to_string()));
+    }
+
+    let response: RemoteRevocationList = client.get_json("/revocations", &query).await?;
+    if !response.ok {
+        emit_cli_error(
+            "E.PROFILE",
+            Some("hub declined to provide revocation records"),
+            json_output_enabled(json),
+        );
+        process::exit(4);
+    }
+
+    let entries: Vec<RenderedRevocation> = response
+        .revocations
+        .into_iter()
+        .map(|record| RenderedRevocation {
+            kind: record.kind,
+            target: record.target,
+            ts: record.ts,
+            ttl: record.ttl,
+            reason: record.reason,
+            active_now: record.active_now,
+        })
+        .collect();
+    render_revocations(&entries, json_output_enabled(json));
+    Ok(())
+}
+
+async fn handle_cap_revocations_local(data_dir: PathBuf, args: CapRevocationsArgs) -> Result<()> {
+    let CapRevocationsArgs {
+        kind,
+        since,
+        active_only,
+        limit,
+        json,
+        ..
+    } = args;
+
+    let records = load_local_revocations(&data_dir).await?;
+    let now = current_unix_timestamp()?;
+    let mut rendered = Vec::new();
+    for record in records {
+        if let Some(filter) = kind {
+            if record.kind != RevocationKind::from(filter) {
+                continue;
+            }
+        }
+        if let Some(since_ts) = since {
+            if record.ts < since_ts {
+                continue;
+            }
+        }
+        let active_now = record.is_active_at(now);
+        if active_only && !active_now {
+            continue;
+        }
+        rendered.push(RenderedRevocation {
+            kind: revocation_kind_label(record.kind).to_string(),
+            target: hex::encode(record.target.as_ref()),
+            ts: record.ts,
+            ttl: record.ttl,
+            reason: record.reason.clone(),
+            active_now,
+        });
+    }
+
+    if let Some(limit) = limit {
+        rendered.truncate(limit as usize);
+    }
+
+    render_revocations(&rendered, json_output_enabled(json));
+    Ok(())
+}
+
+fn render_cap_status(response: &RemoteCapStatusResponse, auth_ref_hex: &str, use_json: bool) {
+    if !response.ok {
+        emit_cli_error(
+            "E.PROFILE",
+            Some("hub declined to provide capability status"),
+            use_json,
+        );
+        process::exit(4);
+    }
+
+    let local_status = "unknown";
+    if use_json {
+        let output = json!({
+            "ok": true,
+            "auth_ref": auth_ref_hex,
+            "locally_within_ttl": local_status,
+            "hub_known": response.hub_known,
+            "hub_currently_valid": response.currently_valid,
+            "revoked": response.revoked,
+            "expires_at": response.expires_at,
+            "revocation_kind": response.revocation_kind,
+            "revocation_ts": response.revocation_ts,
+            "reason": response.reason,
+        });
+        match serde_json::to_string_pretty(&output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => println!("{output}"),
+        }
+    } else {
+        println!("auth_ref: {}", auth_ref_hex);
+        println!("locally_within_ttl: {}", local_status);
+        println!("hub_known: {}", response.hub_known);
+        println!("hub_currently_valid: {}", response.currently_valid);
+        println!("revoked: {}", response.revoked);
+        if let Some(kind) = &response.revocation_kind {
+            println!("revocation_kind: {}", kind);
+        } else {
+            println!("revocation_kind: none");
+        }
+        if let Some(ts) = response.revocation_ts {
+            println!("revocation_ts: {}", ts);
+        }
+        if let Some(expiry) = response.expires_at {
+            println!("expires_at: {}", expiry);
+        } else {
+            println!("expires_at: unknown");
+        }
+        if let Some(reason) = &response.reason {
+            println!("reason: {}", reason);
+        }
+    }
+}
+
+async fn handle_pow_request(args: PowRequestArgs) -> Result<()> {
+    let client = match parse_hub_reference(&args.hub)? {
+        HubReference::Remote(client) => client,
+        HubReference::Local(_) => {
+            bail_usage!("pow request requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    };
+
+    let mut query = Vec::new();
+    if let Some(difficulty) = args.difficulty {
+        if difficulty == 0 {
+            bail_usage!("difficulty must be greater than zero");
+        }
+        query.push(("difficulty", difficulty.to_string()));
+    }
+
+    let descriptor: RemotePowChallenge = client.get_json("/pow_request", &query).await?;
+    render_pow_challenge(&descriptor, json_output_enabled(args.json));
+    log_cli_goal("CLI.SH1_PLUS.POW_REQUEST");
+    Ok(())
+}
+
+async fn handle_pow_solve(args: PowSolveArgs) -> Result<()> {
+    if args.difficulty == 0 {
+        bail_usage!("difficulty must be greater than zero");
+    }
+    let bytes = hex::decode(args.challenge.trim())
+        .with_context(|| format!("decoding pow challenge {}", args.challenge))?;
+    if bytes.is_empty() {
+        bail_usage!("challenge must not be empty");
+    }
+    let cookie = solve_pow_cookie_with_limit(bytes, args.difficulty, args.max_iterations)?;
+    render_pow_solution(&cookie, json_output_enabled(args.json));
+    log_cli_goal("CLI.SH1_PLUS.POW_SOLVE");
+    Ok(())
+}
+
+fn render_pow_challenge(descriptor: &RemotePowChallenge, use_json: bool) {
+    if !descriptor.ok {
+        emit_cli_error(
+            "E.PROFILE",
+            Some("hub declined to provide a proof-of-work challenge"),
+            use_json,
+        );
+        process::exit(4);
+    }
+
+    if use_json {
+        let output = json!({
+            "ok": true,
+            "challenge": descriptor.challenge,
+            "difficulty": descriptor.difficulty,
+        });
+        match serde_json::to_string_pretty(&output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => println!("{output}"),
+        }
+    } else {
+        println!("challenge: {}", descriptor.challenge);
+        println!("difficulty: {}", descriptor.difficulty);
+    }
+}
+
+fn render_pow_solution(cookie: &PowCookie, use_json: bool) {
+    if use_json {
+        let output = json!({
+            "ok": true,
+            "challenge": hex::encode(&cookie.challenge),
+            "difficulty": cookie.difficulty,
+            "nonce": cookie.nonce,
+            "nonce_hex": format!("{:#x}", cookie.nonce),
+            "hash_prefix_ok": true,
+        });
+        match serde_json::to_string_pretty(&output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => println!("{output}"),
+        }
+    } else {
+        println!("challenge: {}", hex::encode(&cookie.challenge));
+        println!("difficulty: {}", cookie.difficulty);
+        println!("nonce: {}", cookie.nonce);
+        println!("nonce_hex: {:#x}", cookie.nonce);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4840,11 +5785,7 @@ async fn handle_revoke_publish_remote(
 ) -> Result<()> {
     let signing_key = load_signing_key_from_dir(&args.signer).await?;
     let target = parse_revocation_target_hex(&args.target)?;
-    let kind = match args.kind {
-        RevocationKindValue::ClientId => RevocationKind::ClientId,
-        RevocationKindValue::AuthRef => RevocationKind::AuthRef,
-        RevocationKindValue::CapToken => RevocationKind::CapToken,
-    };
+    let kind = RevocationKind::from(args.kind);
     let ts = args.ts.unwrap_or(current_unix_timestamp()?);
 
     let record = RevocationRecord {
@@ -4909,8 +5850,7 @@ async fn handle_resync_local(data_dir: PathBuf, args: ResyncArgs) -> Result<()> 
     }
 
     let label_state = client_state.ensure_label_state(&args.stream);
-    label_state.last_stream_seq = seq;
-    label_state.prev_ack = seq;
+    label_state.record_sync(seq);
     write_json_file(&args.client.join("state.json"), &client_state).await?;
 
     println!("resynchronised stream {} to seq {}", args.stream, seq);
@@ -4936,8 +5876,7 @@ async fn handle_resync_remote(client: HubHttpClient, args: ResyncArgs) -> Result
 
     let mut client_state: ClientStateFile = read_json_file(&args.client.join("state.json")).await?;
     let label_state = client_state.ensure_label_state(&args.stream);
-    label_state.last_stream_seq = seq;
-    label_state.prev_ack = seq;
+    label_state.record_sync(seq);
     write_json_file(&args.client.join("state.json"), &client_state).await?;
 
     println!("resynchronised stream {} to seq {}", args.stream, seq);
@@ -4945,15 +5884,33 @@ async fn handle_resync_remote(client: HubHttpClient, args: ResyncArgs) -> Result
 }
 
 async fn handle_verify_state(args: VerifyStateArgs) -> Result<()> {
-    let data_dir = parse_hub_reference(&args.hub)?.into_local()?;
-    let hub_state = load_hub_state(&data_dir).await?;
+    let hub = parse_hub_reference(&args.hub)?;
     let client_state: ClientStateFile = read_json_file(&args.client.join("state.json")).await?;
 
-    let hub_seq = hub_state
-        .last_stream_seq
-        .get(&args.stream)
-        .copied()
-        .unwrap_or(0);
+    let hub_seq = match hub {
+        HubReference::Local(data_dir) => {
+            let stream_state = load_stream_state(&data_dir, &args.stream).await?;
+            if let Some(last) = stream_state.messages.last() {
+                last.seq
+            } else {
+                let hub_state = load_hub_state(&data_dir).await?;
+                hub_state
+                    .last_stream_seq
+                    .get(&args.stream)
+                    .copied()
+                    .unwrap_or(0)
+            }
+        }
+        HubReference::Remote(client) => {
+            let report: RemoteObservabilityReport = client.get_json("/metrics", &[]).await?;
+            report
+                .last_stream_seq
+                .get(&args.stream)
+                .copied()
+                .unwrap_or(0)
+        }
+    };
+
     let client_seq = client_state
         .labels
         .get(&args.stream)
