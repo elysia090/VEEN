@@ -345,6 +345,215 @@ fn log_cli_goal(goal: &str) {
     eprintln!("goal: {goal}");
 }
 
+fn pretty_json(value: JsonValue) -> String {
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+}
+
+fn format_hub_profile_output(
+    ok: bool,
+    version: &str,
+    profile_id: &str,
+    hub_id: &str,
+    features: &RemoteHubProfileFeatures,
+    use_json: bool,
+) -> String {
+    if use_json {
+        let mut root = JsonMap::new();
+        root.insert("ok".to_string(), JsonValue::Bool(ok));
+        root.insert(
+            "version".to_string(),
+            JsonValue::String(version.to_string()),
+        );
+        root.insert(
+            "profile_id".to_string(),
+            JsonValue::String(profile_id.to_string()),
+        );
+        root.insert("hub_id".to_string(), JsonValue::String(hub_id.to_string()));
+        let mut feature_map = JsonMap::new();
+        feature_map.insert("core".to_string(), JsonValue::Bool(features.core));
+        feature_map.insert("fed1".to_string(), JsonValue::Bool(features.fed1));
+        feature_map.insert("auth1".to_string(), JsonValue::Bool(features.auth1));
+        feature_map.insert("kex1_plus".to_string(), JsonValue::Bool(features.kex1_plus));
+        feature_map.insert("sh1_plus".to_string(), JsonValue::Bool(features.sh1_plus));
+        feature_map.insert("lclass0".to_string(), JsonValue::Bool(features.lclass0));
+        feature_map.insert(
+            "meta0_plus".to_string(),
+            JsonValue::Bool(features.meta0_plus),
+        );
+        root.insert("features".to_string(), JsonValue::Object(feature_map));
+        pretty_json(JsonValue::Object(root))
+    } else {
+        vec![
+            format!("version: {version}"),
+            format!("profile_id: {profile_id}"),
+            format!("hub_id: {hub_id}"),
+            "features:".to_string(),
+            format!("  core: {}", features.core),
+            format!("  fed1: {}", features.fed1),
+            format!("  auth1: {}", features.auth1),
+            format!("  kex1_plus: {}", features.kex1_plus),
+            format!("  sh1_plus: {}", features.sh1_plus),
+            format!("  lclass0: {}", features.lclass0),
+            format!("  meta0_plus: {}", features.meta0_plus),
+        ]
+        .join("\n")
+    }
+}
+
+fn format_hub_role_output(
+    ok: bool,
+    hub_id: &str,
+    role: &str,
+    stream: Option<&RemoteHubRoleStream>,
+    use_json: bool,
+) -> String {
+    if use_json {
+        let mut root = JsonMap::new();
+        root.insert("ok".to_string(), JsonValue::Bool(ok));
+        root.insert("hub_id".to_string(), JsonValue::String(hub_id.to_string()));
+        root.insert("role".to_string(), JsonValue::String(role.to_string()));
+        if let Some(stream) = stream {
+            let mut stream_map = JsonMap::new();
+            if let Some(value) = &stream.realm_id {
+                stream_map.insert("realm_id".to_string(), JsonValue::String(value.clone()));
+            } else {
+                stream_map.insert("realm_id".to_string(), JsonValue::Null);
+            }
+            stream_map.insert(
+                "stream_id".to_string(),
+                JsonValue::String(stream.stream_id.clone()),
+            );
+            stream_map.insert("label".to_string(), JsonValue::String(stream.label.clone()));
+            stream_map.insert(
+                "policy".to_string(),
+                JsonValue::String(stream.policy.clone()),
+            );
+            if let Some(primary) = &stream.primary_hub {
+                stream_map.insert(
+                    "primary_hub".to_string(),
+                    JsonValue::String(primary.clone()),
+                );
+            } else {
+                stream_map.insert("primary_hub".to_string(), JsonValue::Null);
+            }
+            stream_map.insert(
+                "local_is_primary".to_string(),
+                JsonValue::Bool(stream.local_is_primary),
+            );
+            root.insert("stream".to_string(), JsonValue::Object(stream_map));
+        }
+        pretty_json(JsonValue::Object(root))
+    } else if let Some(stream) = stream {
+        let realm_out = stream
+            .realm_id
+            .clone()
+            .unwrap_or_else(|| "unspecified".to_string());
+        let primary = stream
+            .primary_hub
+            .clone()
+            .unwrap_or_else(|| "none".to_string());
+        vec![
+            format!("hub_id: {hub_id}"),
+            format!("role: {role}"),
+            format!("realm_id: {realm_out}"),
+            format!("stream_id: {}", stream.stream_id),
+            format!("label: {}", stream.label),
+            format!("policy: {}", stream.policy),
+            format!("primary_hub: {primary}"),
+            format!("local_is_primary: {}", stream.local_is_primary),
+        ]
+        .join("\n")
+    } else {
+        vec![format!("role: {role}"), format!("hub_id: {hub_id}")].join("\n")
+    }
+}
+
+fn format_authority_record_output(
+    descriptor: &RemoteAuthorityRecordDescriptor,
+    use_json: bool,
+) -> String {
+    if use_json {
+        let output = json!({
+            "ok": true,
+            "realm_id": descriptor.realm_id,
+            "stream_id": descriptor.stream_id,
+            "primary_hub": descriptor.primary_hub,
+            "replica_hubs": descriptor.replica_hubs,
+            "policy": descriptor.policy,
+            "ts": descriptor.ts,
+            "ttl": descriptor.ttl,
+            "expires_at": descriptor.expires_at,
+            "active_now": descriptor.active_now,
+        });
+        pretty_json(output)
+    } else {
+        let primary = descriptor
+            .primary_hub
+            .clone()
+            .unwrap_or_else(|| "none".to_string());
+        let replicas = if descriptor.replica_hubs.is_empty() {
+            "[]".to_string()
+        } else {
+            format!("[{}]", descriptor.replica_hubs.join(","))
+        };
+        let expires = descriptor
+            .expires_at
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "0".to_string());
+        vec![
+            format!("realm_id: {}", descriptor.realm_id),
+            format!("stream_id: {}", descriptor.stream_id),
+            format!("primary_hub: {primary}"),
+            format!("replica_hubs: {replicas}"),
+            format!("policy: {}", descriptor.policy),
+            format!("ts: {}", descriptor.ts),
+            format!("ttl: {}", descriptor.ttl),
+            format!("expires_at: {expires}"),
+            format!("active_now: {}", descriptor.active_now),
+        ]
+        .join("\n")
+    }
+}
+
+fn format_label_authority_output(
+    descriptor: &RemoteLabelAuthorityDescriptor,
+    use_json: bool,
+) -> String {
+    if use_json {
+        let output = json!({
+            "ok": true,
+            "label": descriptor.label,
+            "realm_id": descriptor.realm_id,
+            "stream_id": descriptor.stream_id,
+            "policy": descriptor.policy,
+            "primary_hub": descriptor.primary_hub,
+            "replica_hubs": descriptor.replica_hubs,
+            "local_hub_id": descriptor.local_hub_id,
+            "locally_authorized": descriptor.local_is_authorized,
+        });
+        pretty_json(output)
+    } else {
+        let realm_display = descriptor
+            .realm_id
+            .clone()
+            .unwrap_or_else(|| "unspecified".to_string());
+        let primary = descriptor
+            .primary_hub
+            .clone()
+            .unwrap_or_else(|| "none".to_string());
+        vec![
+            format!("label: {}", descriptor.label),
+            format!("realm_id: {realm_display}"),
+            format!("stream_id: {}", descriptor.stream_id),
+            format!("policy: {}", descriptor.policy),
+            format!("primary_hub: {primary}"),
+            format!("local_hub_id: {}", descriptor.local_hub_id),
+            format!("locally_authorized: {}", descriptor.local_is_authorized),
+        ]
+        .join("\n")
+    }
+}
+
 #[cfg(test)]
 fn json_output_enabled_with(explicit: bool, global: &GlobalOptions) -> bool {
     explicit || global.json
@@ -3542,44 +3751,8 @@ async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
         }
     };
 
-    if use_json {
-        let mut root = JsonMap::new();
-        root.insert("ok".to_string(), JsonValue::Bool(ok));
-        root.insert("version".to_string(), JsonValue::String(version));
-        root.insert(
-            "profile_id".to_string(),
-            JsonValue::String(profile_id.clone()),
-        );
-        root.insert("hub_id".to_string(), JsonValue::String(hub_id));
-        let mut feature_map = JsonMap::new();
-        feature_map.insert("core".to_string(), JsonValue::Bool(features.core));
-        feature_map.insert("fed1".to_string(), JsonValue::Bool(features.fed1));
-        feature_map.insert("auth1".to_string(), JsonValue::Bool(features.auth1));
-        feature_map.insert("kex1_plus".to_string(), JsonValue::Bool(features.kex1_plus));
-        feature_map.insert("sh1_plus".to_string(), JsonValue::Bool(features.sh1_plus));
-        feature_map.insert("lclass0".to_string(), JsonValue::Bool(features.lclass0));
-        feature_map.insert(
-            "meta0_plus".to_string(),
-            JsonValue::Bool(features.meta0_plus),
-        );
-        root.insert("features".to_string(), JsonValue::Object(feature_map));
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&JsonValue::Object(root))?
-        );
-    } else {
-        println!("version: {version}");
-        println!("profile_id: {profile_id}");
-        println!("hub_id: {hub_id}");
-        println!("features:");
-        println!("  core: {}", features.core);
-        println!("  fed1: {}", features.fed1);
-        println!("  auth1: {}", features.auth1);
-        println!("  kex1_plus: {}", features.kex1_plus);
-        println!("  sh1_plus: {}", features.sh1_plus);
-        println!("  lclass0: {}", features.lclass0);
-        println!("  meta0_plus: {}", features.meta0_plus);
-    }
+    let output = format_hub_profile_output(ok, &version, &profile_id, &hub_id, &features, use_json);
+    println!("{output}");
 
     log_cli_goal("CLI.V0_0_1_PP.PROFILE");
     Ok(())
@@ -3649,63 +3822,8 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
         process::exit(4);
     }
 
-    if use_json {
-        let mut root = JsonMap::new();
-        root.insert("ok".to_string(), JsonValue::Bool(ok));
-        root.insert("hub_id".to_string(), JsonValue::String(hub_id.clone()));
-        root.insert("role".to_string(), JsonValue::String(role.clone()));
-        if let Some(ref stream) = stream_info {
-            let mut stream_map = JsonMap::new();
-            if let Some(ref value) = stream.realm_id {
-                stream_map.insert("realm_id".to_string(), JsonValue::String(value.clone()));
-            } else {
-                stream_map.insert("realm_id".to_string(), JsonValue::Null);
-            }
-            stream_map.insert(
-                "stream_id".to_string(),
-                JsonValue::String(stream.stream_id.clone()),
-            );
-            stream_map.insert("label".to_string(), JsonValue::String(stream.label.clone()));
-            stream_map.insert(
-                "policy".to_string(),
-                JsonValue::String(stream.policy.clone()),
-            );
-            if let Some(ref value) = stream.primary_hub {
-                stream_map.insert("primary_hub".to_string(), JsonValue::String(value.clone()));
-            } else {
-                stream_map.insert("primary_hub".to_string(), JsonValue::Null);
-            }
-            stream_map.insert(
-                "local_is_primary".to_string(),
-                JsonValue::Bool(stream.local_is_primary),
-            );
-            root.insert("stream".to_string(), JsonValue::Object(stream_map));
-        }
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&JsonValue::Object(root))?
-        );
-    } else if let Some(ref stream) = stream_info {
-        println!("hub_id: {hub_id}");
-        println!("role: {role}");
-        let realm_out = stream
-            .realm_id
-            .clone()
-            .unwrap_or_else(|| "unspecified".to_string());
-        println!("realm_id: {realm_out}");
-        println!("stream_id: {}", stream.stream_id);
-        println!("label: {}", stream.label);
-        println!("policy: {}", stream.policy);
-        let primary = stream
-            .primary_hub
-            .clone()
-            .unwrap_or_else(|| "none".to_string());
-        println!("primary_hub: {primary}");
-        println!("local_is_primary: {}", stream.local_is_primary);
-    } else {
-        println!("role: {role}");
-        println!("hub_id: {hub_id}");
-    }
+    let output = format_hub_role_output(ok, &hub_id, &role, stream_info.as_ref(), use_json);
+    println!("{output}");
 
     log_cli_goal("CLI.AUTH1.ROLE");
     Ok(())
@@ -5382,47 +5500,8 @@ fn render_authority_record(descriptor: &RemoteAuthorityRecordDescriptor, use_jso
         process::exit(4);
     }
 
-    if use_json {
-        let output = json!({
-            "ok": true,
-            "realm_id": descriptor.realm_id,
-            "stream_id": descriptor.stream_id,
-            "primary_hub": descriptor.primary_hub,
-            "replica_hubs": descriptor.replica_hubs,
-            "policy": descriptor.policy,
-            "ts": descriptor.ts,
-            "ttl": descriptor.ttl,
-            "expires_at": descriptor.expires_at,
-            "active_now": descriptor.active_now,
-        });
-        match serde_json::to_string_pretty(&output) {
-            Ok(rendered) => println!("{rendered}"),
-            Err(_) => println!("{output}"),
-        }
-    } else {
-        let primary = descriptor
-            .primary_hub
-            .clone()
-            .unwrap_or_else(|| "none".to_string());
-        let replicas = if descriptor.replica_hubs.is_empty() {
-            "[]".to_string()
-        } else {
-            format!("[{}]", descriptor.replica_hubs.join(","))
-        };
-        let expires = descriptor
-            .expires_at
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "0".to_string());
-        println!("realm_id: {}", descriptor.realm_id);
-        println!("stream_id: {}", descriptor.stream_id);
-        println!("primary_hub: {primary}");
-        println!("replica_hubs: {replicas}");
-        println!("policy: {}", descriptor.policy);
-        println!("ts: {}", descriptor.ts);
-        println!("ttl: {}", descriptor.ttl);
-        println!("expires_at: {expires}");
-        println!("active_now: {}", descriptor.active_now);
-    }
+    let output = format_authority_record_output(descriptor, use_json);
+    println!("{output}");
 }
 
 fn render_label_authority(descriptor: &RemoteLabelAuthorityDescriptor, use_json: bool) {
@@ -5435,39 +5514,8 @@ fn render_label_authority(descriptor: &RemoteLabelAuthorityDescriptor, use_json:
         process::exit(4);
     }
 
-    if use_json {
-        let output = json!({
-            "ok": true,
-            "label": descriptor.label,
-            "realm_id": descriptor.realm_id,
-            "stream_id": descriptor.stream_id,
-            "policy": descriptor.policy,
-            "primary_hub": descriptor.primary_hub,
-            "replica_hubs": descriptor.replica_hubs,
-            "local_hub_id": descriptor.local_hub_id,
-            "locally_authorized": descriptor.local_is_authorized,
-        });
-        match serde_json::to_string_pretty(&output) {
-            Ok(rendered) => println!("{rendered}"),
-            Err(_) => println!("{output}"),
-        }
-    } else {
-        let realm_display = descriptor
-            .realm_id
-            .clone()
-            .unwrap_or_else(|| "unspecified".to_string());
-        let primary = descriptor
-            .primary_hub
-            .clone()
-            .unwrap_or_else(|| "none".to_string());
-        println!("label: {}", descriptor.label);
-        println!("realm_id: {realm_display}");
-        println!("stream_id: {}", descriptor.stream_id);
-        println!("policy: {}", descriptor.policy);
-        println!("primary_hub: {primary}");
-        println!("local_hub_id: {}", descriptor.local_hub_id);
-        println!("locally_authorized: {}", descriptor.local_is_authorized);
-    }
+    let output = format_label_authority_output(descriptor, use_json);
+    println!("{output}");
 }
 
 fn encode_signed_envelope<T>(
@@ -6953,6 +7001,158 @@ mod tests {
         };
         assert!(super::json_output_enabled_with(true, &global_text));
         assert!(!super::json_output_enabled_with(false, &global_text));
+    }
+
+    #[test]
+    fn hub_profile_output_matches_cli_goals() {
+        let features = RemoteHubProfileFeatures {
+            core: true,
+            fed1: true,
+            auth1: true,
+            kex1_plus: true,
+            sh1_plus: false,
+            lclass0: false,
+            meta0_plus: true,
+        };
+
+        let text = super::format_hub_profile_output(
+            true,
+            "veen-0.0.1+",
+            "abcd",
+            "hub-0001",
+            &features,
+            false,
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "version: veen-0.0.1+");
+        assert_eq!(lines[1], "profile_id: abcd");
+        assert_eq!(lines[2], "hub_id: hub-0001");
+        assert_eq!(lines[3], "features:");
+        assert_eq!(lines[4], "  core: true");
+        assert_eq!(lines[5], "  fed1: true");
+        assert_eq!(lines[6], "  auth1: true");
+        assert_eq!(lines[7], "  kex1_plus: true");
+        assert_eq!(lines[8], "  sh1_plus: false");
+        assert_eq!(lines[9], "  lclass0: false");
+        assert_eq!(lines[10], "  meta0_plus: true");
+
+        let json = super::format_hub_profile_output(
+            true,
+            "veen-0.0.1+",
+            "abcd",
+            "hub-0001",
+            &features,
+            true,
+        );
+        let value: Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(value["version"], "veen-0.0.1+");
+        assert_eq!(value["profile_id"], "abcd");
+        assert_eq!(value["hub_id"], "hub-0001");
+        assert_eq!(value["features"]["core"], Value::Bool(true));
+        assert_eq!(value["features"]["sh1_plus"], Value::Bool(false));
+    }
+
+    #[test]
+    fn hub_role_output_matches_cli_goals() {
+        let stream = RemoteHubRoleStream {
+            realm_id: Some("aaaa".to_string()),
+            stream_id: "bbbb".to_string(),
+            label: "fed/chat".to_string(),
+            policy: "single-primary".to_string(),
+            primary_hub: Some("hub-primary".to_string()),
+            local_is_primary: true,
+        };
+
+        let text = super::format_hub_role_output(
+            true,
+            "hub-primary",
+            "federated-primary",
+            Some(&stream),
+            false,
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "hub_id: hub-primary");
+        assert_eq!(lines[1], "role: federated-primary");
+        assert_eq!(lines[2], "realm_id: aaaa");
+        assert_eq!(lines[3], "stream_id: bbbb");
+        assert_eq!(lines[4], "label: fed/chat");
+        assert_eq!(lines[5], "policy: single-primary");
+        assert_eq!(lines[6], "primary_hub: hub-primary");
+        assert_eq!(lines[7], "local_is_primary: true");
+
+        let stream_without_defaults = RemoteHubRoleStream {
+            realm_id: None,
+            stream_id: "cccc".to_string(),
+            label: "fed/alt".to_string(),
+            policy: "multi-primary".to_string(),
+            primary_hub: None,
+            local_is_primary: false,
+        };
+        let json = super::format_hub_role_output(
+            true,
+            "hub-observer",
+            "observer",
+            Some(&stream_without_defaults),
+            true,
+        );
+        let value: Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(value["hub_id"], "hub-observer");
+        assert_eq!(value["role"], "observer");
+        assert_eq!(value["stream"]["realm_id"], Value::Null);
+        assert_eq!(value["stream"]["primary_hub"], Value::Null);
+        assert_eq!(value["stream"]["local_is_primary"], Value::Bool(false));
+    }
+
+    #[test]
+    fn authority_record_output_matches_cli_goals() {
+        let descriptor = RemoteAuthorityRecordDescriptor {
+            ok: true,
+            realm_id: "aaaa".to_string(),
+            stream_id: "bbbb".to_string(),
+            primary_hub: Some("hub-primary".to_string()),
+            replica_hubs: vec!["hub-replica-1".to_string(), "hub-replica-2".to_string()],
+            policy: "single-primary".to_string(),
+            ts: 1,
+            ttl: 60,
+            expires_at: Some(61),
+            active_now: true,
+        };
+
+        let text = super::format_authority_record_output(&descriptor, false);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "realm_id: aaaa");
+        assert_eq!(lines[1], "stream_id: bbbb");
+        assert_eq!(lines[2], "primary_hub: hub-primary");
+        assert_eq!(lines[3], "replica_hubs: [hub-replica-1,hub-replica-2]");
+        assert_eq!(lines[4], "policy: single-primary");
+        assert_eq!(lines[5], "ts: 1");
+        assert_eq!(lines[6], "ttl: 60");
+        assert_eq!(lines[7], "expires_at: 61");
+        assert_eq!(lines[8], "active_now: true");
+    }
+
+    #[test]
+    fn label_authority_output_matches_cli_goals() {
+        let descriptor = RemoteLabelAuthorityDescriptor {
+            ok: true,
+            label: "fed/chat".to_string(),
+            realm_id: None,
+            stream_id: "bbbb".to_string(),
+            policy: "single-primary".to_string(),
+            primary_hub: None,
+            replica_hubs: vec!["hub-replica".to_string()],
+            local_hub_id: "hub-local".to_string(),
+            local_is_authorized: true,
+        };
+
+        let json = super::format_label_authority_output(&descriptor, true);
+        let value: Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(value["label"], "fed/chat");
+        assert_eq!(value["realm_id"], Value::Null);
+        assert_eq!(value["stream_id"], "bbbb");
+        assert_eq!(value["primary_hub"], Value::Null);
+        assert_eq!(value["replica_hubs"], json!(["hub-replica"]));
+        assert_eq!(value["locally_authorized"], Value::Bool(true));
     }
 
     #[tokio::test]
