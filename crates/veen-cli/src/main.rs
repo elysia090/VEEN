@@ -4219,7 +4219,7 @@ struct SendOutcome {
 }
 
 enum SendOutcomeDetail {
-    Local(LocalSendDetail),
+    Local(Box<LocalSendDetail>),
     Remote(RemoteSendDetail),
 }
 
@@ -4236,6 +4236,7 @@ struct RemoteSendDetail {
 fn render_send_outcome(outcome: &SendOutcome) {
     match &outcome.detail {
         SendOutcomeDetail::Local(detail) => {
+            let detail = detail.as_ref();
             println!(
                 "sent message seq={} stream={} client_id={}",
                 outcome.seq, outcome.stream, outcome.client_id_hex
@@ -4416,11 +4417,11 @@ async fn send_message_local(data_dir: PathBuf, args: SendArgs) -> Result<SendOut
         stream: args.stream,
         seq,
         client_id_hex,
-        detail: SendOutcomeDetail::Local(LocalSendDetail {
+        detail: SendOutcomeDetail::Local(Box::new(LocalSendDetail {
             message,
             bundle_path,
             receipt,
-        }),
+        })),
     })
 }
 
@@ -5869,15 +5870,17 @@ async fn handle_operation_send(args: OperationSendArgs) -> Result<()> {
     let payload = build_generic_operation_payload(&args.schema_name, &args.body_json)?;
     submit_operation_payload(
         payload,
-        args.hub,
-        args.client,
-        args.stream,
-        args.cap,
-        args.expires_at,
-        args.parent_id,
-        json_output_enabled(args.json),
-        "operation send",
-        "CLI.OP0.SEND",
+        OperationSubmissionOptions {
+            hub: args.hub,
+            client: args.client,
+            stream: args.stream,
+            cap: args.cap,
+            expires_at: args.expires_at,
+            parent: args.parent_id,
+            use_json: json_output_enabled(args.json),
+            context: "operation send",
+            goal: "CLI.OP0.SEND",
+        },
     )
     .await
 }
@@ -5886,15 +5889,17 @@ async fn handle_operation_paid(args: OperationPaidArgs) -> Result<()> {
     let payload = build_paid_operation_payload(&args)?;
     submit_operation_payload(
         payload,
-        args.hub,
-        args.client,
-        args.stream,
-        args.cap,
-        None,
-        None,
-        json_output_enabled(args.json),
-        "operation paid",
-        "CLI.OP0.PAID",
+        OperationSubmissionOptions {
+            hub: args.hub,
+            client: args.client,
+            stream: args.stream,
+            cap: args.cap,
+            expires_at: None,
+            parent: None,
+            use_json: json_output_enabled(args.json),
+            context: "operation paid",
+            goal: "CLI.OP0.PAID",
+        },
     )
     .await
 }
@@ -5903,15 +5908,17 @@ async fn handle_operation_access_grant(args: OperationAccessGrantArgs) -> Result
     let payload = build_access_grant_payload(&args)?;
     submit_operation_payload(
         payload,
-        args.hub,
-        args.admin,
-        args.stream,
-        None,
-        None,
-        None,
-        json_output_enabled(false),
-        "operation access-grant",
-        "CLI.OP0.ACCESS_GRANT",
+        OperationSubmissionOptions {
+            hub: args.hub,
+            client: args.admin,
+            stream: args.stream,
+            cap: None,
+            expires_at: None,
+            parent: None,
+            use_json: json_output_enabled(false),
+            context: "operation access-grant",
+            goal: "CLI.OP0.ACCESS_GRANT",
+        },
     )
     .await
 }
@@ -5920,15 +5927,17 @@ async fn handle_operation_access_revoke(args: OperationAccessRevokeArgs) -> Resu
     let payload = build_access_revoke_payload(&args)?;
     submit_operation_payload(
         payload,
-        args.hub,
-        args.admin,
-        args.stream,
-        None,
-        None,
-        None,
-        json_output_enabled(false),
-        "operation access-revoke",
-        "CLI.OP0.ACCESS_REVOKE",
+        OperationSubmissionOptions {
+            hub: args.hub,
+            client: args.admin,
+            stream: args.stream,
+            cap: None,
+            expires_at: None,
+            parent: None,
+            use_json: json_output_enabled(false),
+            context: "operation access-revoke",
+            goal: "CLI.OP0.ACCESS_REVOKE",
+        },
     )
     .await
 }
@@ -5937,15 +5946,17 @@ async fn handle_operation_delegated(args: OperationDelegatedArgs) -> Result<()> 
     let payload = build_delegated_operation_payload(&args)?;
     submit_operation_payload(
         payload,
-        args.hub,
-        args.client,
-        args.stream,
-        None,
-        None,
-        None,
-        json_output_enabled(false),
-        "operation delegated",
-        "CLI.OP0.DELEGATED",
+        OperationSubmissionOptions {
+            hub: args.hub,
+            client: args.client,
+            stream: args.stream,
+            cap: None,
+            expires_at: None,
+            parent: None,
+            use_json: json_output_enabled(false),
+            context: "operation delegated",
+            goal: "CLI.OP0.DELEGATED",
+        },
     )
     .await
 }
@@ -5954,6 +5965,7 @@ struct EncodedOperationPayload {
     schema_name: String,
     schema_id: [u8; 32],
     json_body: String,
+    #[cfg_attr(not(test), allow(dead_code))]
     cbor_body: Vec<u8>,
 }
 
@@ -5961,6 +5973,18 @@ impl EncodedOperationPayload {
     fn schema_hex(&self) -> String {
         hex::encode(self.schema_id)
     }
+}
+
+struct OperationSubmissionOptions {
+    hub: HubLocatorArgs,
+    client: PathBuf,
+    stream: String,
+    cap: Option<PathBuf>,
+    expires_at: Option<u64>,
+    parent: Option<String>,
+    use_json: bool,
+    context: &'static str,
+    goal: &'static str,
 }
 
 struct OperationSubmissionResult {
@@ -5974,26 +5998,18 @@ struct OperationSubmissionResult {
 
 async fn submit_operation_payload(
     payload: EncodedOperationPayload,
-    hub: HubLocatorArgs,
-    client: PathBuf,
-    stream: String,
-    cap: Option<PathBuf>,
-    expires_at: Option<u64>,
-    parent: Option<String>,
-    use_json: bool,
-    context: &str,
-    goal: &str,
+    options: OperationSubmissionOptions,
 ) -> Result<()> {
     let schema_hex = payload.schema_hex();
-    let mut send_args = SendArgs {
-        hub,
-        client,
-        stream: stream.clone(),
+    let send_args = SendArgs {
+        hub: options.hub,
+        client: options.client,
+        stream: options.stream.clone(),
         body: payload.json_body.clone(),
         schema: Some(schema_hex.clone()),
-        expires_at,
-        cap,
-        parent,
+        expires_at: options.expires_at,
+        cap: options.cap,
+        parent: options.parent,
         attach: Vec::new(),
         no_store_body: false,
         pow_difficulty: None,
@@ -6001,12 +6017,12 @@ async fn submit_operation_payload(
         pow_nonce: None,
     };
 
-    let reference = hub_reference_from_locator(&send_args.hub, context).await?;
+    let reference = hub_reference_from_locator(&send_args.hub, options.context).await?;
     let outcome = send_message_with_reference(reference.clone(), send_args).await?;
     let submission =
         derive_operation_submission(reference, outcome, payload.schema_name, schema_hex).await?;
-    render_operation_submission(&submission, use_json);
-    log_cli_goal(goal);
+    render_operation_submission(&submission, options.use_json);
+    log_cli_goal(options.goal);
     Ok(())
 }
 
@@ -6017,9 +6033,12 @@ async fn derive_operation_submission(
     schema_hex: String,
 ) -> Result<OperationSubmissionResult> {
     let receipt = match (&reference, outcome.detail) {
-        (HubReference::Local(_), SendOutcomeDetail::Local(detail)) => detail.receipt,
+        (HubReference::Local(_), SendOutcomeDetail::Local(detail)) => {
+            let LocalSendDetail { receipt, .. } = *detail;
+            receipt
+        }
         (HubReference::Remote(client), SendOutcomeDetail::Remote(_)) => {
-            fetch_remote_operation_receipt(&client, &outcome.stream, outcome.seq).await?
+            fetch_remote_operation_receipt(client, &outcome.stream, outcome.seq).await?
         }
         (HubReference::Local(_), SendOutcomeDetail::Remote(_))
         | (HubReference::Remote(_), SendOutcomeDetail::Local(_)) => {
@@ -6325,15 +6344,15 @@ fn parse_operation_id_hex(input: &str) -> Result<OperationId> {
 }
 
 fn parse_optional_operation_id(input: Option<&str>) -> Result<Option<OperationId>> {
-    input.map(|value| parse_operation_id_hex(value)).transpose()
+    input.map(parse_operation_id_hex).transpose()
 }
 
 fn parse_optional_opaque_id(input: Option<&str>) -> Result<Option<OpaqueId>> {
-    input.map(|value| parse_opaque_id_hex(value)).transpose()
+    input.map(parse_opaque_id_hex).transpose()
 }
 
 fn parse_optional_auth_ref(input: Option<&str>) -> Result<Option<AuthRef>> {
-    input.map(|value| parse_auth_ref_hex(value)).transpose()
+    input.map(parse_auth_ref_hex).transpose()
 }
 
 fn parse_stream_id_hex(input: &str) -> Result<StreamId> {
