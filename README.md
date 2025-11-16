@@ -135,6 +135,25 @@ verification, resynchronisation, overlay management (RPC, CRDT, wallet,
 revocation, schema), and TLS inspection. Run `veen --help` for the complete
 command tree.
 
+### Inspecting schema descriptors
+
+The schema overlay exposes a lightweight registry served by hubs with the
+META0+ feature flag enabled. After registering a descriptor with
+`veen schema register`, use `veen schema show` to look up the authoritative
+record and verify how the schema is being used:
+
+```shell
+target/release/veen schema show \
+  --hub http://127.0.0.1:37411 \
+  --schema-id <HEX32> \
+  --json
+```
+
+The CLI renders the canonical identifier, name, version, documentation URL,
+owner, publication timestamp, and any usage statistics (labels seen,
+approximate counts, and last-seen timestamps). Supplying `--json` produces a
+structured object that mirrors the hub response for automation pipelines.
+
 ### Handling proof-of-work challenges
 
 Hubs may request a proof-of-work (PoW) cookie before accepting a submission.
