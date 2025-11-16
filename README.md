@@ -205,15 +205,73 @@ named volume so the event history remains available for inspection.
      --client /var/lib/veen/clients/alice \
      --stream core/main \
      --from 0
-   ```
-   Shut the hub down with `docker compose down` (add `--volumes` to remove the
-   persisted audit log).
+  ```
+  Shut the hub down with `docker compose down` (add `--volumes` to remove the
+  persisted audit log).
 
 Environment variables such as `VEEN_LISTEN`, `VEEN_LOG_LEVEL`, or
 `VEEN_PROFILE_ID` can be overridden in `docker-compose.yml` (or via
 `docker compose run -e`) to adjust listening addresses, logging verbosity, or
 profile identifiers. To supply a custom hub configuration file, mount it into
 the container and set `VEEN_CONFIG_PATH` to the path inside the container.
+
+### Kubernetes-native hub workflows
+
+Use the `veen kube` command group to keep hub deployments reproducible on
+Kubernetes:
+
+1. **Render deterministic manifests** for a namespace and logical hub name.
+   Output defaults to YAML and can be switched to JSON with `--json`.
+   ```shell
+   veen kube render \
+     --cluster-context production \
+     --namespace veen-prod \
+     --name alpha \
+     --image ghcr.io/veen/hub:latest \
+     --data-pvc veen-hub-alpha-data \
+     --config ./hub-config.toml \
+     --resources-cpu 500m,1 \
+     --resources-mem 512Mi,1Gi \
+     > hub-alpha.yaml
+   ```
+2. **Apply manifests and wait for readiness** via the Kubernetes API. The CLI
+   prints the namespace and service DNS name once the rollout completes.
+   ```shell
+   veen kube apply --cluster-context production --file hub-alpha.yaml --wait-seconds 120
+   ```
+3. **Inspect status or stream logs**. `veen kube status` queries the
+   Deployment/StatefulSet and pod `/healthz` probes, while `veen kube logs`
+   streams one or all pods with `--follow` and the `--since` window.
+   ```shell
+   veen kube status --cluster-context production --namespace veen-prod --name alpha --json
+   veen kube logs --cluster-context production --namespace veen-prod --name alpha --since 30m
+   ```
+4. **Back up and restore state** through the in-cluster Service endpoint.
+   Backups call `/admin/backup` and emit the profile identifier plus the latest
+   stream/mmr roots. Restores replay `/admin/restore` and verify the reported
+   observability data after the hub becomes healthy.
+   ```shell
+   veen kube backup \
+     --cluster-context production \
+     --namespace veen-prod \
+     --name alpha \
+     --snapshot-name nightly-2024-08-30 \
+     --target-uri s3://backups/veen/alpha
+
+   veen kube restore \
+     --cluster-context production \
+     --namespace veen-prod \
+     --name alpha \
+     --snapshot-name nightly-2024-08-30 \
+     --source-uri s3://backups/veen/alpha
+   ```
+5. **Delete workloads** with `veen kube delete --purge-pvcs` when recycling a
+   hub. The command is idempotent and reports whether resources already
+   disappeared.
+
+Every manifest emitted by the renderer carries the `app=veen-hub` and
+`veen.hub.name=<NAME>` labels so selectors remain consistent across the
+`render`, `apply`, `status`, `logs`, `backup`, and `restore` workflows.
 
 ## Manual installation
 
