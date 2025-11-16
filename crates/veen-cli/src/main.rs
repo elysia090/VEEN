@@ -383,7 +383,7 @@ fn format_hub_profile_output(
         root.insert("features".to_string(), JsonValue::Object(feature_map));
         pretty_json(JsonValue::Object(root))
     } else {
-        vec![
+        [
             format!("version: {version}"),
             format!("profile_id: {profile_id}"),
             format!("hub_id: {hub_id}"),
@@ -452,7 +452,7 @@ fn format_hub_role_output(
             .primary_hub
             .clone()
             .unwrap_or_else(|| "none".to_string());
-        vec![
+        [
             format!("hub_id: {hub_id}"),
             format!("role: {role}"),
             format!("realm_id: {realm_out}"),
@@ -464,7 +464,7 @@ fn format_hub_role_output(
         ]
         .join("\n")
     } else {
-        vec![format!("role: {role}"), format!("hub_id: {hub_id}")].join("\n")
+        [format!("role: {role}"), format!("hub_id: {hub_id}")].join("\n")
     }
 }
 
@@ -500,7 +500,7 @@ fn format_authority_record_output(
             .expires_at
             .map(|value| value.to_string())
             .unwrap_or_else(|| "0".to_string());
-        vec![
+        [
             format!("realm_id: {}", descriptor.realm_id),
             format!("stream_id: {}", descriptor.stream_id),
             format!("primary_hub: {primary}"),
@@ -541,7 +541,7 @@ fn format_label_authority_output(
             .primary_hub
             .clone()
             .unwrap_or_else(|| "none".to_string());
-        vec![
+        [
             format!("label: {}", descriptor.label),
             format!("realm_id: {realm_display}"),
             format!("stream_id: {}", descriptor.stream_id),
