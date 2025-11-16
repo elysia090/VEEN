@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -7,11 +7,15 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Subcommand};
 use humantime::parse_duration;
 use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::batch::v1::{Job, JobSpec, JobStatus};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, Namespace, PersistentVolumeClaim, Pod, Secret, Service, ServiceAccount,
+    ConfigMap, Container, EnvVar as K8sEnvVar, Namespace, PersistentVolumeClaim,
+    PersistentVolumeClaimVolumeSource, Pod, PodSpec, PodTemplateSpec, Secret, SecretVolumeSource,
+    Service, ServiceAccount, Volume, VolumeMount,
 };
 use k8s_openapi::api::rbac::v1::{Role, RoleBinding};
-use kube::api::{Api, DeleteParams, ListParams, LogParams, Patch, PatchParams};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use kube::api::{Api, DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams};
 use kube::config::KubeConfigOptions;
 use kube::core::{ClusterResourceScope, NamespaceResourceScope};
 use kube::{Client, ResourceExt};
@@ -33,6 +37,20 @@ const HUB_CONFIG_KEY: &str = "hub-config.toml";
 const HUB_SECRET_KEY: &str = "hub-key.cbor";
 const APPLY_MANAGER: &str = "veen-cli";
 const HEALTH_PATH: &str = "/healthz";
+const DEFAULT_JOB_IMAGE: &str = "veen-cli:latest";
+const JOB_SEND_GENERATE_NAME: &str = "veen-job-send-";
+const JOB_STREAM_GENERATE_NAME: &str = "veen-job-stream-";
+const CLIENT_STATE_PATH: &str = "/var/lib/veen-client";
+const CLIENT_SECRET_PATH: &str = "/secrets/veen-client";
+const CAP_STATE_PATH: &str = "/var/lib/veen-cap";
+const CAP_SECRET_PATH: &str = "/secrets/veen-cap";
+const CAP_FILE_PATH: &str = "/var/lib/veen-cap/cap.cbor";
+const CLIENT_SECRET_VOLUME: &str = "client-secret";
+const CLIENT_STATE_VOLUME: &str = "client-state";
+const CAP_SECRET_VOLUME: &str = "cap-secret";
+const CAP_STATE_VOLUME: &str = "cap-state";
+const JOB_COMPLETION_TIMEOUT: Duration = Duration::from_secs(900);
+const POD_START_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum KubeCommand {
@@ -50,6 +68,17 @@ pub(crate) enum KubeCommand {
     Backup(KubeBackupArgs),
     /// Restore a hub snapshot and verify readiness.
     Restore(KubeRestoreArgs),
+    /// Run disposable CLI jobs as Kubernetes workloads.
+    #[command(subcommand)]
+    Job(KubeJobCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum KubeJobCommand {
+    /// Dispatch a disposable Job that runs `veen send` from a secret-backed client directory.
+    Send(KubeJobSendArgs),
+    /// Dispatch a disposable Job that runs `veen stream` for the requested label.
+    Stream(KubeJobStreamArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -160,6 +189,58 @@ pub(crate) struct KubeRestoreArgs {
     pub(crate) source_uri: String,
 }
 
+#[derive(Args, Debug, Clone)]
+pub(crate) struct KubeJobSendArgs {
+    #[arg(long = "cluster-context")]
+    pub(crate) cluster_context: String,
+    #[arg(long)]
+    pub(crate) namespace: String,
+    #[arg(long = "hub-service")]
+    pub(crate) hub_service: String,
+    #[arg(long = "client-secret")]
+    pub(crate) client_secret: String,
+    #[arg(long)]
+    pub(crate) stream: String,
+    #[arg(long)]
+    pub(crate) body: String,
+    #[arg(long = "cap-secret")]
+    pub(crate) cap_secret: Option<String>,
+    #[arg(long = "profile-id")]
+    pub(crate) profile_id: Option<String>,
+    #[arg(long = "timeout-ms")]
+    pub(crate) timeout_ms: Option<u64>,
+    #[arg(long = "state-pvc")]
+    pub(crate) state_pvc: Option<String>,
+    #[arg(long = "image", default_value = DEFAULT_JOB_IMAGE)]
+    pub(crate) image: String,
+    #[arg(long = "env-file")]
+    pub(crate) env_file: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub(crate) struct KubeJobStreamArgs {
+    #[arg(long = "cluster-context")]
+    pub(crate) cluster_context: String,
+    #[arg(long)]
+    pub(crate) namespace: String,
+    #[arg(long = "hub-service")]
+    pub(crate) hub_service: String,
+    #[arg(long = "client-secret")]
+    pub(crate) client_secret: String,
+    #[arg(long)]
+    pub(crate) stream: String,
+    #[arg(long = "from")]
+    pub(crate) from: Option<u64>,
+    #[arg(long = "with-proof")]
+    pub(crate) with_proof: bool,
+    #[arg(long = "state-pvc")]
+    pub(crate) state_pvc: Option<String>,
+    #[arg(long = "image", default_value = DEFAULT_JOB_IMAGE)]
+    pub(crate) image: String,
+    #[arg(long = "env-file")]
+    pub(crate) env_file: Option<PathBuf>,
+}
+
 pub(crate) async fn handle_kube_command(cmd: KubeCommand) -> Result<()> {
     match cmd {
         KubeCommand::Render(args) => handle_render(args).await,
@@ -169,6 +250,14 @@ pub(crate) async fn handle_kube_command(cmd: KubeCommand) -> Result<()> {
         KubeCommand::Logs(args) => handle_logs(args).await,
         KubeCommand::Backup(args) => handle_backup(args).await,
         KubeCommand::Restore(args) => handle_restore(args).await,
+        KubeCommand::Job(cmd) => handle_job_command(cmd).await,
+    }
+}
+
+async fn handle_job_command(cmd: KubeJobCommand) -> Result<()> {
+    match cmd {
+        KubeJobCommand::Send(args) => handle_job_send(args).await,
+        KubeJobCommand::Stream(args) => handle_job_stream(args).await,
     }
 }
 
@@ -571,6 +660,24 @@ async fn handle_restore(args: KubeRestoreArgs) -> Result<()> {
     Ok(())
 }
 
+async fn handle_job_send(args: KubeJobSendArgs) -> Result<()> {
+    let env = match args.env_file {
+        Some(ref path) => parse_env_file(path).await?,
+        None => Vec::new(),
+    };
+    let job = build_job_send_manifest(&args, &env)?;
+    run_job(&args.cluster_context, job).await
+}
+
+async fn handle_job_stream(args: KubeJobStreamArgs) -> Result<()> {
+    let env = match args.env_file {
+        Some(ref path) => parse_env_file(path).await?,
+        None => Vec::new(),
+    };
+    let job = build_job_stream_manifest(&args, &env)?;
+    run_job(&args.cluster_context, job).await
+}
+
 async fn store_snapshot(uri: &str, body: &str) -> Result<()> {
     let path = snapshot_path(uri)?;
     if let Some(parent) = path.parent() {
@@ -643,6 +750,125 @@ async fn parse_env_file(path: &Path) -> Result<Vec<EnvVar>> {
     Ok(vars)
 }
 
+async fn run_job(cluster_context: &str, job: Job) -> Result<()> {
+    let namespace = job
+        .metadata
+        .namespace
+        .clone()
+        .ok_or_else(|| CliUsageError::new("job manifest missing namespace".to_string()))?;
+    let client = kube_client(cluster_context).await?;
+    let job_api: Api<Job> = Api::namespaced(client.clone(), &namespace);
+    let created = job_api
+        .create(&PostParams::default(), &job)
+        .await
+        .with_context(|| "creating Kubernetes Job")?;
+    let job_name = created.name_any();
+    println!("created Job {job_name} in namespace {namespace}");
+
+    let pod_api: Api<Pod> = Api::namespaced(client.clone(), &namespace);
+    let log_handle = tokio::spawn(stream_job_logs(pod_api.clone(), job_name.clone()));
+    let outcome = wait_for_job_completion(job_api.clone(), job_name.clone()).await;
+
+    match log_handle.await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => eprintln!("warning: failed to stream job logs: {err}"),
+        Err(err) => eprintln!("warning: log streaming task ended unexpectedly: {err}"),
+    }
+
+    match outcome? {
+        JobOutcome::Succeeded => {
+            println!("job {job_name} completed successfully");
+            Ok(())
+        }
+        JobOutcome::Failed { message } => {
+            bail!("job {job_name} failed: {message}");
+        }
+    }
+}
+
+enum JobOutcome {
+    Succeeded,
+    Failed { message: String },
+}
+
+async fn wait_for_job_completion(job_api: Api<Job>, job_name: String) -> Result<JobOutcome> {
+    let deadline = Instant::now() + JOB_COMPLETION_TIMEOUT;
+    loop {
+        let job = job_api.get(&job_name).await?;
+        if let Some(status) = job.status.as_ref() {
+            if status.succeeded.unwrap_or(0) > 0 {
+                return Ok(JobOutcome::Succeeded);
+            }
+            if status.failed.unwrap_or(0) > 0 {
+                let message = job_failure_message(status);
+                return Ok(JobOutcome::Failed { message });
+            }
+        }
+        if Instant::now() > deadline {
+            bail!("timed out waiting for job {job_name} completion");
+        }
+        sleep(Duration::from_secs(5)).await;
+    }
+}
+
+fn job_failure_message(status: &JobStatus) -> String {
+    if let Some(conditions) = status.conditions.as_ref() {
+        for condition in conditions {
+            if condition.type_ == "Failed" && condition.status == "True" {
+                if let Some(message) = condition.message.as_ref() {
+                    return message.clone();
+                }
+                if let Some(reason) = condition.reason.as_ref() {
+                    return reason.clone();
+                }
+            }
+        }
+    }
+    "job reported failure".to_string()
+}
+
+async fn wait_for_job_pod(pod_api: &Api<Pod>, job_name: &str) -> Result<String> {
+    let selector = format!("job-name={job_name}");
+    let params = ListParams::default().labels(&selector);
+    let deadline = Instant::now() + POD_START_TIMEOUT;
+    loop {
+        let pods = pod_api.list(&params).await?;
+        if let Some(pod) = pods.items.into_iter().next() {
+            return Ok(pod.name_any());
+        }
+        if Instant::now() > deadline {
+            bail!("timed out waiting for pod spawned by job {job_name}");
+        }
+        sleep(Duration::from_secs(2)).await;
+    }
+}
+
+async fn stream_job_logs(pod_api: Api<Pod>, job_name: String) -> Result<()> {
+    let pod_name = wait_for_job_pod(&pod_api, &job_name).await?;
+    let mut attempts = 0;
+    loop {
+        let mut params = LogParams::default();
+        params.follow = true;
+        match pod_api.log_stream(&pod_name, &params).await {
+            Ok(reader) => {
+                let mut stream = ReaderStream::new(reader.compat());
+                while let Some(chunk) = stream.next().await {
+                    let data = chunk?;
+                    print!("{}", String::from_utf8_lossy(&data));
+                }
+                return Ok(());
+            }
+            Err(kube::Error::Api(status))
+                if (status.code == 400 || status.code == 404) && attempts < 10 =>
+            {
+                attempts += 1;
+                sleep(Duration::from_secs(2)).await;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+}
+
 async fn parse_annotations_file(path: &Path) -> Result<JsonMap> {
     let data = fs::read_to_string(path)
         .await
@@ -668,6 +894,266 @@ fn parse_resource_quantity(value: Option<&str>) -> Result<Option<ResourceQuantit
         request: request.trim().to_string(),
         limit: limit.trim().to_string(),
     }))
+}
+
+fn format_hub_url(service: &str) -> String {
+    if service.starts_with("http://") || service.starts_with("https://") {
+        service.to_string()
+    } else {
+        format!("http://{service}")
+    }
+}
+
+fn build_job_send_manifest(args: &KubeJobSendArgs, env: &[EnvVar]) -> Result<Job> {
+    build_cli_job(
+        &args.namespace,
+        JOB_SEND_GENERATE_NAME,
+        &args.image,
+        env,
+        &args.client_secret,
+        args.cap_secret.as_deref(),
+        args.state_pvc.as_deref(),
+        build_send_command_args(args),
+    )
+}
+
+fn build_job_stream_manifest(args: &KubeJobStreamArgs, env: &[EnvVar]) -> Result<Job> {
+    build_cli_job(
+        &args.namespace,
+        JOB_STREAM_GENERATE_NAME,
+        &args.image,
+        env,
+        &args.client_secret,
+        None,
+        args.state_pvc.as_deref(),
+        build_stream_command_args(args),
+    )
+}
+
+fn build_send_command_args(args: &KubeJobSendArgs) -> Vec<String> {
+    let mut command = vec![
+        "placeholder".to_string(),
+        "veen".to_string(),
+        "send".to_string(),
+        "--hub".to_string(),
+        format_hub_url(&args.hub_service),
+        "--client".to_string(),
+        CLIENT_STATE_PATH.to_string(),
+        "--stream".to_string(),
+        args.stream.clone(),
+        "--body".to_string(),
+        args.body.clone(),
+    ];
+    if let Some(profile) = &args.profile_id {
+        command.push("--profile-id".to_string());
+        command.push(profile.clone());
+    }
+    if args.cap_secret.is_some() {
+        command.push("--cap".to_string());
+        command.push(CAP_FILE_PATH.to_string());
+    }
+    if let Some(timeout) = args.timeout_ms {
+        command.push("--timeout-ms".to_string());
+        command.push(timeout.to_string());
+    }
+    command
+}
+
+fn build_stream_command_args(args: &KubeJobStreamArgs) -> Vec<String> {
+    let mut command = vec![
+        "placeholder".to_string(),
+        "veen".to_string(),
+        "stream".to_string(),
+        "--hub".to_string(),
+        format_hub_url(&args.hub_service),
+        "--client".to_string(),
+        CLIENT_STATE_PATH.to_string(),
+        "--stream".to_string(),
+        args.stream.clone(),
+    ];
+    if let Some(from) = args.from {
+        command.push("--from".to_string());
+        command.push(from.to_string());
+    }
+    if args.with_proof {
+        command.push("--with-proof".to_string());
+    }
+    command
+}
+
+fn build_cli_job(
+    namespace: &str,
+    generate_name: &str,
+    image: &str,
+    env: &[EnvVar],
+    client_secret: &str,
+    cap_secret: Option<&str>,
+    state_pvc: Option<&str>,
+    cli_args: Vec<String>,
+) -> Result<Job> {
+    if client_secret.is_empty() {
+        return Err(CliUsageError::new("--client-secret is required".to_string()).into());
+    }
+    let script = job_bootstrap_script(cap_secret.is_some());
+    let mut container_args = Vec::new();
+    container_args.push(script);
+    container_args.extend(cli_args);
+
+    let mut env_vars = Vec::new();
+    for var in env {
+        env_vars.push(K8sEnvVar {
+            name: var.name.clone(),
+            value: Some(var.value.clone()),
+            ..Default::default()
+        });
+    }
+
+    let mut volume_mounts = vec![
+        VolumeMount {
+            mount_path: CLIENT_SECRET_PATH.to_string(),
+            name: CLIENT_SECRET_VOLUME.to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        },
+        VolumeMount {
+            mount_path: CLIENT_STATE_PATH.to_string(),
+            name: CLIENT_STATE_VOLUME.to_string(),
+            read_only: Some(false),
+            ..Default::default()
+        },
+    ];
+    let mut volumes = vec![
+        Volume {
+            name: CLIENT_SECRET_VOLUME.to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(client_secret.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        client_state_volume(state_pvc),
+    ];
+
+    if let Some(secret_name) = cap_secret {
+        volume_mounts.push(VolumeMount {
+            mount_path: CAP_SECRET_PATH.to_string(),
+            name: CAP_SECRET_VOLUME.to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+        volume_mounts.push(VolumeMount {
+            mount_path: CAP_STATE_PATH.to_string(),
+            name: CAP_STATE_VOLUME.to_string(),
+            read_only: Some(false),
+            ..Default::default()
+        });
+        volumes.push(Volume {
+            name: CAP_SECRET_VOLUME.to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(secret_name.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        volumes.push(Volume {
+            name: CAP_STATE_VOLUME.to_string(),
+            empty_dir: Some(Default::default()),
+            ..Default::default()
+        });
+    }
+
+    let mut labels = BTreeMap::new();
+    labels.insert("app.kubernetes.io/name".to_string(), "veen-cli".to_string());
+    labels.insert("app.kubernetes.io/component".to_string(), "job".to_string());
+
+    let pod_spec = PodSpec {
+        containers: vec![Container {
+            name: "veen-cli".to_string(),
+            image: Some(image.to_string()),
+            command: Some(vec!["/bin/sh".to_string(), "-c".to_string()]),
+            args: Some(container_args),
+            env: if env_vars.is_empty() {
+                None
+            } else {
+                Some(env_vars)
+            },
+            volume_mounts: Some(volume_mounts),
+            ..Default::default()
+        }],
+        restart_policy: Some("Never".to_string()),
+        volumes: Some(volumes),
+        ..Default::default()
+    };
+
+    let job = Job {
+        metadata: ObjectMeta {
+            namespace: Some(namespace.to_string()),
+            generate_name: Some(generate_name.to_string()),
+            labels: Some(labels.clone()),
+            ..Default::default()
+        },
+        spec: Some(JobSpec {
+            backoff_limit: Some(0),
+            template: PodTemplateSpec {
+                metadata: Some(ObjectMeta {
+                    labels: Some(labels),
+                    ..Default::default()
+                }),
+                spec: Some(pod_spec),
+            },
+            ..Default::default()
+        }),
+        status: None,
+    };
+
+    Ok(job)
+}
+
+fn client_state_volume(state_pvc: Option<&str>) -> Volume {
+    if let Some(pvc) = state_pvc {
+        Volume {
+            name: CLIENT_STATE_VOLUME.to_string(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: pvc.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    } else {
+        Volume {
+            name: CLIENT_STATE_VOLUME.to_string(),
+            empty_dir: Some(Default::default()),
+            ..Default::default()
+        }
+    }
+}
+
+fn job_bootstrap_script(include_cap: bool) -> String {
+    let mut script = format!(
+        concat!(
+            "set -euo pipefail\n",
+            "mkdir -p {client_state}\n",
+            "cp {client_secret}/keystore.enc {client_state}/keystore.enc\n",
+            "cp {client_secret}/identity_card.pub {client_state}/identity_card.pub\n",
+            "if [ -f {client_secret}/state.json ] && [ ! -f {client_state}/state.json ]; then\n",
+            "  cp {client_secret}/state.json {client_state}/state.json\n",
+            "fi\n"
+        ),
+        client_state = CLIENT_STATE_PATH,
+        client_secret = CLIENT_SECRET_PATH,
+    );
+    if include_cap {
+        script.push_str(&format!(
+            concat!(
+                "mkdir -p {cap_state}\n",
+                "cp -R {cap_secret}/. {cap_state}/\n"
+            ),
+            cap_state = CAP_STATE_PATH,
+            cap_secret = CAP_SECRET_PATH,
+        ));
+    }
+    script.push_str("exec \"$@\"\n");
+    script
 }
 
 fn build_manifests(spec: &RenderSpec) -> Result<Vec<JsonValue>> {
@@ -1224,5 +1710,110 @@ mod tests {
             .unwrap();
         let result = parse_env_file(tmp.path()).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn send_job_builds_capability_mounts() {
+        let args = KubeJobSendArgs {
+            cluster_context: "ctx".into(),
+            namespace: "tenant-a".into(),
+            hub_service: "veen-hub-tenant-a.tenant-a.svc.cluster.local:8080".into(),
+            client_secret: "client-secret".into(),
+            stream: "core/main".into(),
+            body: "{\"text\":\"hi\"}".into(),
+            cap_secret: Some("cap-secret".into()),
+            profile_id: Some("abcd".into()),
+            timeout_ms: Some(5000),
+            state_pvc: None,
+            image: "registry.example/veen-cli:v1".into(),
+            env_file: None,
+        };
+        let job = build_job_send_manifest(&args, &[]).expect("job manifest");
+        assert_eq!(job.metadata.namespace.as_deref(), Some("tenant-a"));
+        assert_eq!(
+            job.metadata.generate_name.as_deref(),
+            Some(JOB_SEND_GENERATE_NAME)
+        );
+        let job_spec = job.spec.expect("job spec");
+        let pod_spec = job_spec.template.spec.expect("pod spec");
+        let container = pod_spec.containers.first().expect("container");
+        let args = container.args.as_ref().expect("container args");
+        assert!(args[0].contains("set -euo pipefail"));
+        assert!(args.iter().any(|value| value == CAP_FILE_PATH));
+        let volumes = pod_spec.volumes.expect("volumes");
+        let cap_secret_volume = volumes
+            .iter()
+            .find(|volume| volume.name == CAP_SECRET_VOLUME)
+            .expect("cap secret volume");
+        let cap_state_volume = volumes
+            .iter()
+            .find(|volume| volume.name == CAP_STATE_VOLUME)
+            .expect("cap state volume");
+        assert_eq!(
+            cap_secret_volume
+                .secret
+                .as_ref()
+                .and_then(|secret| secret.secret_name.as_deref()),
+            Some("cap-secret")
+        );
+        assert!(cap_state_volume.empty_dir.is_some());
+    }
+
+    #[test]
+    fn stream_job_uses_state_pvc_when_requested() {
+        let args = KubeJobStreamArgs {
+            cluster_context: "ctx".into(),
+            namespace: "tenant-a".into(),
+            hub_service: "veen-hub".into(),
+            client_secret: "client-secret".into(),
+            stream: "core/main".into(),
+            from: Some(10),
+            with_proof: true,
+            state_pvc: Some("client-state".into()),
+            image: "registry.example/veen-cli:v1".into(),
+            env_file: None,
+        };
+        let job = build_job_stream_manifest(&args, &[]).expect("job manifest");
+        let job_spec = job.spec.expect("job spec");
+        let pod_spec = job_spec.template.spec.expect("pod spec");
+        let volumes = pod_spec.volumes.expect("volumes");
+        let client_state = volumes
+            .iter()
+            .find(|volume| volume.name == CLIENT_STATE_VOLUME)
+            .expect("client state volume");
+        let pvc = client_state
+            .persistent_volume_claim
+            .as_ref()
+            .expect("pvc source");
+        assert_eq!(pvc.claim_name, "client-state");
+    }
+
+    #[test]
+    fn job_env_vars_are_passed_to_container() {
+        let args = KubeJobSendArgs {
+            cluster_context: "ctx".into(),
+            namespace: "tenant-a".into(),
+            hub_service: "veen-hub".into(),
+            client_secret: "client-secret".into(),
+            stream: "core/main".into(),
+            body: "{}".into(),
+            cap_secret: None,
+            profile_id: None,
+            timeout_ms: None,
+            state_pvc: None,
+            image: DEFAULT_JOB_IMAGE.into(),
+            env_file: None,
+        };
+        let env = vec![EnvVar {
+            name: "VEEN_ROLE".into(),
+            value: "operator".into(),
+        }];
+        let job = build_job_send_manifest(&args, &env).expect("job manifest");
+        let job_spec = job.spec.expect("job spec");
+        let pod_spec = job_spec.template.spec.expect("pod spec");
+        let container = pod_spec.containers.first().expect("container");
+        let container_env = container.env.as_ref().expect("env vars");
+        assert_eq!(container_env[0].name, "VEEN_ROLE");
+        assert_eq!(container_env[0].value.as_deref(), Some("operator"));
     }
 }
