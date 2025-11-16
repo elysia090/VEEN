@@ -257,6 +257,60 @@ Environment variables such as `VEEN_LISTEN`, `VEEN_LOG_LEVEL`, or
 profile identifiers. To supply a custom hub configuration file, mount it into
 the container and set `VEEN_CONFIG_PATH` to the path inside the container.
 
+#### Disposable Jobs for client workflows
+
+The `veen kube job send` and `veen kube job stream` commands run the CLI inside
+short-lived Kubernetes Jobs so operators can reuse Secrets that already hold
+client identities. Each Job creates a single Pod that:
+
+- mounts a client Secret specified via `--client-secret` (the Secret must
+  contain `keystore.enc`, `identity_card.pub`, and optionally `state.json`)
+- optionally mounts a capability Secret supplied with `--cap-secret` that holds
+  a `cap.cbor` blob
+- copies those files into `/var/lib/veen-client` (and `/var/lib/veen-cap` when a
+  capability is present) so the container has a writable working directory
+- runs the requested `veen send` or `veen stream` invocation inside the
+  container image (defaults to `veen-cli:latest`, override with `--image`)
+- streams pod logs back to the CLI until the Job succeeds or fails; the CLI
+  exit code matches the Job completion state.
+
+Persisting acknowledgement state between runs is supported by providing a PVC
+name with `--state-pvc`. When omitted the CLI uses an `emptyDir` so state is
+discarded with the Job. Arbitrary environment variables can be injected via
+`--env-file` for cases where the CLI needs HTTP proxies or tracing tweaks.
+
+Example: submit a message using a client Secret and a capability token secret:
+
+```shell
+veen kube job send \
+  --cluster-context prod-admin \
+  --namespace veen-tenants \
+  --hub-service veen-hub-alpha.veen-tenants.svc.cluster.local:8080 \
+  --client-secret tenant-a-client \
+  --cap-secret tenant-a-cap \
+  --stream core/main \
+  --body '{"k":"v"}' \
+  --state-pvc veen-tenant-a-client-pvc
+```
+
+Streaming messages with proofs uses the matching Job subcommand:
+
+```shell
+veen kube job stream \
+  --cluster-context prod-admin \
+  --namespace veen-tenants \
+  --hub-service veen-hub-alpha.veen-tenants.svc.cluster.local:8080 \
+  --client-secret tenant-a-client \
+  --stream core/main \
+  --from 0 \
+  --with-proof \
+  --image registry.example.com/ops/veen-cli:v1
+```
+
+The CLI watches the Job status, relays pod logs (so decrypted payloads and
+receipt summaries appear immediately), and returns a non-zero exit code when the
+Job fails to complete successfully.
+
 ## Manual installation
 
 Install the binaries into a traditional Unix layout after building:
