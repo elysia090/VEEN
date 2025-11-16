@@ -6848,7 +6848,7 @@ fn record_selftest_stub_marker(suite: SelftestSuite) -> Result<()> {
             let mut file = StdOpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(&PathBuf::from(path))
+                .open(PathBuf::from(path))
                 .with_context(|| format!("opening selftest stub file for {name}"))?;
             writeln!(&mut file, "{name}").context("writing selftest stub marker")?;
         }
