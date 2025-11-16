@@ -1042,11 +1042,11 @@ impl HubPipeline {
             .admission_events
             .iter()
             .rev()
-            .cloned()
             .filter(|event| match &code_filter {
                 Some(set) => set.contains(&event.code),
                 None => true,
             })
+            .cloned()
             .collect();
         if let Some(limit) = limit {
             events.truncate(limit);
