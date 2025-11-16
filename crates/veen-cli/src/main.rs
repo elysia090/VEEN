@@ -1137,10 +1137,15 @@ struct SendArgs {
     attach: Vec<PathBuf>,
     #[arg(long)]
     no_store_body: bool,
+    /// Solve or supply a proof-of-work cookie requiring this difficulty (bits).
     #[arg(long, value_name = "BITS")]
     pow_difficulty: Option<u8>,
+    /// Hex-encoded challenge to solve or re-use (requires --pow-difficulty).
     #[arg(long, value_name = "HEX")]
     pow_challenge: Option<String>,
+    /// Pre-computed nonce for the supplied challenge (requires --pow-difficulty and --pow-challenge).
+    #[arg(long, value_name = "NONCE")]
+    pow_nonce: Option<u64>,
 }
 
 #[derive(Args)]
@@ -1457,6 +1462,15 @@ struct RpcCallArgs {
     timeout_ms: Option<u64>,
     #[arg(long)]
     idem: Option<u64>,
+    /// Solve or supply a proof-of-work cookie requiring this difficulty (bits).
+    #[arg(long, value_name = "BITS")]
+    pow_difficulty: Option<u8>,
+    /// Hex-encoded challenge to solve or re-use (requires --pow-difficulty).
+    #[arg(long, value_name = "HEX")]
+    pow_challenge: Option<String>,
+    /// Pre-computed nonce for the supplied challenge (requires --pow-difficulty and --pow-challenge).
+    #[arg(long, value_name = "NONCE")]
+    pow_nonce: Option<u64>,
 }
 
 #[derive(Args)]
@@ -4582,6 +4596,12 @@ async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()>
     if args.pow_challenge.is_some() && args.pow_difficulty.is_none() {
         bail_usage!("--pow-challenge requires --pow-difficulty");
     }
+    if args.pow_nonce.is_some() && args.pow_difficulty.is_none() {
+        bail_usage!("--pow-nonce requires --pow-difficulty");
+    }
+    if args.pow_nonce.is_some() && args.pow_challenge.is_none() {
+        bail_usage!("--pow-nonce requires --pow-challenge");
+    }
 
     let identity_path = args.client.join("identity_card.pub");
     let stream_id = cap_stream_id_from_label(&args.stream)
@@ -4646,28 +4666,48 @@ async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()>
             bail_usage!("--pow-difficulty must be greater than zero");
         }
 
-        let challenge = if let Some(ref hex_value) = args.pow_challenge {
-            let bytes = hex::decode(hex_value.trim())
-                .with_context(|| format!("decoding pow challenge {hex_value}"))?;
-            if bytes.is_empty() {
-                bail_usage!("--pow-challenge must not be empty");
+        if let Some(nonce) = args.pow_nonce {
+            let challenge_hex = args
+                .pow_challenge
+                .as_deref()
+                .expect("pow_nonce requires pow_challenge");
+            let challenge = decode_pow_challenge_hex(challenge_hex)?;
+            let cookie = PowCookie {
+                challenge,
+                nonce,
+                difficulty,
+            };
+            if !cookie.meets_difficulty() {
+                bail_usage!(
+                    "provided proof-of-work nonce does not satisfy difficulty {difficulty}"
+                );
             }
-            bytes
+            println!(
+                "proof-of-work: nonce={} difficulty={} challenge={} (provided)",
+                cookie.nonce,
+                cookie.difficulty,
+                hex::encode(&cookie.challenge)
+            );
+            Some(PowCookieEnvelope::from_cookie(&cookie))
         } else {
-            let mut bytes = vec![0u8; 32];
-            OsRng.fill_bytes(&mut bytes);
-            bytes
-        };
+            let challenge = if let Some(ref hex_value) = args.pow_challenge {
+                decode_pow_challenge_hex(hex_value)?
+            } else {
+                let mut bytes = vec![0u8; 32];
+                OsRng.fill_bytes(&mut bytes);
+                bytes
+            };
 
-        let cookie = solve_pow_cookie(challenge, difficulty)?;
-        println!(
-            "proof-of-work: nonce={} difficulty={} challenge={}",
-            cookie.nonce,
-            cookie.difficulty,
-            hex::encode(&cookie.challenge)
-        );
+            let cookie = solve_pow_cookie(challenge, difficulty)?;
+            println!(
+                "proof-of-work: nonce={} difficulty={} challenge={}",
+                cookie.nonce,
+                cookie.difficulty,
+                hex::encode(&cookie.challenge)
+            );
 
-        Some(PowCookieEnvelope::from_cookie(&cookie))
+            Some(PowCookieEnvelope::from_cookie(&cookie))
+        }
     } else {
         None
     };
@@ -4707,6 +4747,16 @@ async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()>
     update_client_label_send_state(&args.client, &args.stream, response.seq, send_ts).await?;
 
     Ok(())
+}
+
+fn decode_pow_challenge_hex(hex_value: &str) -> Result<Vec<u8>> {
+    let trimmed = hex_value.trim();
+    let bytes =
+        hex::decode(trimmed).with_context(|| format!("decoding pow challenge {hex_value}"))?;
+    if bytes.is_empty() {
+        bail_usage!("--pow-challenge must not be empty");
+    }
+    Ok(bytes)
 }
 
 fn solve_pow_cookie(challenge: Vec<u8>, difficulty: u8) -> Result<PowCookie> {
@@ -6032,8 +6082,9 @@ async fn handle_rpc_call(args: RpcCallArgs) -> Result<()> {
         parent: None,
         attach: Vec::new(),
         no_store_body: false,
-        pow_difficulty: None,
-        pow_challenge: None,
+        pow_difficulty: args.pow_difficulty,
+        pow_challenge: args.pow_challenge,
+        pow_nonce: args.pow_nonce,
     };
 
     let result = handle_send(send_args).await;
@@ -6925,6 +6976,45 @@ mod tests {
         Ok((format!("http://{}", addr), rx, handle))
     }
 
+    async fn spawn_submit_capture_server(
+        response: RemoteSubmitResponse,
+    ) -> anyhow::Result<(String, mpsc::Receiver<Vec<u8>>, tokio::task::JoinHandle<()>)> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let addr: SocketAddr = listener.local_addr()?;
+        let (tx, rx) = mpsc::channel(1);
+        let response = Arc::new(response);
+        let service = make_service_fn(move |_| {
+            let tx = tx.clone();
+            let response = Arc::clone(&response);
+            async move {
+                Ok::<_, Infallible>(service_fn(move |mut req: HyperRequest<Body>| {
+                    let tx = tx.clone();
+                    let response = Arc::clone(&response);
+                    async move {
+                        assert_eq!(req.method(), Method::POST);
+                        assert_eq!(req.uri().path(), "/submit");
+                        let body = to_bytes(req.body_mut()).await.unwrap().to_vec();
+                        tx.send(body).await.unwrap();
+                        let json = serde_json::to_vec(&*response).unwrap();
+                        Ok::<_, Infallible>(
+                            HyperResponse::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(json))
+                                .unwrap(),
+                        )
+                    }
+                }))
+            }
+        });
+        let server = Server::from_tcp(listener)?.serve(service);
+        let handle = tokio::spawn(async move {
+            if let Err(err) = server.await {
+                eprintln!("capture server error: {err}");
+            }
+        });
+        Ok((format!("http://{}", addr), rx, handle))
+    }
+
     async fn spawn_fixed_response_server(
         path: &'static str,
         body: Vec<u8>,
@@ -7251,6 +7341,7 @@ mod tests {
             no_store_body: false,
             pow_difficulty: None,
             pow_challenge: None,
+            pow_nonce: None,
         })
         .await?;
 
@@ -7280,6 +7371,103 @@ mod tests {
         assert_eq!(seq, 1);
 
         runtime.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_remote_auto_solves_pow_cookie() -> anyhow::Result<()> {
+        let client_dir = tempdir()?;
+        handle_keygen(KeygenArgs {
+            out: client_dir.path().to_path_buf(),
+        })
+        .await?;
+
+        let response = RemoteSubmitResponse {
+            stream: "pow".to_string(),
+            seq: 1,
+            mmr_root: "root".to_string(),
+            stored_attachments: Vec::new(),
+        };
+        let (url, mut body_rx, server) = spawn_submit_capture_server(response).await?;
+
+        let challenge_hex = "0abc".to_string();
+        handle_send(SendArgs {
+            hub: url.clone(),
+            client: client_dir.path().to_path_buf(),
+            stream: "pow".to_string(),
+            body: json!({ "msg": "pow" }).to_string(),
+            schema: None,
+            expires_at: None,
+            cap: None,
+            parent: None,
+            attach: Vec::new(),
+            no_store_body: false,
+            pow_difficulty: Some(4),
+            pow_challenge: Some(challenge_hex.clone()),
+            pow_nonce: None,
+        })
+        .await?;
+
+        let body = body_rx.recv().await.expect("payload captured");
+        server.abort();
+
+        let request: RemoteSubmitRequest = serde_json::from_slice(&body)?;
+        let cookie = request.pow_cookie.expect("pow cookie present");
+        assert_eq!(cookie.difficulty, 4);
+        let pow_cookie = cookie.into_pow_cookie();
+        assert!(pow_cookie.meets_difficulty());
+        assert_eq!(hex::encode(pow_cookie.challenge), challenge_hex);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_remote_accepts_user_supplied_pow_cookie() -> anyhow::Result<()> {
+        let client_dir = tempdir()?;
+        handle_keygen(KeygenArgs {
+            out: client_dir.path().to_path_buf(),
+        })
+        .await?;
+
+        let response = RemoteSubmitResponse {
+            stream: "pow".to_string(),
+            seq: 7,
+            mmr_root: "root".to_string(),
+            stored_attachments: Vec::new(),
+        };
+        let (url, mut body_rx, server) = spawn_submit_capture_server(response).await?;
+
+        let challenge_bytes = vec![0x55u8; 16];
+        let challenge_hex = hex::encode(&challenge_bytes);
+        let solved = super::solve_pow_cookie(challenge_bytes.clone(), 5)?;
+
+        handle_send(SendArgs {
+            hub: url.clone(),
+            client: client_dir.path().to_path_buf(),
+            stream: "pow".to_string(),
+            body: json!({ "msg": "provided" }).to_string(),
+            schema: None,
+            expires_at: None,
+            cap: None,
+            parent: None,
+            attach: Vec::new(),
+            no_store_body: false,
+            pow_difficulty: Some(solved.difficulty),
+            pow_challenge: Some(challenge_hex.clone()),
+            pow_nonce: Some(solved.nonce),
+        })
+        .await?;
+
+        let body = body_rx.recv().await.expect("payload captured");
+        server.abort();
+
+        let request: RemoteSubmitRequest = serde_json::from_slice(&body)?;
+        let cookie = request.pow_cookie.expect("pow cookie present");
+        let pow_cookie = cookie.into_pow_cookie();
+        assert_eq!(pow_cookie.difficulty, solved.difficulty);
+        assert_eq!(pow_cookie.nonce, solved.nonce);
+        assert_eq!(pow_cookie.challenge, challenge_bytes);
+
         Ok(())
     }
 
@@ -7326,6 +7514,7 @@ mod tests {
             no_store_body: false,
             pow_difficulty: None,
             pow_challenge: None,
+            pow_nonce: None,
         })
         .await?;
 
