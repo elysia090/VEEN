@@ -554,6 +554,90 @@ fn format_label_authority_output(
     }
 }
 
+fn format_label_class_descriptor_output(
+    descriptor: &RemoteLabelClassDescriptor,
+    use_json: bool,
+) -> String {
+    if use_json {
+        let output = json!({
+            "ok": true,
+            "label": descriptor.label,
+            "class": descriptor.class,
+            "sensitivity": descriptor.sensitivity,
+            "retention_hint": descriptor.retention_hint,
+            "pad_block_effective": descriptor.pad_block_effective,
+            "retention_policy": descriptor.retention_policy,
+            "rate_policy": descriptor.rate_policy,
+        });
+        pretty_json(output)
+    } else {
+        let class = descriptor
+            .class
+            .clone()
+            .unwrap_or_else(|| "unset".to_string());
+        let sensitivity = descriptor
+            .sensitivity
+            .clone()
+            .unwrap_or_else(|| "none".to_string());
+        let retention_hint = descriptor
+            .retention_hint
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "0".to_string());
+        [
+            format!("label: {}", descriptor.label),
+            format!("class: {class}"),
+            format!("sensitivity: {sensitivity}"),
+            format!("retention_hint: {retention_hint}"),
+            format!("pad_block_effective: {}", descriptor.pad_block_effective),
+            format!("retention_policy: {}", descriptor.retention_policy),
+            format!("rate_policy: {}", descriptor.rate_policy),
+        ]
+        .join("\n")
+    }
+}
+
+fn format_label_class_list_output(list: &RemoteLabelClassList, use_json: bool) -> String {
+    if use_json {
+        let entries = list
+            .entries
+            .iter()
+            .map(|entry| {
+                json!({
+                    "label": entry.label,
+                    "class": entry.class,
+                    "sensitivity": entry.sensitivity,
+                    "retention_hint": entry.retention_hint,
+                })
+            })
+            .collect::<Vec<_>>();
+        let output = json!({ "ok": true, "entries": entries });
+        pretty_json(output)
+    } else if list.entries.is_empty() {
+        "no label classifications found".to_string()
+    } else {
+        let mut rows = Vec::with_capacity(list.entries.len() + 1);
+        rows.push(
+            "label                                                             class      sensitivity retention_hint"
+                .to_string(),
+        );
+        for entry in &list.entries {
+            let sensitivity = entry
+                .sensitivity
+                .clone()
+                .unwrap_or_else(|| "none".to_string());
+            let retention_hint = entry
+                .retention_hint
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "0".to_string());
+            rows.push(format!(
+                "{:<66} {:<10} {:<11} {}",
+                entry.label, entry.class, sensitivity, retention_hint
+            ));
+        }
+        rows.join("\n")
+    }
+}
+
 #[cfg(test)]
 fn json_output_enabled_with(explicit: bool, global: &GlobalOptions) -> bool {
     explicit || global.json
@@ -754,6 +838,10 @@ enum LabelCommand {
 enum LabelClassCommand {
     /// Publish a label classification record.
     Set(LabelClassSetArgs),
+    /// Show the effective label classification for a label.
+    Show(LabelClassShowArgs),
+    /// List known label classifications.
+    List(LabelClassListArgs),
 }
 
 #[derive(Subcommand)]
@@ -1290,6 +1378,28 @@ struct LabelClassSetArgs {
     sensitivity: Option<String>,
     #[arg(long = "retention-hint")]
     retention_hint: Option<u64>,
+}
+
+#[derive(Args)]
+struct LabelClassShowArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long, value_name = "HEX32")]
+    label: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct LabelClassListArgs {
+    #[arg(long)]
+    hub: String,
+    #[arg(long, value_name = "HEX32")]
+    realm: Option<String>,
+    #[arg(long)]
+    class: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -1941,6 +2051,37 @@ struct RemoteLabelAuthorityDescriptor {
 }
 
 #[derive(Debug, Deserialize)]
+struct RemoteLabelClassDescriptor {
+    ok: bool,
+    label: String,
+    #[serde(default)]
+    class: Option<String>,
+    #[serde(default)]
+    sensitivity: Option<String>,
+    #[serde(default)]
+    retention_hint: Option<u64>,
+    pad_block_effective: u64,
+    retention_policy: String,
+    rate_policy: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteLabelClassList {
+    ok: bool,
+    entries: Vec<RemoteLabelClassEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteLabelClassEntry {
+    label: String,
+    class: String,
+    #[serde(default)]
+    sensitivity: Option<String>,
+    #[serde(default)]
+    retention_hint: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RemoteHealthStatus {
     ok: bool,
     #[serde(with = "humantime_serde")]
@@ -2315,6 +2456,8 @@ async fn run_cli() -> Result<()> {
         },
         Command::LabelClass(cmd) => match cmd {
             LabelClassCommand::Set(args) => handle_label_class_set(args).await,
+            LabelClassCommand::Show(args) => handle_label_class_show(args).await,
+            LabelClassCommand::List(args) => handle_label_class_list(args).await,
         },
         Command::Schema(cmd) => match cmd {
             SchemaCommand::Id(args) => handle_schema_id(args).await,
@@ -5540,6 +5683,29 @@ async fn fetch_label_authority_descriptor(
         .await
 }
 
+async fn fetch_label_class_descriptor(
+    client: &HubHttpClient,
+    label_hex: &str,
+) -> Result<RemoteLabelClassDescriptor> {
+    let path = format!("/label-class/{label_hex}");
+    client.get_json(&path, &[]).await
+}
+
+async fn fetch_label_class_list(
+    client: &HubHttpClient,
+    realm: Option<String>,
+    class: Option<String>,
+) -> Result<RemoteLabelClassList> {
+    let mut query = Vec::new();
+    if let Some(realm) = realm {
+        query.push(("realm", realm));
+    }
+    if let Some(class) = class {
+        query.push(("class", class));
+    }
+    client.get_json("/label-class", &query).await
+}
+
 fn render_authority_record(descriptor: &RemoteAuthorityRecordDescriptor, use_json: bool) {
     if !descriptor.ok {
         emit_cli_error(
@@ -5565,6 +5731,34 @@ fn render_label_authority(descriptor: &RemoteLabelAuthorityDescriptor, use_json:
     }
 
     let output = format_label_authority_output(descriptor, use_json);
+    println!("{output}");
+}
+
+fn render_label_class_descriptor(descriptor: &RemoteLabelClassDescriptor, use_json: bool) {
+    if !descriptor.ok {
+        emit_cli_error(
+            "E.PROFILE",
+            Some("hub declined to provide label classification"),
+            use_json,
+        );
+        process::exit(4);
+    }
+
+    let output = format_label_class_descriptor_output(descriptor, use_json);
+    println!("{output}");
+}
+
+fn render_label_class_list(list: &RemoteLabelClassList, use_json: bool) {
+    if !list.ok {
+        emit_cli_error(
+            "E.PROFILE",
+            Some("hub declined to provide label classifications"),
+            use_json,
+        );
+        process::exit(4);
+    }
+
+    let output = format_label_class_list_output(list, use_json);
     println!("{output}");
 }
 
@@ -5709,6 +5903,64 @@ async fn handle_label_class_set_remote(
     }
     log_cli_goal("CLI.LCLASS0.SET");
     Ok(())
+}
+
+async fn handle_label_class_show(args: LabelClassShowArgs) -> Result<()> {
+    let LabelClassShowArgs { hub, label, json } = args;
+    let client = match parse_hub_reference(&hub)? {
+        HubReference::Remote(client) => client,
+        HubReference::Local(_) => {
+            bail_usage!("label-class show requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    };
+
+    let label_bytes = hex::decode(&label)
+        .map_err(|err| CliUsageError::new(format!("label must be hex encoded: {err}")))?;
+    let label_value = Label::from_slice(&label_bytes).map_err(|err| {
+        CliUsageError::new(format!("label must encode a 32-byte identifier: {err}"))
+    })?;
+    let label_hex = hex::encode(label_value.as_bytes());
+    let descriptor = fetch_label_class_descriptor(&client, &label_hex)
+        .await
+        .map_err(map_label_class_http_error)?;
+    render_label_class_descriptor(&descriptor, json_output_enabled(json));
+    log_cli_goal("CLI.LCLASS0.SHOW");
+    Ok(())
+}
+
+async fn handle_label_class_list(args: LabelClassListArgs) -> Result<()> {
+    let LabelClassListArgs {
+        hub,
+        realm,
+        class,
+        json,
+    } = args;
+    let client = match parse_hub_reference(&hub)? {
+        HubReference::Remote(client) => client,
+        HubReference::Local(_) => {
+            bail_usage!("label-class list requires an HTTP hub endpoint (e.g. http://host:port)")
+        }
+    };
+
+    let list = fetch_label_class_list(&client, realm.clone(), class.clone())
+        .await
+        .map_err(map_label_class_http_error)?;
+    render_label_class_list(&list, json_output_enabled(json));
+    log_cli_goal("CLI.LCLASS0.LIST");
+    Ok(())
+}
+
+fn map_label_class_http_error(err: anyhow::Error) -> anyhow::Error {
+    if let Some(response_err) = err.downcast_ref::<HubResponseError>() {
+        if response_err.status == reqwest::StatusCode::NOT_FOUND
+            || response_err.status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+        {
+            return anyhow!(CliUsageError::new(
+                "hub does not expose label classification endpoints; upgrade the hub".to_string(),
+            ));
+        }
+    }
+    err
 }
 
 async fn handle_schema_id(args: SchemaIdArgs) -> Result<()> {
@@ -7818,6 +8070,147 @@ mod tests {
         let signing_key = SigningKey::from_bytes(&signing_key_bytes);
         verify_envelope_signature(&envelope, schema_label_class(), &signing_key)?;
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn label_class_show_fetches_descriptor() -> anyhow::Result<()> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let addr = listener.local_addr()?;
+        let expected_label = hex::encode([0x11u8; 32]);
+        let expected_path = format!("/label-class/{expected_label}");
+        let (path_tx, mut path_rx) = mpsc::channel(1);
+        let response_label = expected_label.clone();
+        let expected_path_for_server = expected_path.clone();
+        let handle = tokio::spawn(async move {
+            let service = make_service_fn(move |_| {
+                let expected_path = expected_path_for_server.clone();
+                let path_tx = path_tx.clone();
+                let response_label = response_label.clone();
+                async move {
+                    Ok::<_, Infallible>(service_fn(move |req: HyperRequest<Body>| {
+                        let expected_path = expected_path.clone();
+                        let path_tx = path_tx.clone();
+                        let response_label = response_label.clone();
+                        async move {
+                            if req.method() == Method::GET && req.uri().path() == expected_path {
+                                path_tx.send(req.uri().path().to_string()).await.ok();
+                                let body = serde_json::to_string(&json!({
+                                    "ok": true,
+                                    "label": response_label,
+                                    "class": "user",
+                                    "sensitivity": "medium",
+                                    "retention_hint": 86_400u64,
+                                    "pad_block_effective": 256u64,
+                                    "retention_policy": "standard",
+                                    "rate_policy": "rl0-default",
+                                }))
+                                .unwrap();
+                                return Ok::<_, Infallible>(
+                                    HyperResponse::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Body::from(body))
+                                        .unwrap(),
+                                );
+                            }
+                            Ok::<_, Infallible>(
+                                HyperResponse::builder()
+                                    .status(StatusCode::NOT_FOUND)
+                                    .body(Body::empty())
+                                    .unwrap(),
+                            )
+                        }
+                    }))
+                }
+            });
+            if let Err(err) = Server::from_tcp(listener)?.serve(service).await {
+                eprintln!("label-class show test server error: {err}");
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+
+        let url = format!("http://{addr}");
+        handle_label_class_show(LabelClassShowArgs {
+            hub: url,
+            label: expected_label.clone(),
+            json: true,
+        })
+        .await?;
+        let requested_path = path_rx.recv().await.expect("path observed");
+        assert_eq!(requested_path, expected_path);
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn label_class_list_fetches_entries() -> anyhow::Result<()> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let addr = listener.local_addr()?;
+        let realm = hex::encode([0x22u8; 32]);
+        let expected_query = format!("realm={realm}&class=user");
+        let (query_tx, mut query_rx) = mpsc::channel(1);
+        let expected_query_for_server = expected_query.clone();
+        let handle = tokio::spawn(async move {
+            let service = make_service_fn(move |_| {
+                let expected_query = expected_query_for_server.clone();
+                let query_tx = query_tx.clone();
+                async move {
+                    Ok::<_, Infallible>(service_fn(move |req: HyperRequest<Body>| {
+                        let expected_query = expected_query.clone();
+                        let query_tx = query_tx.clone();
+                        async move {
+                            if req.method() == Method::GET
+                                && req.uri().path() == "/label-class"
+                                && req.uri().query() == Some(expected_query.as_str())
+                            {
+                                query_tx
+                                    .send(req.uri().query().unwrap().to_string())
+                                    .await
+                                    .ok();
+                                let body = serde_json::to_string(&json!({
+                                    "ok": true,
+                                    "entries": [{
+                                        "label": hex::encode([0x33u8; 32]),
+                                        "class": "user",
+                                        "sensitivity": "medium",
+                                        "retention_hint": 86_400u64,
+                                    }],
+                                }))
+                                .unwrap();
+                                return Ok::<_, Infallible>(
+                                    HyperResponse::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Body::from(body))
+                                        .unwrap(),
+                                );
+                            }
+                            Ok::<_, Infallible>(
+                                HyperResponse::builder()
+                                    .status(StatusCode::NOT_FOUND)
+                                    .body(Body::empty())
+                                    .unwrap(),
+                            )
+                        }
+                    }))
+                }
+            });
+            if let Err(err) = Server::from_tcp(listener)?.serve(service).await {
+                eprintln!("label-class list test server error: {err}");
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+
+        let url = format!("http://{addr}");
+        handle_label_class_list(LabelClassListArgs {
+            hub: url,
+            realm: Some(realm.clone()),
+            class: Some("user".to_string()),
+            json: true,
+        })
+        .await?;
+        let observed = query_rx.recv().await.expect("query observed");
+        assert_eq!(observed, expected_query);
+        handle.abort();
         Ok(())
     }
 

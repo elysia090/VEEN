@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{
     header::{CONTENT_TYPE, RETRY_AFTER},
     HeaderValue, StatusCode,
@@ -22,7 +22,7 @@ use crate::pipeline::{
     HubRoleDescriptor, ObservabilityReport, SubmitRequest,
 };
 use std::str::FromStr;
-use veen_core::label::StreamId;
+use veen_core::label::{Label, StreamId};
 use veen_core::revocation::RevocationKind;
 use veen_core::RealmId;
 
@@ -45,7 +45,11 @@ impl HubServerHandle {
             .route("/authorize", post(handle_authorize))
             .route("/authority", post(handle_authority))
             .route("/authority_view", get(handle_authority_view))
-            .route("/label-class", post(handle_label_class))
+            .route(
+                "/label-class",
+                post(handle_label_class).get(handle_label_class_list),
+            )
+            .route("/label-class/:label", get(handle_label_class_show))
             .route("/label_authority", get(handle_label_authority))
             .route("/schema", post(handle_schema_descriptor))
             .route("/anchor", post(handle_anchor))
@@ -117,6 +121,12 @@ struct AuthorityViewQuery {
 #[derive(Debug, Deserialize)]
 struct LabelAuthorityQuery {
     label: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabelClassListQuery {
+    realm: Option<String>,
+    class: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -400,6 +410,28 @@ async fn handle_label_authority(
     (StatusCode::OK, Json(descriptor)).into_response()
 }
 
+async fn handle_label_class_show(
+    State(pipeline): State<HubPipeline>,
+    Path(label): Path<String>,
+) -> impl IntoResponse {
+    let label = match parse_label_hex(&label) {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let descriptor = pipeline.label_class_descriptor(label).await;
+    (StatusCode::OK, Json(descriptor)).into_response()
+}
+
+async fn handle_label_class_list(
+    State(pipeline): State<HubPipeline>,
+    Query(query): Query<LabelClassListQuery>,
+) -> impl IntoResponse {
+    let descriptor = pipeline
+        .label_class_list(query.realm.clone(), query.class.clone())
+        .await;
+    (StatusCode::OK, Json(descriptor)).into_response()
+}
+
 async fn handle_schema_descriptor(
     State(pipeline): State<HubPipeline>,
     body: Bytes,
@@ -558,6 +590,11 @@ fn parse_realm_id_hex(input: &str) -> Result<RealmId, String> {
 fn parse_stream_id_hex(input: &str) -> Result<StreamId, String> {
     let bytes = hex::decode(input).map_err(|err| format!("invalid stream identifier: {err}"))?;
     StreamId::from_slice(&bytes).map_err(|err| format!("invalid stream identifier length: {err}"))
+}
+
+fn parse_label_hex(input: &str) -> Result<Label, String> {
+    let bytes = hex::decode(input).map_err(|err| format!("invalid label identifier: {err}"))?;
+    Label::from_slice(&bytes).map_err(|err| format!("invalid label identifier length: {err}"))
 }
 
 fn parse_revocation_kind(value: &str) -> Result<RevocationKind, String> {

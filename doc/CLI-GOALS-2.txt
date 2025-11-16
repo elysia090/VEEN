@@ -544,6 +544,7 @@ pad_block_effective: uint
 retention_policy: TEXT
 rate_policy: TEXT
 	•	CLI MUST treat hub values as authoritative; no local heuristics.
+	•	Default output is human-readable text; use “–json” for machine-readable descriptors.
 
 6.3 List label classifications
 
@@ -560,6 +561,7 @@ Behavior:
 	•	Filter by class if provided.
 	•	Print a compact table or JSON array of:
 label, class, sensitivity, retention_hint
+	•	“–json” returns the descriptor entries as an array for automation.
 
 	7.	Schema registry overlay (META0+)
 

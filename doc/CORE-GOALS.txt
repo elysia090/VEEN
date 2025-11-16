@@ -366,10 +366,21 @@ veen-cli label-class set \
   --sensitivity low \
   --retention-hint 86400
 
+# Inspect classification view
+veen-cli label-class show \
+  --hub http://127.0.0.1:8080 \
+  --label HEX32 \
+  --json
+
+veen-cli label-class list \
+  --hub http://127.0.0.1:8080 \
+  --class user
+
 Tests:
 	•	Short payloads to each label must result in different ciphertext lengths per configured pad_block (e.g. 256 vs 1024 vs 0).
 	•	Rate-limit and retention policies follow the label class configuration.
 	•	All of this happens without hub ever seeing decrypted payloads.
+	•	veen-cli label-class show/list reflect the hub’s classification view in text and JSON output.
 
 ⸻
 
