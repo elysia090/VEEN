@@ -35,16 +35,25 @@ mod kube;
 
 use crate::kube::KubeCommand;
 
+use veen_core::operation::{
+    schema_access_grant, schema_access_revoke, schema_agreement_confirmation,
+    schema_agreement_definition, schema_data_publication, schema_delegated_execution,
+    schema_federation_mirror, schema_paid_operation, schema_query_audit, schema_recovery_approval,
+    schema_recovery_execution, schema_recovery_request, schema_state_checkpoint, AccessGrant,
+    AccessRevoke, AccountId, DelegatedExecution, OpaqueId, PaidOperation, ACCOUNT_ID_LEN,
+    OPERATION_ID_LEN,
+};
 use veen_core::CAP_TOKEN_VERSION;
 use veen_core::{
     cap_stream_id_from_label,
     hub::{HubId, HUB_ID_LEN},
-    label::{Label, StreamId},
+    identity::PrincipalId,
+    label::{Label, StreamId, STREAM_ID_LEN},
     wire::{
         checkpoint::CHECKPOINT_VERSION,
         mmr::Mmr,
         proof::MmrProof,
-        types::{ClientId, LeafHash, MmrRoot},
+        types::{AuthRef, ClientId, LeafHash, MmrRoot},
         Checkpoint,
     },
     AuthorityPolicy, AuthorityRecord, CapToken, CapTokenAllow, CapTokenRate, LabelClassRecord,
@@ -972,6 +981,21 @@ enum OperationCommand {
     /// Compute derived identifiers for stored operation messages.
     #[command(name = "id")]
     Id(OperationIdArgs),
+    /// Submit an arbitrary operation payload defined by its schema name.
+    #[command(name = "send")]
+    Send(OperationSendArgs),
+    /// Submit a paid.operation.v1 payload.
+    #[command(name = "paid")]
+    Paid(OperationPaidArgs),
+    /// Submit an access.grant.v1 payload.
+    #[command(name = "access-grant")]
+    AccessGrant(OperationAccessGrantArgs),
+    /// Submit an access.revoke.v1 payload.
+    #[command(name = "access-revoke")]
+    AccessRevoke(OperationAccessRevokeArgs),
+    /// Submit a delegated.execution.v1 payload.
+    #[command(name = "delegated")]
+    Delegated(OperationDelegatedArgs),
 }
 
 #[derive(Subcommand)]
@@ -1631,6 +1655,133 @@ struct WalletTransferArgs {
 struct OperationIdArgs {
     #[arg(long)]
     bundle: PathBuf,
+}
+
+#[derive(Args)]
+struct OperationSendArgs {
+    #[command(flatten)]
+    hub: HubLocatorArgs,
+    #[arg(long)]
+    client: PathBuf,
+    #[arg(long)]
+    stream: String,
+    #[arg(long = "schema-name")]
+    schema_name: String,
+    #[arg(long = "body-json")]
+    body_json: String,
+    #[arg(long)]
+    cap: Option<PathBuf>,
+    #[arg(long = "expires-at", value_name = "UNIX_TS")]
+    expires_at: Option<u64>,
+    #[arg(long = "parent-id", value_name = "HEX32")]
+    parent_id: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct OperationPaidArgs {
+    #[command(flatten)]
+    hub: HubLocatorArgs,
+    #[arg(long)]
+    client: PathBuf,
+    #[arg(long)]
+    stream: String,
+    #[arg(long = "op-type")]
+    operation_type: String,
+    #[arg(long = "payer", value_name = "HEX32")]
+    payer: String,
+    #[arg(long = "payee", value_name = "HEX32")]
+    payee: String,
+    #[arg(long)]
+    amount: u64,
+    #[arg(long = "currency-code")]
+    currency_code: String,
+    #[arg(long = "op-args-json")]
+    operation_args: Option<String>,
+    #[arg(long = "ttl-seconds")]
+    ttl_seconds: Option<u64>,
+    #[arg(long = "op-ref", value_name = "HEX32")]
+    operation_reference: Option<String>,
+    #[arg(long = "parent-op", value_name = "HEX32")]
+    parent_operation: Option<String>,
+    #[arg(long)]
+    cap: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct OperationAccessGrantArgs {
+    #[command(flatten)]
+    hub: HubLocatorArgs,
+    #[arg(long = "admin")]
+    admin: PathBuf,
+    #[arg(long = "subject-identity", value_name = "HEX32")]
+    subject_identity: String,
+    #[arg(long)]
+    stream: String,
+    #[arg(long = "expiry-time", value_name = "UNIX_TS")]
+    expiry_time: u64,
+    #[arg(long = "allowed-stream", value_name = "HEX32")]
+    allowed_streams: Vec<String>,
+    #[arg(long = "max-rate-per-second")]
+    max_rate_per_second: Option<u64>,
+    #[arg(long = "max-burst")]
+    max_burst: Option<u64>,
+    #[arg(long = "max-amount")]
+    max_amount: Option<u64>,
+    #[arg(long = "currency-code")]
+    currency_code: Option<String>,
+    #[arg(long = "reason")]
+    reason: Option<String>,
+    #[arg(long = "parent-op", value_name = "HEX32")]
+    parent_operation: Option<String>,
+}
+
+#[derive(Args)]
+struct OperationAccessRevokeArgs {
+    #[command(flatten)]
+    hub: HubLocatorArgs,
+    #[arg(long = "admin")]
+    admin: PathBuf,
+    #[arg(long = "subject-identity", value_name = "HEX32")]
+    subject_identity: String,
+    #[arg(long)]
+    stream: String,
+    #[arg(long = "target-cap-ref", value_name = "HEX32")]
+    target_capability_reference: Option<String>,
+    #[arg(long = "reason")]
+    reason: Option<String>,
+    #[arg(long = "parent-op", value_name = "HEX32")]
+    parent_operation: Option<String>,
+}
+
+#[derive(Args)]
+struct OperationDelegatedArgs {
+    #[command(flatten)]
+    hub: HubLocatorArgs,
+    #[arg(long)]
+    client: PathBuf,
+    #[arg(long)]
+    stream: String,
+    #[arg(long = "principal", value_name = "HEX32")]
+    principal: String,
+    #[arg(long = "agent", value_name = "HEX32")]
+    agent: String,
+    #[arg(
+        long = "delegation-cap",
+        value_name = "HEX32",
+        value_delimiter = ',',
+        num_args = 1..
+    )]
+    delegation_caps: Vec<String>,
+    #[arg(long = "operation-schema-id", value_name = "HEX32")]
+    operation_schema_id: String,
+    #[arg(long = "operation-body-json")]
+    operation_body_json: String,
+    #[arg(long = "parent-op", value_name = "HEX32")]
+    parent_operation: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -2680,6 +2831,11 @@ async fn run_cli() -> Result<()> {
         },
         Command::Operation(cmd) => match cmd {
             OperationCommand::Id(args) => handle_operation_id(args).await,
+            OperationCommand::Send(args) => handle_operation_send(args).await,
+            OperationCommand::Paid(args) => handle_operation_paid(args).await,
+            OperationCommand::AccessGrant(args) => handle_operation_access_grant(args).await,
+            OperationCommand::AccessRevoke(args) => handle_operation_access_revoke(args).await,
+            OperationCommand::Delegated(args) => handle_operation_delegated(args).await,
         },
         Command::Revoke(cmd) => match cmd {
             RevokeCommand::Publish(args) => handle_revoke_publish(args).await,
@@ -4055,21 +4211,88 @@ fn render_id_usage(entries: &[IdUsageEntry], use_json: bool) {
     }
 }
 
-async fn handle_send(args: SendArgs) -> Result<()> {
-    let reference = hub_reference_from_locator(&args.hub, "send").await?;
-    let result = match reference {
-        HubReference::Local(data_dir) => handle_send_local(data_dir, args).await,
-        HubReference::Remote(client) => handle_send_remote(client, args).await,
-    };
-
-    if result.is_ok() {
-        log_cli_goal("CLI.CORE.SEND");
-    }
-
-    result
+struct SendOutcome {
+    stream: String,
+    seq: u64,
+    client_id_hex: String,
+    detail: SendOutcomeDetail,
 }
 
-async fn handle_send_local(data_dir: PathBuf, args: SendArgs) -> Result<()> {
+enum SendOutcomeDetail {
+    Local(LocalSendDetail),
+    Remote(RemoteSendDetail),
+}
+
+struct LocalSendDetail {
+    message: StoredMessage,
+    bundle_path: PathBuf,
+    receipt: StreamReceipt,
+}
+
+struct RemoteSendDetail {
+    response: RemoteSubmitResponse,
+}
+
+fn render_send_outcome(outcome: &SendOutcome) {
+    match &outcome.detail {
+        SendOutcomeDetail::Local(detail) => {
+            println!(
+                "sent message seq={} stream={} client_id={}",
+                outcome.seq, outcome.stream, outcome.client_id_hex
+            );
+            println!("bundle: {}", detail.bundle_path.display());
+            if detail.message.attachments.is_empty() {
+                return;
+            }
+            println!("attachments recorded: {}", detail.message.attachments.len());
+            for attachment in &detail.message.attachments {
+                println!(
+                    "  {} ({} bytes) -> {}",
+                    attachment.name, attachment.size, attachment.digest
+                );
+            }
+        }
+        SendOutcomeDetail::Remote(detail) => {
+            println!(
+                "sent message seq={} stream={} client_id={}",
+                detail.response.seq, detail.response.stream, outcome.client_id_hex
+            );
+            if detail.response.stored_attachments.is_empty() {
+                return;
+            }
+            println!(
+                "attachments stored: {}",
+                detail.response.stored_attachments.len()
+            );
+            for attachment in &detail.response.stored_attachments {
+                println!(
+                    "  {} ({} bytes) -> {}",
+                    attachment.name, attachment.size, attachment.digest
+                );
+            }
+        }
+    }
+}
+
+async fn handle_send(args: SendArgs) -> Result<()> {
+    let reference = hub_reference_from_locator(&args.hub, "send").await?;
+    let outcome = send_message_with_reference(reference, args).await?;
+    render_send_outcome(&outcome);
+    log_cli_goal("CLI.CORE.SEND");
+    Ok(())
+}
+
+async fn send_message_with_reference(
+    reference: HubReference,
+    args: SendArgs,
+) -> Result<SendOutcome> {
+    match reference {
+        HubReference::Local(data_dir) => send_message_local(data_dir, args).await,
+        HubReference::Remote(client) => send_message_remote(client, args).await,
+    }
+}
+
+async fn send_message_local(data_dir: PathBuf, args: SendArgs) -> Result<SendOutcome> {
     ensure_data_dir_layout(&data_dir).await?;
 
     let mut hub_state = load_hub_state(&data_dir).await?;
@@ -4187,24 +4410,40 @@ async fn handle_send_local(data_dir: PathBuf, args: SendArgs) -> Result<()> {
 
     update_client_label_send_state(&args.client, &args.stream, seq, now).await?;
 
-    println!(
-        "sent message seq={seq} stream={} client_id={client_id_hex}",
-        args.stream
-    );
-    println!("bundle: {}", bundle_path.display());
-    if !stored_attachments.is_empty() {
-        println!("attachments recorded: {}", stored_attachments.len());
-        for attachment in stored_attachments {
-            println!(
-                "  {} ({} bytes) -> {}",
-                attachment.name, attachment.size, attachment.digest
-            );
-        }
-    }
-    Ok(())
+    let receipt = compute_local_stream_receipt(&stream_state, seq)?;
+
+    Ok(SendOutcome {
+        stream: args.stream,
+        seq,
+        client_id_hex,
+        detail: SendOutcomeDetail::Local(LocalSendDetail {
+            message,
+            bundle_path,
+            receipt,
+        }),
+    })
 }
 
-async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()> {
+fn compute_local_stream_receipt(stream_state: &HubStreamState, seq: u64) -> Result<StreamReceipt> {
+    let mut mmr = Mmr::new();
+    let mut receipt = None;
+    for message in &stream_state.messages {
+        let leaf = compute_message_leaf_hash(message)?;
+        let (_, root) = mmr.append(leaf);
+        if message.seq == seq {
+            receipt = Some(StreamReceipt {
+                seq,
+                leaf_hash: hex::encode(leaf.as_bytes()),
+                mmr_root: hex::encode(root.as_bytes()),
+                hub_ts: message.sent_at,
+            });
+        }
+    }
+
+    receipt.ok_or_else(|| anyhow!("failed to compute receipt for seq {seq}"))
+}
+
+async fn send_message_remote(client: HubHttpClient, args: SendArgs) -> Result<SendOutcome> {
     if args.pow_challenge.is_some() && args.pow_difficulty.is_none() {
         bail_usage!("--pow-challenge requires --pow-difficulty");
     }
@@ -4341,24 +4580,15 @@ async fn handle_send_remote(client: HubHttpClient, args: SendArgs) -> Result<()>
         .await
         .context("submitting message to hub")?;
 
-    println!(
-        "sent message seq={} stream={} client_id={}",
-        response.seq, response.stream, client_id_hex
-    );
-    if !response.stored_attachments.is_empty() {
-        println!("attachments stored: {}", response.stored_attachments.len());
-        for attachment in response.stored_attachments {
-            println!(
-                "  {} ({} bytes) -> {}",
-                attachment.name, attachment.size, attachment.digest
-            );
-        }
-    }
-
     let send_ts = current_unix_timestamp()?;
     update_client_label_send_state(&args.client, &args.stream, response.seq, send_ts).await?;
 
-    Ok(())
+    Ok(SendOutcome {
+        stream: args.stream,
+        seq: response.seq,
+        client_id_hex,
+        detail: SendOutcomeDetail::Remote(RemoteSendDetail { response }),
+    })
 }
 
 fn decode_pow_challenge_hex(hex_value: &str) -> Result<Vec<u8>> {
@@ -5633,6 +5863,521 @@ async fn handle_wallet_transfer_remote(
     println!("  transfer_id: {}", hex::encode(transfer_id.as_bytes()));
     log_cli_goal("CLI.WALLET.TRANSFER");
     Ok(())
+}
+
+async fn handle_operation_send(args: OperationSendArgs) -> Result<()> {
+    let payload = build_generic_operation_payload(&args.schema_name, &args.body_json)?;
+    submit_operation_payload(
+        payload,
+        args.hub,
+        args.client,
+        args.stream,
+        args.cap,
+        args.expires_at,
+        args.parent_id,
+        json_output_enabled(args.json),
+        "operation send",
+        "CLI.OP0.SEND",
+    )
+    .await
+}
+
+async fn handle_operation_paid(args: OperationPaidArgs) -> Result<()> {
+    let payload = build_paid_operation_payload(&args)?;
+    submit_operation_payload(
+        payload,
+        args.hub,
+        args.client,
+        args.stream,
+        args.cap,
+        None,
+        None,
+        json_output_enabled(args.json),
+        "operation paid",
+        "CLI.OP0.PAID",
+    )
+    .await
+}
+
+async fn handle_operation_access_grant(args: OperationAccessGrantArgs) -> Result<()> {
+    let payload = build_access_grant_payload(&args)?;
+    submit_operation_payload(
+        payload,
+        args.hub,
+        args.admin,
+        args.stream,
+        None,
+        None,
+        None,
+        json_output_enabled(false),
+        "operation access-grant",
+        "CLI.OP0.ACCESS_GRANT",
+    )
+    .await
+}
+
+async fn handle_operation_access_revoke(args: OperationAccessRevokeArgs) -> Result<()> {
+    let payload = build_access_revoke_payload(&args)?;
+    submit_operation_payload(
+        payload,
+        args.hub,
+        args.admin,
+        args.stream,
+        None,
+        None,
+        None,
+        json_output_enabled(false),
+        "operation access-revoke",
+        "CLI.OP0.ACCESS_REVOKE",
+    )
+    .await
+}
+
+async fn handle_operation_delegated(args: OperationDelegatedArgs) -> Result<()> {
+    let payload = build_delegated_operation_payload(&args)?;
+    submit_operation_payload(
+        payload,
+        args.hub,
+        args.client,
+        args.stream,
+        None,
+        None,
+        None,
+        json_output_enabled(false),
+        "operation delegated",
+        "CLI.OP0.DELEGATED",
+    )
+    .await
+}
+
+struct EncodedOperationPayload {
+    schema_name: String,
+    schema_id: [u8; 32],
+    json_body: String,
+    cbor_body: Vec<u8>,
+}
+
+impl EncodedOperationPayload {
+    fn schema_hex(&self) -> String {
+        hex::encode(self.schema_id)
+    }
+}
+
+struct OperationSubmissionResult {
+    stream: String,
+    seq: u64,
+    receipt: StreamReceipt,
+    operation_id: OperationId,
+    schema_name: String,
+    schema_hex: String,
+}
+
+async fn submit_operation_payload(
+    payload: EncodedOperationPayload,
+    hub: HubLocatorArgs,
+    client: PathBuf,
+    stream: String,
+    cap: Option<PathBuf>,
+    expires_at: Option<u64>,
+    parent: Option<String>,
+    use_json: bool,
+    context: &str,
+    goal: &str,
+) -> Result<()> {
+    let schema_hex = payload.schema_hex();
+    let mut send_args = SendArgs {
+        hub,
+        client,
+        stream: stream.clone(),
+        body: payload.json_body.clone(),
+        schema: Some(schema_hex.clone()),
+        expires_at,
+        cap,
+        parent,
+        attach: Vec::new(),
+        no_store_body: false,
+        pow_difficulty: None,
+        pow_challenge: None,
+        pow_nonce: None,
+    };
+
+    let reference = hub_reference_from_locator(&send_args.hub, context).await?;
+    let outcome = send_message_with_reference(reference.clone(), send_args).await?;
+    let submission =
+        derive_operation_submission(reference, outcome, payload.schema_name, schema_hex).await?;
+    render_operation_submission(&submission, use_json);
+    log_cli_goal(goal);
+    Ok(())
+}
+
+async fn derive_operation_submission(
+    reference: HubReference,
+    outcome: SendOutcome,
+    schema_name: String,
+    schema_hex: String,
+) -> Result<OperationSubmissionResult> {
+    let receipt = match (&reference, outcome.detail) {
+        (HubReference::Local(_), SendOutcomeDetail::Local(detail)) => detail.receipt,
+        (HubReference::Remote(client), SendOutcomeDetail::Remote(_)) => {
+            fetch_remote_operation_receipt(&client, &outcome.stream, outcome.seq).await?
+        }
+        (HubReference::Local(_), SendOutcomeDetail::Remote(_))
+        | (HubReference::Remote(_), SendOutcomeDetail::Local(_)) => {
+            bail_usage!("hub reference kind does not match send outcome")
+        }
+    };
+
+    let operation_id = operation_id_from_receipt(&receipt)?;
+
+    Ok(OperationSubmissionResult {
+        stream: outcome.stream,
+        seq: outcome.seq,
+        receipt,
+        operation_id,
+        schema_name,
+        schema_hex,
+    })
+}
+
+fn render_operation_submission(result: &OperationSubmissionResult, use_json: bool) {
+    if use_json {
+        let output = json!({
+            "ok": true,
+            "stream": result.stream,
+            "stream_seq": result.seq,
+            "msg_id": result.receipt.leaf_hash,
+            "operation_id": hex::encode(result.operation_id.as_bytes()),
+            "schema_name": result.schema_name,
+            "schema_id": result.schema_hex,
+        });
+        match serde_json::to_string_pretty(&output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => println!("{output}"),
+        }
+        return;
+    }
+
+    println!("schema: {} ({})", result.schema_name, result.schema_hex);
+    print_stream_receipt(&result.receipt);
+    println!(
+        "operation_id: {}",
+        hex::encode(result.operation_id.as_bytes())
+    );
+}
+
+async fn fetch_remote_operation_receipt(
+    client: &HubHttpClient,
+    stream: &str,
+    seq: u64,
+) -> Result<StreamReceipt> {
+    let query = vec![
+        ("stream", stream.to_string()),
+        ("from", seq.to_string()),
+        ("with_proof", "true".to_string()),
+    ];
+    let messages: Vec<RemoteStreamMessageWithProof> = client
+        .get_json("/stream", &query)
+        .await
+        .context("fetching stream receipt")?;
+
+    let entry = messages
+        .into_iter()
+        .find(|entry| entry.message.seq == seq)
+        .ok_or_else(|| anyhow!("hub did not return receipt for {}#{}", stream, seq))?;
+
+    let stored_message: StoredMessage = entry.message.into();
+    let receipt = StreamReceipt::from(entry.receipt);
+    let proof = entry
+        .proof
+        .clone()
+        .try_into_mmr()
+        .context("decoding stream proof")?;
+    validate_stream_proof(&stored_message, &receipt, &proof)?;
+    Ok(receipt)
+}
+
+fn operation_id_from_receipt(receipt: &StreamReceipt) -> Result<OperationId> {
+    let leaf_bytes = hex::decode(&receipt.leaf_hash)
+        .with_context(|| format!("decoding receipt leaf hash {}", receipt.leaf_hash))?;
+    if leaf_bytes.len() != OPERATION_ID_LEN {
+        bail_usage!(
+            "receipt leaf hash must be {} bytes, found {}",
+            OPERATION_ID_LEN,
+            leaf_bytes.len()
+        );
+    }
+    let mut msg_id = [0u8; OPERATION_ID_LEN];
+    msg_id.copy_from_slice(&leaf_bytes);
+    OperationId::derive(msg_id).map_err(|err| anyhow!("deriving operation_id: {err}"))
+}
+
+fn build_generic_operation_payload(
+    schema_name: &str,
+    body_json: &str,
+) -> Result<EncodedOperationPayload> {
+    let schema_id = resolve_operation_schema(schema_name)?;
+    let json_value: JsonValue = serde_json::from_str(body_json)
+        .map_err(|err| CliUsageError::new(format!("body-json must be valid JSON: {err}")))?;
+    let cbor_value = json_value_to_cbor(&json_value)?;
+    encode_operation_payload_from_values(schema_name.to_string(), schema_id, json_value, cbor_value)
+}
+
+fn build_paid_operation_payload(args: &OperationPaidArgs) -> Result<EncodedOperationPayload> {
+    if args.operation_type.trim().is_empty() {
+        bail_usage!("--op-type must not be empty");
+    }
+    let payer = parse_account_id_hex(&args.payer)?;
+    let payee = parse_account_id_hex(&args.payee)?;
+    let operation_args = parse_optional_json_to_cbor(args.operation_args.as_deref())?;
+    let operation_reference = parse_optional_opaque_id(args.operation_reference.as_deref())?;
+    let parent_operation_id = parse_optional_operation_id(args.parent_operation.as_deref())?;
+
+    let payload = PaidOperation {
+        operation_type: args.operation_type.clone(),
+        operation_args,
+        payer_account: payer,
+        payee_account: payee,
+        amount: args.amount,
+        currency_code: Some(args.currency_code.clone()),
+        operation_reference,
+        parent_operation_id,
+        ttl_seconds: args.ttl_seconds,
+        metadata: None,
+    };
+
+    encode_struct_operation_payload("paid.operation.v1", schema_paid_operation(), &payload)
+}
+
+fn build_access_grant_payload(args: &OperationAccessGrantArgs) -> Result<EncodedOperationPayload> {
+    let subject_identity = parse_principal_id_hex(&args.subject_identity)?;
+    let allowed_stream_ids = parse_allowed_streams(args)?;
+    let parent_operation_id = parse_optional_operation_id(args.parent_operation.as_deref())?;
+
+    let payload = AccessGrant {
+        subject_identity,
+        subject_label: None,
+        allowed_stream_ids,
+        expiry_time: args.expiry_time,
+        maximum_rate_per_second: args.max_rate_per_second,
+        maximum_burst: args.max_burst,
+        maximum_amount: args.max_amount,
+        currency_code: args.currency_code.clone(),
+        reason: args.reason.clone(),
+        parent_operation_id,
+    };
+
+    encode_struct_operation_payload("access.grant.v1", schema_access_grant(), &payload)
+}
+
+fn build_access_revoke_payload(
+    args: &OperationAccessRevokeArgs,
+) -> Result<EncodedOperationPayload> {
+    let subject_identity = parse_principal_id_hex(&args.subject_identity)?;
+    let target_capability_reference =
+        parse_optional_auth_ref(args.target_capability_reference.as_deref())?;
+    let parent_operation_id = parse_optional_operation_id(args.parent_operation.as_deref())?;
+
+    let payload = AccessRevoke {
+        subject_identity,
+        target_capability_reference,
+        reason: args.reason.clone(),
+        parent_operation_id,
+    };
+
+    encode_struct_operation_payload("access.revoke.v1", schema_access_revoke(), &payload)
+}
+
+fn build_delegated_operation_payload(
+    args: &OperationDelegatedArgs,
+) -> Result<EncodedOperationPayload> {
+    if args.delegation_caps.is_empty() {
+        bail_usage!("--delegation-cap must be provided at least once");
+    }
+    let principal_identity = parse_principal_id_hex(&args.principal)?;
+    let agent_identity = parse_principal_id_hex(&args.agent)?;
+    let delegation_chain = args
+        .delegation_caps
+        .iter()
+        .map(|value| parse_auth_ref_hex(value))
+        .collect::<Result<Vec<_>>>()?;
+    let operation_schema = parse_schema_id_hex(&args.operation_schema_id)?;
+    let operation_body = parse_json_string_to_cbor(&args.operation_body_json)?;
+    let parent_operation_id = parse_optional_operation_id(args.parent_operation.as_deref())?;
+
+    let payload = DelegatedExecution {
+        principal_identity,
+        agent_identity,
+        delegation_chain,
+        operation_schema,
+        operation_body,
+        parent_operation_id,
+        metadata: None,
+    };
+
+    encode_struct_operation_payload(
+        "delegated.execution.v1",
+        schema_delegated_execution(),
+        &payload,
+    )
+}
+
+fn encode_struct_operation_payload<T>(
+    schema_name: &str,
+    schema_id: [u8; 32],
+    payload: &T,
+) -> Result<EncodedOperationPayload>
+where
+    T: Serialize,
+{
+    let json_body = serde_json::to_string(payload)
+        .with_context(|| format!("encoding {schema_name} payload to JSON"))?;
+    let mut cbor_body = Vec::new();
+    ciborium::ser::into_writer(payload, &mut cbor_body)
+        .map_err(|err| anyhow!("encoding {schema_name} payload to CBOR: {err}"))?;
+    Ok(EncodedOperationPayload {
+        schema_name: schema_name.to_string(),
+        schema_id,
+        json_body,
+        cbor_body,
+    })
+}
+
+fn encode_operation_payload_from_values(
+    schema_name: String,
+    schema_id: [u8; 32],
+    json_value: JsonValue,
+    cbor_value: CborValue,
+) -> Result<EncodedOperationPayload> {
+    let json_body = serde_json::to_string(&json_value)
+        .with_context(|| format!("encoding {schema_name} body to JSON"))?;
+    let mut cbor_body = Vec::new();
+    ciborium::ser::into_writer(&cbor_value, &mut cbor_body)
+        .map_err(|err| anyhow!("encoding {schema_name} body to CBOR: {err}"))?;
+    Ok(EncodedOperationPayload {
+        schema_name,
+        schema_id,
+        json_body,
+        cbor_body,
+    })
+}
+
+fn json_value_to_cbor(value: &JsonValue) -> Result<CborValue> {
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(value, &mut encoded)
+        .context("encoding JSON value to CBOR for validation")?;
+    let decoded = ciborium::de::from_reader(encoded.as_slice())
+        .context("decoding intermediate CBOR value")?;
+    Ok(decoded)
+}
+
+fn parse_optional_json_to_cbor(raw: Option<&str>) -> Result<CborValue> {
+    match raw {
+        Some(value) => parse_json_string_to_cbor(value),
+        None => Ok(CborValue::Null),
+    }
+}
+
+fn parse_json_string_to_cbor(raw: &str) -> Result<CborValue> {
+    let json_value: JsonValue = serde_json::from_str(raw)
+        .map_err(|err| CliUsageError::new(format!("value must be valid JSON: {err}")))?;
+    json_value_to_cbor(&json_value)
+}
+
+fn parse_account_id_hex(input: &str) -> Result<AccountId> {
+    let bytes = parse_hex_key::<ACCOUNT_ID_LEN>(input)?;
+    Ok(AccountId::from(bytes))
+}
+
+fn parse_principal_id_hex(input: &str) -> Result<PrincipalId> {
+    let bytes = parse_hex_key::<{ HUB_ID_LEN }>(input)?;
+    PrincipalId::from_slice(&bytes).map_err(|err| {
+        anyhow!(CliUsageError::new(format!(
+            "invalid principal id length: {err}"
+        )))
+    })
+}
+
+fn parse_auth_ref_hex(input: &str) -> Result<AuthRef> {
+    let bytes = parse_hex_key::<{ SCHEMA_ID_LEN }>(input)?;
+    AuthRef::from_slice(&bytes).map_err(|err| {
+        anyhow!(CliUsageError::new(format!(
+            "invalid auth_ref length: {err}"
+        )))
+    })
+}
+
+fn parse_opaque_id_hex(input: &str) -> Result<OpaqueId> {
+    let bytes = parse_hex_key::<{ OPERATION_ID_LEN }>(input)?;
+    OpaqueId::from_slice(&bytes).map_err(|err| {
+        anyhow!(CliUsageError::new(format!(
+            "invalid opaque id length: {err}"
+        )))
+    })
+}
+
+fn parse_operation_id_hex(input: &str) -> Result<OperationId> {
+    let bytes = parse_hex_key::<{ OPERATION_ID_LEN }>(input)?;
+    OperationId::from_slice(&bytes).map_err(|err| {
+        anyhow!(CliUsageError::new(format!(
+            "invalid operation id length: {err}"
+        )))
+    })
+}
+
+fn parse_optional_operation_id(input: Option<&str>) -> Result<Option<OperationId>> {
+    input.map(|value| parse_operation_id_hex(value)).transpose()
+}
+
+fn parse_optional_opaque_id(input: Option<&str>) -> Result<Option<OpaqueId>> {
+    input.map(|value| parse_opaque_id_hex(value)).transpose()
+}
+
+fn parse_optional_auth_ref(input: Option<&str>) -> Result<Option<AuthRef>> {
+    input.map(|value| parse_auth_ref_hex(value)).transpose()
+}
+
+fn parse_stream_id_hex(input: &str) -> Result<StreamId> {
+    let bytes = parse_hex_key::<{ STREAM_ID_LEN }>(input)?;
+    StreamId::from_slice(&bytes).map_err(|err| {
+        anyhow!(CliUsageError::new(format!(
+            "invalid stream id length: {err}"
+        )))
+    })
+}
+
+fn parse_allowed_streams(args: &OperationAccessGrantArgs) -> Result<Vec<StreamId>> {
+    if args.allowed_streams.is_empty() {
+        let derived = cap_stream_id_from_label(&args.stream)
+            .with_context(|| format!("deriving stream identifier for {}", args.stream))?;
+        return Ok(vec![derived]);
+    }
+
+    args.allowed_streams
+        .iter()
+        .map(|value| parse_stream_id_hex(value))
+        .collect()
+}
+
+fn resolve_operation_schema(name: &str) -> Result<[u8; 32]> {
+    let schema = match name {
+        "paid.operation.v1" => schema_paid_operation(),
+        "access.grant.v1" => schema_access_grant(),
+        "access.revoke.v1" => schema_access_revoke(),
+        "delegated.execution.v1" => schema_delegated_execution(),
+        "agreement.definition.v1" => schema_agreement_definition(),
+        "agreement.confirmation.v1" => schema_agreement_confirmation(),
+        "data.publication.v1" => schema_data_publication(),
+        "state.checkpoint.v1" => schema_state_checkpoint(),
+        "recovery.request.v1" => schema_recovery_request(),
+        "recovery.approval.v1" => schema_recovery_approval(),
+        "recovery.execution.v1" => schema_recovery_execution(),
+        "query.audit.v1" => schema_query_audit(),
+        "federation.mirror.v1" => schema_federation_mirror(),
+        other => {
+            bail_usage!("unknown operation schema `{other}`")
+        }
+    };
+    Ok(schema)
 }
 
 async fn handle_operation_id(args: OperationIdArgs) -> Result<()> {
@@ -8503,6 +9248,75 @@ mod tests {
         server.abort();
         assert_eq!(fetched, response);
         Ok(())
+    }
+
+    #[test]
+    fn operation_schema_helper_matches_fixture() -> anyhow::Result<()> {
+        let fixture_path = test_fixture_path("op_schema_ids.json");
+        let data = std::fs::read(&fixture_path)?;
+        let fixtures: BTreeMap<String, String> = serde_json::from_slice(&data)?;
+
+        for (name, expected_hex) in fixtures {
+            let derived = resolve_operation_schema(&name)?;
+            assert_eq!(expected_hex, hex::encode(derived), "schema {name}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn paid_operation_payload_matches_fixture() -> anyhow::Result<()> {
+        let args = sample_paid_operation_args();
+        let payload = build_paid_operation_payload(&args)?;
+        let fixture_path = test_fixture_path("op_paid_payload_hex.txt");
+        let expected_hex = std::fs::read_to_string(&fixture_path)?.trim().to_string();
+        let actual_hex = hex::encode(&payload.cbor_body);
+
+        assert!(
+            !expected_hex.is_empty(),
+            "populate {} with paid operation fixture hex: {}",
+            fixture_path.display(),
+            actual_hex
+        );
+        assert_eq!(expected_hex, actual_hex, "paid operation payload changed");
+
+        Ok(())
+    }
+
+    fn test_fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("data")
+            .join(name)
+    }
+
+    fn sample_paid_operation_args() -> OperationPaidArgs {
+        OperationPaidArgs {
+            hub: HubLocatorArgs {
+                hub: None,
+                env: None,
+                hub_name: None,
+            },
+            client: PathBuf::from("client.pem"),
+            stream: "tenant/core".to_string(),
+            operation_type: "ledger.transfer.v1".to_string(),
+            payer: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff".to_string(),
+            payee: "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100".to_string(),
+            amount: 1_000_000,
+            currency_code: "USD".to_string(),
+            operation_args: Some(
+                "{\"memo\":\"test payment\",\"tags\":[\"priority\",\"external\"]}".to_string(),
+            ),
+            ttl_seconds: Some(3_600),
+            operation_reference: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            ),
+            parent_operation: Some(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            ),
+            cap: None,
+            json: false,
+        }
     }
 }
 
