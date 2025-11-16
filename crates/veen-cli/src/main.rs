@@ -974,6 +974,8 @@ enum SchemaCommand {
 enum WalletCommand {
     /// Emit a wallet transfer event.
     Transfer(WalletTransferArgs),
+    /// Fold paid operations into account balances.
+    Ledger(WalletLedgerArgs),
 }
 
 #[derive(Subcommand)]
@@ -1649,6 +1651,22 @@ struct WalletTransferArgs {
     transfer_id: Option<String>,
     #[arg(long)]
     metadata: Option<String>,
+}
+
+#[derive(Args)]
+struct WalletLedgerArgs {
+    #[command(flatten)]
+    hub: HubLocatorArgs,
+    #[arg(long)]
+    stream: String,
+    #[arg(long = "since-stream-seq", default_value_t = 1)]
+    since_stream_seq: u64,
+    #[arg(long = "upto-stream-seq")]
+    upto_stream_seq: Option<u64>,
+    #[arg(long, value_name = "HEX32")]
+    account: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -2828,6 +2846,7 @@ async fn run_cli() -> Result<()> {
         },
         Command::Wallet(cmd) => match cmd {
             WalletCommand::Transfer(args) => handle_wallet_transfer(args).await,
+            WalletCommand::Ledger(args) => handle_wallet_ledger(args).await,
         },
         Command::Operation(cmd) => match cmd {
             OperationCommand::Id(args) => handle_operation_id(args).await,
@@ -5864,6 +5883,204 @@ async fn handle_wallet_transfer_remote(
     println!("  transfer_id: {}", hex::encode(transfer_id.as_bytes()));
     log_cli_goal("CLI.WALLET.TRANSFER");
     Ok(())
+}
+
+async fn handle_wallet_ledger(args: WalletLedgerArgs) -> Result<()> {
+    if args.since_stream_seq == 0 {
+        bail_usage!("--since-stream-seq must be at least 1");
+    }
+    if let Some(upto) = args.upto_stream_seq {
+        if upto < args.since_stream_seq {
+            bail_usage!("--upto-stream-seq must be greater than or equal to --since-stream-seq");
+        }
+    }
+
+    let use_json = json_output_enabled(args.json);
+    let account_filter = if let Some(ref value) = args.account {
+        let parsed = parse_account_id_hex(value)?;
+        Some((parsed, hex::encode(parsed.as_bytes())))
+    } else {
+        None
+    };
+
+    let reference = hub_reference_from_locator(&args.hub, "wallet ledger").await?;
+    let (messages, stream_tip) =
+        load_wallet_ledger_messages(reference, &args.stream, args.since_stream_seq).await?;
+
+    let requested_upto = args.upto_stream_seq.unwrap_or(stream_tip);
+    let effective_upto = requested_upto.min(stream_tip);
+
+    let filter_ref = account_filter.as_ref().map(|(account, _)| account);
+    let mut balances =
+        fold_wallet_ledger(&messages, args.since_stream_seq, effective_upto, filter_ref)?;
+    if let Some((_, ref hex_value)) = account_filter {
+        balances.entry(hex_value.clone()).or_insert(0);
+    }
+
+    render_wallet_ledger(
+        &args.stream,
+        args.since_stream_seq,
+        effective_upto,
+        &balances,
+        account_filter
+            .as_ref()
+            .map(|(_, hex_value)| hex_value.as_str()),
+        use_json,
+    );
+    log_cli_goal("CLI.WALLET.LEDGER");
+    Ok(())
+}
+
+fn render_wallet_ledger(
+    stream: &str,
+    from_seq: u64,
+    upto_seq: u64,
+    balances: &BTreeMap<String, i128>,
+    account: Option<&str>,
+    use_json: bool,
+) {
+    if use_json {
+        let output = json!({
+            "stream": stream,
+            "from": from_seq,
+            "upto": upto_seq,
+            "balances": balances,
+        });
+        match serde_json::to_string_pretty(&output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => println!("{output}"),
+        }
+        return;
+    }
+
+    println!("stream: {stream}");
+    println!("from: {from_seq}");
+    println!("upto: {upto_seq}");
+    if let Some(account_hex) = account {
+        let balance = balances.get(account_hex).copied().unwrap_or(0);
+        println!("account: {account_hex}");
+        println!("balance: {balance}");
+        return;
+    }
+
+    if balances.is_empty() {
+        println!("balances: (none)");
+        return;
+    }
+
+    println!("balances:");
+    for (account_hex, balance) in balances {
+        println!("- {account_hex}: {balance}");
+    }
+}
+
+fn fold_wallet_ledger<'a, I>(
+    messages: I,
+    from_seq: u64,
+    upto_seq: u64,
+    account_filter: Option<&AccountId>,
+) -> Result<BTreeMap<String, i128>>
+where
+    I: IntoIterator<Item = &'a StoredMessage>,
+{
+    let mut balances = BTreeMap::new();
+    let paid_schema_hex = hex::encode(schema_paid_operation());
+    for message in messages {
+        if message.seq < from_seq {
+            continue;
+        }
+        if message.seq > upto_seq {
+            break;
+        }
+        let schema_hex = match message.schema.as_deref() {
+            Some(value) => value,
+            None => continue,
+        };
+        if !schema_hex.eq_ignore_ascii_case(&paid_schema_hex) {
+            continue;
+        }
+        let body = message.body.as_ref().ok_or_else(|| {
+            ProtocolError::new(format!(
+                "stream {}#{} does not contain stored body for paid operation",
+                message.stream, message.seq
+            ))
+        })?;
+        let payload: PaidOperation = serde_json::from_str(body).with_context(|| {
+            format!(
+                "decoding paid.operation.v1 payload for {}#{}",
+                message.stream, message.seq
+            )
+        })?;
+        let amount = payload.amount as i128;
+        apply_balance_delta(
+            &mut balances,
+            &payload.payer_account,
+            -amount,
+            account_filter,
+        )?;
+        apply_balance_delta(
+            &mut balances,
+            &payload.payee_account,
+            amount,
+            account_filter,
+        )?;
+    }
+    Ok(balances)
+}
+
+fn apply_balance_delta(
+    balances: &mut BTreeMap<String, i128>,
+    account: &AccountId,
+    delta: i128,
+    filter: Option<&AccountId>,
+) -> Result<()> {
+    if let Some(expected) = filter {
+        if expected != account {
+            return Ok(());
+        }
+    }
+
+    let key = hex::encode(account.as_bytes());
+    let entry = balances.entry(key.clone()).or_insert(0);
+    *entry = entry
+        .checked_add(delta)
+        .ok_or_else(|| anyhow!("ledger balance overflow for account {}", key))?;
+    Ok(())
+}
+
+async fn load_wallet_ledger_messages(
+    reference: HubReference,
+    stream: &str,
+    from_seq: u64,
+) -> Result<(Vec<StoredMessage>, u64)> {
+    match reference {
+        HubReference::Local(data_dir) => {
+            let stream_state = load_stream_state(&data_dir, stream).await?;
+            let tip = stream_state.messages.last().map(|msg| msg.seq).unwrap_or(0);
+            let messages = stream_state
+                .messages
+                .into_iter()
+                .filter(|msg| msg.seq >= from_seq)
+                .collect();
+            Ok((messages, tip))
+        }
+        HubReference::Remote(client) => {
+            let mut query: Vec<(&str, String)> = vec![("stream", stream.to_string())];
+            if from_seq > 0 {
+                query.push(("from", from_seq.to_string()));
+            }
+            let remote_messages: Vec<RemoteStoredMessage> = client
+                .get_json("/stream", &query)
+                .await
+                .context("fetching stream messages for ledger")?;
+            let tip = remote_messages
+                .last()
+                .map(|msg| msg.seq)
+                .unwrap_or_else(|| from_seq.saturating_sub(1));
+            let messages = remote_messages.into_iter().map(Into::into).collect();
+            Ok((messages, tip))
+        }
+    }
 }
 
 async fn handle_operation_send(args: OperationSendArgs) -> Result<()> {
