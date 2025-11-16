@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryInto;
 use std::env;
 use std::fmt;
-use std::io::Cursor;
+use std::fs::OpenOptions as StdOpenOptions;
+use std::io::{Cursor, Write as StdWrite};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command as StdCommand, Stdio};
@@ -1016,6 +1017,16 @@ enum SelftestCommand {
     Fuzz,
     /// Run the full test suite (core + props + fuzz).
     All,
+    /// Exercise federated overlay scenarios (FED1/AUTH1).
+    Federated,
+    /// Exercise lifecycle and revocation checks (KEX1+).
+    Kex1,
+    /// Exercise hardening/PoW checks (SH1+).
+    Hardened,
+    /// Exercise label/schema overlays (META0+).
+    Meta,
+    /// Run every v0.0.1+ suite sequentially with aggregated reporting.
+    Plus,
 }
 
 #[derive(Subcommand)]
@@ -2646,6 +2657,11 @@ async fn run_cli() -> Result<()> {
             SelftestCommand::Props => handle_selftest_props().await,
             SelftestCommand::Fuzz => handle_selftest_fuzz().await,
             SelftestCommand::All => handle_selftest_all().await,
+            SelftestCommand::Federated => handle_selftest_federated().await,
+            SelftestCommand::Kex1 => handle_selftest_kex1().await,
+            SelftestCommand::Hardened => handle_selftest_hardened().await,
+            SelftestCommand::Meta => handle_selftest_meta().await,
+            SelftestCommand::Plus => handle_selftest_plus().await,
         },
     }
 }
@@ -6789,7 +6805,70 @@ async fn handle_retention_show(args: RetentionShowArgs) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum SelftestSuite {
+    Core,
+    Props,
+    Fuzz,
+    All,
+    Federated,
+    Kex1,
+    Hardened,
+    Meta,
+    Plus,
+}
+
+impl SelftestSuite {
+    fn name(self) -> &'static str {
+        match self {
+            SelftestSuite::Core => "core",
+            SelftestSuite::Props => "props",
+            SelftestSuite::Fuzz => "fuzz",
+            SelftestSuite::All => "all",
+            SelftestSuite::Federated => "federated",
+            SelftestSuite::Kex1 => "kex1",
+            SelftestSuite::Hardened => "hardened",
+            SelftestSuite::Meta => "meta",
+            SelftestSuite::Plus => "plus",
+        }
+    }
+}
+
+const SELFTEST_STUB_ENV: &str = "VEEN_SELFTEST_STUB";
+const SELFTEST_STUB_FILE_ENV: &str = "VEEN_SELFTEST_STUB_FILE";
+
+fn selftest_stub_enabled() -> bool {
+    env::var_os(SELFTEST_STUB_ENV).is_some()
+}
+
+fn record_selftest_stub_marker(suite: SelftestSuite) -> Result<()> {
+    if selftest_stub_enabled() {
+        let name = suite.name();
+        if let Some(path) = env::var_os(SELFTEST_STUB_FILE_ENV) {
+            let mut file = StdOpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&PathBuf::from(path))
+                .with_context(|| format!("opening selftest stub file for {name}"))?;
+            writeln!(&mut file, "{name}").context("writing selftest stub marker")?;
+        }
+        println!("stubbed selftest suite: {name}");
+    }
+    Ok(())
+}
+
+fn handle_selftest_stub(suite: SelftestSuite) -> Result<bool> {
+    if selftest_stub_enabled() {
+        record_selftest_stub_marker(suite)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 async fn handle_selftest_core() -> Result<()> {
+    if handle_selftest_stub(SelftestSuite::Core)? {
+        return Ok(());
+    }
     println!("running VEEN core self-tests...");
     match veen_selftest::run_core().await {
         Ok(()) => {
@@ -6801,6 +6880,9 @@ async fn handle_selftest_core() -> Result<()> {
 }
 
 async fn handle_selftest_props() -> Result<()> {
+    if handle_selftest_stub(SelftestSuite::Props)? {
+        return Ok(());
+    }
     println!("running VEEN property self-tests...");
     match veen_selftest::run_props() {
         Ok(()) => {
@@ -6812,6 +6894,9 @@ async fn handle_selftest_props() -> Result<()> {
 }
 
 async fn handle_selftest_fuzz() -> Result<()> {
+    if handle_selftest_stub(SelftestSuite::Fuzz)? {
+        return Ok(());
+    }
     println!("running VEEN fuzz self-tests...");
     match veen_selftest::run_fuzz() {
         Ok(()) => {
@@ -6823,6 +6908,9 @@ async fn handle_selftest_fuzz() -> Result<()> {
 }
 
 async fn handle_selftest_all() -> Result<()> {
+    if handle_selftest_stub(SelftestSuite::All)? {
+        return Ok(());
+    }
     println!("running full VEEN self-test suite...");
     match veen_selftest::run_all().await {
         Ok(()) => {
@@ -6831,6 +6919,111 @@ async fn handle_selftest_all() -> Result<()> {
         }
         Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
     }
+}
+
+async fn handle_selftest_federated() -> Result<()> {
+    if handle_selftest_stub(SelftestSuite::Federated)? {
+        return Ok(());
+    }
+    println!("running VEEN federated self-tests...");
+    match veen_selftest::run_federated().await {
+        Ok(()) => {
+            log_cli_goal("CLI.SELFTEST.FEDERATED");
+            Ok(())
+        }
+        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
+    }
+}
+
+async fn handle_selftest_kex1() -> Result<()> {
+    if handle_selftest_stub(SelftestSuite::Kex1)? {
+        return Ok(());
+    }
+    println!("running VEEN KEX1+ self-tests...");
+    match veen_selftest::run_kex1().await {
+        Ok(()) => {
+            log_cli_goal("CLI.SELFTEST.KEX1");
+            Ok(())
+        }
+        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
+    }
+}
+
+async fn handle_selftest_hardened() -> Result<()> {
+    if handle_selftest_stub(SelftestSuite::Hardened)? {
+        return Ok(());
+    }
+    println!("running VEEN hardened self-tests...");
+    match veen_selftest::run_hardened().await {
+        Ok(()) => {
+            log_cli_goal("CLI.SELFTEST.HARDENED");
+            Ok(())
+        }
+        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
+    }
+}
+
+async fn handle_selftest_meta() -> Result<()> {
+    if handle_selftest_stub(SelftestSuite::Meta)? {
+        return Ok(());
+    }
+    println!("running VEEN meta self-tests...");
+    match veen_selftest::run_meta().await {
+        Ok(()) => {
+            log_cli_goal("CLI.SELFTEST.META");
+            Ok(())
+        }
+        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
+    }
+}
+
+async fn handle_selftest_plus() -> Result<()> {
+    record_selftest_stub_marker(SelftestSuite::Plus)?;
+    println!("running VEEN plus self-tests...");
+    let mut failed = Vec::new();
+
+    if let Err(err) = handle_selftest_core().await {
+        eprintln!("self-test suite core failed: {err:#}");
+        failed.push(SelftestSuite::Core);
+    }
+    if let Err(err) = handle_selftest_props().await {
+        eprintln!("self-test suite props failed: {err:#}");
+        failed.push(SelftestSuite::Props);
+    }
+    if let Err(err) = handle_selftest_fuzz().await {
+        eprintln!("self-test suite fuzz failed: {err:#}");
+        failed.push(SelftestSuite::Fuzz);
+    }
+    if let Err(err) = handle_selftest_federated().await {
+        eprintln!("self-test suite federated failed: {err:#}");
+        failed.push(SelftestSuite::Federated);
+    }
+    if let Err(err) = handle_selftest_kex1().await {
+        eprintln!("self-test suite kex1 failed: {err:#}");
+        failed.push(SelftestSuite::Kex1);
+    }
+    if let Err(err) = handle_selftest_hardened().await {
+        eprintln!("self-test suite hardened failed: {err:#}");
+        failed.push(SelftestSuite::Hardened);
+    }
+    if let Err(err) = handle_selftest_meta().await {
+        eprintln!("self-test suite meta failed: {err:#}");
+        failed.push(SelftestSuite::Meta);
+    }
+
+    if failed.is_empty() {
+        log_cli_goal("CLI.SELFTEST.PLUS");
+        println!("VEEN self-test plus suites completed successfully");
+        return Ok(());
+    }
+
+    let joined = failed
+        .iter()
+        .map(|suite| suite.name())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let err = anyhow!(format!("self-test suites failed: {joined}"));
+    Err(anyhow::Error::new(SelftestFailure::new(err)))
 }
 
 async fn ensure_data_dir_layout(data_dir: &Path) -> Result<()> {

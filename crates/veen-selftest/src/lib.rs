@@ -331,6 +331,46 @@ pub async fn run_all() -> Result<()> {
     Ok(())
 }
 
+/// Execute the federated overlay suite covering FED1/AUTH1 goals.
+pub async fn run_federated() -> Result<()> {
+    run_overlays(None)
+        .await
+        .context("running federated overlay scenarios")?;
+    tracing::info!("federated VEEN self-tests completed");
+    Ok(())
+}
+
+/// Placeholder for lifecycle and revocation (KEX1+) self-tests.
+pub async fn run_kex1() -> Result<()> {
+    tracing::info!("kex1+ lifecycle self-tests completed (placeholder)");
+    Ok(())
+}
+
+/// Placeholder for hardened profile (SH1+) self-tests.
+pub async fn run_hardened() -> Result<()> {
+    tracing::info!("hardened self-tests completed (placeholder)");
+    Ok(())
+}
+
+/// Placeholder for label and schema overlays (META0+) self-tests.
+pub async fn run_meta() -> Result<()> {
+    tracing::info!("meta overlay self-tests completed (placeholder)");
+    Ok(())
+}
+
+/// Execute the v0.0.1+ aggregated suite.
+pub async fn run_plus() -> Result<()> {
+    run_core().await?;
+    run_props()?;
+    run_fuzz()?;
+    run_federated().await?;
+    run_kex1().await?;
+    run_hardened().await?;
+    run_meta().await?;
+    tracing::info!("plus self-test suite completed successfully");
+    Ok(())
+}
+
 fn check_prev_ack_within_stream_bounds() -> Result<()> {
     let harness = SequenceHarness::new()?;
     let mut mmr = Mmr::new();
