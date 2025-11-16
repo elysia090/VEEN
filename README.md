@@ -135,6 +135,22 @@ verification, resynchronisation, overlay management (RPC, CRDT, wallet,
 revocation, schema), and TLS inspection. Run `veen --help` for the complete
 command tree.
 
+### Handling proof-of-work challenges
+
+Hubs may request a proof-of-work (PoW) cookie before accepting a submission.
+The CLI exposes matching switches on `veen send` and `veen rpc call`:
+
+- `--pow-difficulty <BITS>` – solve or supply a cookie that meets the given
+  difficulty. When no other PoW options are supplied a random challenge is
+  generated and solved locally.
+- `--pow-challenge <HEX>` – reuse a hub-issued challenge (hex encoded) or
+  provide your own when solving manually.
+- `--pow-nonce <NONCE>` – send a pre-computed cookie. Combine this with the
+  matching difficulty and challenge captured from the hub.
+
+This flow allows operators to either have the CLI solve a PoW automatically or
+to reuse a nonce received out-of-band from another system.
+
 ### Containerised deployment
 
 The repository ships with a Docker packaging that exposes the hub runtime via
