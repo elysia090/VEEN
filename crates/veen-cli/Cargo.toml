@@ -24,6 +24,8 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 serde_bytes.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util = { workspace = true, features = ["compat"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 veen-core = { path = "../veen-core" }
@@ -33,6 +35,9 @@ x25519-dalek.workspace = true
 rand.workspace = true
 sha2.workspace = true
 humantime-serde.workspace = true
+humantime.workspace = true
+k8s-openapi.workspace = true
+kube.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

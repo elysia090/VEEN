@@ -209,6 +209,48 @@ named volume so the event history remains available for inspection.
    Shut the hub down with `docker compose down` (add `--volumes` to remove the
    persisted audit log).
 
+### Kubernetes workflows
+
+`veen kube` renders deterministic manifests and applies them directly through
+the Kubernetes API. The subcommands follow
+[`doc/CLI-GOALS-3.txt`](doc/CLI-GOALS-3.txt) (Namespace/ServiceAccount/RBAC/
+ConfigMap/Secret/Deployment/Service) and accept `--json` when structured output
+is preferred.
+
+- **Render manifests** referencing local configuration, environment overrides,
+  and annotations:
+  ```shell
+  target/release/veen kube render \
+    --cluster-context kind-veens \
+    --namespace veen-tenants \
+    --name alpha \
+    --image veen-hub:latest \
+    --data-pvc veen-alpha-data \
+    --config hub-config.toml \
+    --env-file hub.env \
+    --pod-annotations pod-annotations.json > hub.yaml
+  ```
+- **Apply** the generated resources without invoking `kubectl`:
+  ```shell
+  target/release/veen kube apply --cluster-context kind-veens --file hub.yaml --wait-seconds 180
+  ```
+  The CLI prints the effective namespace and `veen-hub-NAMESPACE` DNS entry
+  after waiting for ready replicas.
+- **Operate deployed hubs** using the shared naming scheme:
+  - `veen kube delete --cluster-context kind-veens --namespace veen-tenants --name alpha --purge-pvcs`
+    removes the Deployment, Service, Role, RoleBinding, ServiceAccount, and PVCs
+    (printing `already deleted` when nothing remains).
+  - `veen kube status ... --json` reports desired/ready replicas, per-pod
+    details, and `/healthz` probe results.
+  - `veen kube logs` streams logs for all labelled pods or a single pod with
+    `--since` and `--follow` filters.
+  - `veen kube backup`/`veen kube restore` talk to the hub admin endpoints to
+    persist snapshots to `file://` URIs, scale the deployment down, restore the
+    data directory, and scale back up.
+
+These commands keep hub manifests reproducible and remove the need for bespoke
+shell wrappers when managing Kubernetes-native deployments.
+
 Environment variables such as `VEEN_LISTEN`, `VEEN_LOG_LEVEL`, or
 `VEEN_PROFILE_ID` can be overridden in `docker-compose.yml` (or via
 `docker compose run -e`) to adjust listening addresses, logging verbosity, or
