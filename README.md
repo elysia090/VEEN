@@ -205,9 +205,50 @@ named volume so the event history remains available for inspection.
      --client /var/lib/veen/clients/alice \
      --stream core/main \
      --from 0
+  ```
+  Shut the hub down with `docker compose down` (add `--volumes` to remove the
+  persisted audit log).
+
+### Environment descriptors
+
+`veen env` creates small JSON descriptors (`*.env.json`) that capture the
+cluster context, namespace, and hub metadata for a deployment. This keeps hub
+service URLs and profile identifiers in one place and allows other commands to
+reuse them with `--env PATH --hub-name NAME` instead of pasting raw URLs.
+
+1. **Initialise an environment** (creates `ROOT/demo.env.json`):
+   ```shell
+   veen env init \
+     --root ~/.config/veen \
+     --name demo \
+     --cluster-context kind-demo \
+     --namespace veen-tenant-demo \
+     --description "demo tenant"
    ```
-   Shut the hub down with `docker compose down` (add `--volumes` to remove the
-   persisted audit log).
+2. **Record hub endpoints and tenants** inside the descriptor:
+   ```shell
+   veen env add-hub \
+     --env ~/.config/veen/demo.env.json \
+     --hub-name primary \
+     --service-url https://hub.demo.internal:8443 \
+     --profile-id abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd
+   veen env add-tenant \
+     --env ~/.config/veen/demo.env.json \
+     --tenant-id demo \
+     --stream-prefix core \
+     --label-class wallet
+   ```
+3. **Inspect the descriptor** with a human readable summary or the raw JSON:
+   ```shell
+   veen env show --env ~/.config/veen/demo.env.json
+   veen env show --env ~/.config/veen/demo.env.json --json
+   ```
+
+Any CLI command that previously required `--hub URL` now accepts
+`--env ~/.config/veen/demo.env.json --hub-name primary`; the CLI resolves the
+service URL and profile identifier from the descriptor before connecting. This
+makes it easy to reuse the same environment definition across `kube`, `op`, and
+audit flows without duplicating connection details.
 
 ### Kubernetes workflows
 
