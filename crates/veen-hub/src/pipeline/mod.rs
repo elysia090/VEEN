@@ -1293,6 +1293,69 @@ impl HubPipeline {
         }
     }
 
+    pub async fn label_class_descriptor(&self, label: Label) -> HubLabelClassDescriptor {
+        let record = {
+            let guard = self.inner.lock().await;
+            guard.label_class_index.get(&label).cloned()
+        };
+
+        let class_text = record.as_ref().map(|record| record.class.clone());
+        let sensitivity = record
+            .as_ref()
+            .and_then(|record| record.sensitivity.clone());
+        let retention_hint = record.and_then(|record| record.retention_hint);
+        let normalized = class_text
+            .as_deref()
+            .map(|value| value.to_ascii_lowercase());
+        let pad_block = pad_block_for_class(normalized.as_deref());
+        let retention_policy = retention_policy_for_class(normalized.as_deref());
+        let rate_policy = rate_policy_for_class(normalized.as_deref());
+
+        HubLabelClassDescriptor {
+            ok: true,
+            label: hex::encode(label.as_bytes()),
+            class: class_text,
+            sensitivity,
+            retention_hint,
+            pad_block_effective: pad_block,
+            retention_policy: retention_policy.to_string(),
+            rate_policy: rate_policy.to_string(),
+        }
+    }
+
+    pub async fn label_class_list(
+        &self,
+        realm: Option<String>,
+        class_filter: Option<String>,
+    ) -> HubLabelClassList {
+        let _ = realm;
+        let class_filter = class_filter.map(|value| value.to_ascii_lowercase());
+        let entries = {
+            let guard = self.inner.lock().await;
+            let mut entries = guard
+                .label_class_records
+                .iter()
+                .filter(|record| {
+                    if let Some(ref filter) = class_filter {
+                        record.class.to_ascii_lowercase() == *filter
+                    } else {
+                        true
+                    }
+                })
+                .map(|record| HubLabelClassListEntry {
+                    label: hex::encode(record.label.as_bytes()),
+                    class: record.class.clone(),
+                    sensitivity: record.sensitivity.clone(),
+                    retention_hint: record.retention_hint,
+                })
+                .collect::<Vec<_>>();
+            entries.sort_by(|a, b| a.label.cmp(&b.label));
+            entries
+        };
+
+        HubLabelClassList { ok: true, entries }
+    }
+
     pub async fn anchor_log(&self) -> Result<AnchorLog> {
         let guard = self.inner.lock().await;
         Ok(guard.anchors.clone())
@@ -1819,6 +1882,37 @@ pub struct HubAuthorityRecordDescriptor {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
     pub active_now: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubLabelClassDescriptor {
+    pub ok: bool,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sensitivity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_hint: Option<u64>,
+    pub pad_block_effective: u64,
+    pub retention_policy: String,
+    pub rate_policy: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubLabelClassList {
+    pub ok: bool,
+    pub entries: Vec<HubLabelClassListEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HubLabelClassListEntry {
+    pub label: String,
+    pub class: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sensitivity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_hint: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2566,6 +2660,30 @@ async fn load_label_classes(storage: &HubStorage) -> Result<Vec<LabelClassRecord
     Ok(records)
 }
 
+fn pad_block_for_class(class: Option<&str>) -> u64 {
+    match class {
+        Some("wallet") => 1024,
+        Some("log") | Some("metric") | Some("bulk") => 0,
+        _ => 256,
+    }
+}
+
+fn retention_policy_for_class(class: Option<&str>) -> &'static str {
+    match class {
+        Some("wallet") => "long-term",
+        Some("log") | Some("metric") | Some("bulk") => "short-term",
+        _ => "standard",
+    }
+}
+
+fn rate_policy_for_class(class: Option<&str>) -> &'static str {
+    match class {
+        Some("admin") | Some("control") => "elevated",
+        Some("bulk") => "throttled",
+        _ => "rl0-default",
+    }
+}
+
 async fn persist_schema_descriptors(
     storage: &HubStorage,
     records: &[SchemaDescriptor],
@@ -2679,6 +2797,7 @@ mod tests {
     use tokio::runtime::Runtime;
     use veen_core::cap_stream_id_from_label;
     use veen_core::federation::AuthorityPolicy;
+    use veen_core::label::Label;
     use veen_core::meta::SchemaId;
     use veen_core::realm::RealmId;
     use veen_core::revocation::{RevocationKind, RevocationRecord, RevocationTarget};
@@ -3103,6 +3222,51 @@ mod tests {
             assert_eq!(guard.label_class_records.len(), 1);
             assert_eq!(guard.label_class_index.get(&label), Some(&record));
         });
+    }
+
+    #[tokio::test]
+    async fn label_class_descriptor_reports_defaults() -> Result<()> {
+        let dir = tempdir()?;
+        write_test_hub_key(dir.path()).await?;
+        let pipeline = init_pipeline(dir.path()).await;
+        let stream_id = cap_stream_id_from_label("chat/general")?;
+        let label = Label::derive([], stream_id, 0);
+
+        let descriptor = pipeline.label_class_descriptor(label).await;
+        assert!(descriptor.class.is_none());
+        assert_eq!(descriptor.pad_block_effective, 256);
+        assert_eq!(descriptor.retention_policy, "standard");
+        assert_eq!(descriptor.rate_policy, "rl0-default");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn label_class_list_filters_by_class() -> Result<()> {
+        let dir = tempdir()?;
+        write_test_hub_key(dir.path()).await?;
+        let pipeline = init_pipeline(dir.path()).await;
+        let stream_id = cap_stream_id_from_label("chat/general")?;
+        let label = Label::derive([], stream_id, 0);
+        let record = LabelClassRecord {
+            label,
+            class: "user".to_string(),
+            sensitivity: Some("medium".to_string()),
+            retention_hint: Some(86_400),
+        };
+        let payload = encode_envelope(schema_label_class(), record);
+        pipeline.publish_label_class(&payload).await?;
+
+        let list = pipeline
+            .label_class_list(None, Some("user".to_string()))
+            .await;
+        assert_eq!(list.entries.len(), 1);
+        let entry = &list.entries[0];
+        assert_eq!(entry.class, "user");
+        assert_eq!(entry.sensitivity.as_deref(), Some("medium"));
+        assert_eq!(entry.retention_hint, Some(86_400));
+
+        Ok(())
     }
 
     #[test]
