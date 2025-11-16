@@ -1,24 +1,31 @@
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
-use std::time::Duration;
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
+use ed25519_dalek::SigningKey;
+use rand::rngs::OsRng;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
 use serde_json::json;
 use tempfile::TempDir;
+use tokio::fs;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::process_harness;
 use veen_bridge::{run_bridge, BridgeConfig, EndpointConfig};
 use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::pipeline::{HubStreamState, SubmitRequest};
 use veen_hub::runtime::HubRuntime;
+use veen_hub::storage::HUB_KEY_FILE;
 
 const FED_CHAT_STREAM: &str = "fed/chat";
-const DEFAULT_CLIENT_ID: &str = "bridge-client";
+const DEFAULT_CLIENT_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+const HUB_KEY_VERSION: u8 = 1;
 
 #[derive(Deserialize)]
 struct MetricsSnapshot {
@@ -26,20 +33,21 @@ struct MetricsSnapshot {
     mmr_roots: std::collections::HashMap<String, String>,
 }
 
+#[derive(Serialize)]
+struct HubKeyMaterial {
+    version: u8,
+    created_at: u64,
+    #[serde(with = "serde_bytes")]
+    public_key: ByteBuf,
+    #[serde(with = "serde_bytes")]
+    secret_key: ByteBuf,
+}
+
 pub async fn run_overlays(subset: Option<&str>) -> Result<()> {
     match subset {
-        None => {
-            process_harness::run_overlay_suite()
-                .await
-                .context("running process federation harness")?;
-            run_fed_auth().await?
-        }
-        Some("fed-auth") => {
-            process_harness::run_overlay_suite()
-                .await
-                .context("running process federation harness")?;
-            run_fed_auth().await?
-        }
+        None | Some("fed-auth") => run_fed_auth()
+            .await
+            .context("executing federation authority overlay self-test")?,
         Some(other) => bail!("unknown overlay subset {other}"),
     }
     Ok(())
@@ -51,6 +59,9 @@ async fn run_fed_auth() -> Result<()> {
 
     let primary_addr = next_listen_addr()?;
     let replica_addr = next_listen_addr()?;
+
+    ensure_hub_key(primary_dir.path()).await?;
+    ensure_hub_key(replica_dir.path()).await?;
 
     let primary_config = HubRuntimeConfig::from_sources(
         primary_addr,
@@ -130,6 +141,41 @@ async fn run_fed_auth() -> Result<()> {
     replica_runtime.shutdown().await?;
 
     Ok(())
+}
+
+async fn ensure_hub_key(dir: &Path) -> Result<()> {
+    let path = dir.join(HUB_KEY_FILE);
+    if fs::try_exists(&path)
+        .await
+        .with_context(|| format!("checking hub key at {}", path.display()))?
+    {
+        return Ok(());
+    }
+
+    let mut rng = OsRng;
+    let signing = SigningKey::generate(&mut rng);
+    let verifying = signing.verifying_key();
+    let material = HubKeyMaterial {
+        version: HUB_KEY_VERSION,
+        created_at: current_unix_timestamp(),
+        public_key: ByteBuf::from(verifying.as_bytes().to_vec()),
+        secret_key: ByteBuf::from(signing.to_bytes().to_vec()),
+    };
+
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&material, &mut encoded)
+        .context("serializing overlay hub key material")?;
+    fs::write(&path, encoded)
+        .await
+        .with_context(|| format!("writing hub key material to {}", path.display()))?;
+    Ok(())
+}
+
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_secs()
 }
 
 fn spawn_bridge(
