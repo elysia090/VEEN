@@ -7132,6 +7132,34 @@ mod tests {
     }
 
     #[test]
+    fn authority_record_json_output_matches_cli_goals() {
+        let descriptor = RemoteAuthorityRecordDescriptor {
+            ok: true,
+            realm_id: "ffff".to_string(),
+            stream_id: "eeee".to_string(),
+            primary_hub: None,
+            replica_hubs: Vec::new(),
+            policy: "unspecified".to_string(),
+            ts: 99,
+            ttl: 0,
+            expires_at: None,
+            active_now: false,
+        };
+
+        let json = super::format_authority_record_output(&descriptor, true);
+        let value: Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(value["realm_id"], "ffff");
+        assert_eq!(value["stream_id"], "eeee");
+        assert_eq!(value["primary_hub"], Value::Null);
+        assert_eq!(value["replica_hubs"], json!([]));
+        assert_eq!(value["policy"], "unspecified");
+        assert_eq!(value["ts"], 99);
+        assert_eq!(value["ttl"], 0);
+        assert_eq!(value["expires_at"], Value::Null);
+        assert_eq!(value["active_now"], Value::Bool(false));
+    }
+
+    #[test]
     fn label_authority_output_matches_cli_goals() {
         let descriptor = RemoteLabelAuthorityDescriptor {
             ok: true,
@@ -7153,6 +7181,31 @@ mod tests {
         assert_eq!(value["primary_hub"], Value::Null);
         assert_eq!(value["replica_hubs"], json!(["hub-replica"]));
         assert_eq!(value["locally_authorized"], Value::Bool(true));
+    }
+
+    #[test]
+    fn label_authority_text_output_matches_cli_goals() {
+        let descriptor = RemoteLabelAuthorityDescriptor {
+            ok: true,
+            label: "fed/debug".to_string(),
+            realm_id: Some("bbbb".to_string()),
+            stream_id: "cccc".to_string(),
+            policy: "single-primary".to_string(),
+            primary_hub: Some("hub-primary".to_string()),
+            replica_hubs: vec![],
+            local_hub_id: "hub-local".to_string(),
+            local_is_authorized: false,
+        };
+
+        let text = super::format_label_authority_output(&descriptor, false);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "label: fed/debug");
+        assert_eq!(lines[1], "realm_id: bbbb");
+        assert_eq!(lines[2], "stream_id: cccc");
+        assert_eq!(lines[3], "policy: single-primary");
+        assert_eq!(lines[4], "primary_hub: hub-primary");
+        assert_eq!(lines[5], "local_hub_id: hub-local");
+        assert_eq!(lines[6], "locally_authorized: false");
     }
 
     #[tokio::test]
