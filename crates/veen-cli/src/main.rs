@@ -41,7 +41,7 @@ use veen_core::operation::{
     schema_federation_mirror, schema_paid_operation, schema_query_audit, schema_recovery_approval,
     schema_recovery_execution, schema_recovery_request, schema_state_checkpoint, AccessGrant,
     AccessRevoke, AccountId, AgreementConfirmation, AgreementDefinition, DelegatedExecution,
-    FederationMirror, OpaqueId, PaidOperation, RecoveryApproval, RecoveryExecution,
+    FederationMirror, OpaqueId, PaidOperation, QueryAuditLog, RecoveryApproval, RecoveryExecution,
     RecoveryRequest, StateCheckpoint, ACCOUNT_ID_LEN, OPERATION_ID_LEN,
 };
 use veen_core::CAP_TOKEN_VERSION;
@@ -113,6 +113,7 @@ enum CliExitKind {
     Protocol,
     Hub,
     Selftest,
+    Policy,
     Other { code: i32, label: &'static str },
 }
 
@@ -124,6 +125,7 @@ impl CliExitKind {
             CliExitKind::Protocol => 3,
             CliExitKind::Hub => 4,
             CliExitKind::Selftest => 5,
+            CliExitKind::Policy => 6,
             CliExitKind::Other { code, .. } => code,
         }
     }
@@ -135,6 +137,7 @@ impl CliExitKind {
             CliExitKind::Protocol => "E.PROTOCOL",
             CliExitKind::Hub => "E.HUB",
             CliExitKind::Selftest => "E.SELFTEST",
+            CliExitKind::Policy => "E.POLICY",
             CliExitKind::Other { label, .. } => label,
         }
     }
@@ -208,6 +211,29 @@ impl fmt::Display for HubOperationError {
 }
 
 impl std::error::Error for HubOperationError {}
+
+#[derive(Debug)]
+struct AuditPolicyViolationError {
+    violations: Vec<String>,
+}
+
+impl AuditPolicyViolationError {
+    fn new(violations: Vec<String>) -> Self {
+        Self { violations }
+    }
+}
+
+impl fmt::Display for AuditPolicyViolationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.violations.is_empty() {
+            write!(f, "audit policy violation")
+        } else {
+            write!(f, "audit policy violations: {}", self.violations.join(", "))
+        }
+    }
+}
+
+impl std::error::Error for AuditPolicyViolationError {}
 
 #[derive(Debug)]
 struct SelftestFailure {
@@ -822,6 +848,9 @@ enum Command {
     /// Render Kubernetes manifests for VEEN profiles.
     #[command(subcommand)]
     Kube(KubeCommand),
+    /// Audit and compliance helpers.
+    #[command(subcommand)]
+    Audit(AuditCommand),
 }
 
 #[derive(Subcommand)]
@@ -836,6 +865,17 @@ enum EnvCommand {
     AddTenant(EnvAddTenantArgs),
     /// Show descriptor contents.
     Show(EnvShowArgs),
+}
+
+#[derive(Subcommand)]
+enum AuditCommand {
+    /// Inspect query audit messages for a stream.
+    Queries(AuditQueriesArgs),
+    /// Summarise schemas and audit coverage for known streams.
+    Summary(AuditSummaryArgs),
+    /// Evaluate audit enforcement policy files.
+    #[command(name = "enforce-check")]
+    EnforceCheck(AuditEnforceCheckArgs),
 }
 
 #[derive(Subcommand)]
@@ -1403,6 +1443,40 @@ struct EnvAddTenantArgs {
 struct EnvShowArgs {
     #[arg(long)]
     env: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct AuditQueriesArgs {
+    #[command(flatten)]
+    hub: HubLocatorArgs,
+    #[arg(long)]
+    stream: String,
+    #[arg(long = "resource-prefix")]
+    resource_prefix: Option<String>,
+    #[arg(long, value_name = "UNIX_TIME")]
+    since: Option<u64>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct AuditSummaryArgs {
+    #[command(flatten)]
+    hub: HubLocatorArgs,
+    #[arg(long)]
+    env: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct AuditEnforceCheckArgs {
+    #[command(flatten)]
+    hub: HubLocatorArgs,
+    #[arg(long = "policy-file")]
+    policy_files: Vec<PathBuf>,
     #[arg(long)]
     json: bool,
 }
@@ -3012,6 +3086,11 @@ async fn run_cli() -> Result<()> {
             EnvCommand::Show(args) => handle_env_show(args).await,
         },
         Command::Kube(cmd) => kube::handle_kube_command(cmd).await,
+        Command::Audit(cmd) => match cmd {
+            AuditCommand::Queries(args) => handle_audit_queries(args).await,
+            AuditCommand::Summary(args) => handle_audit_summary(args).await,
+            AuditCommand::EnforceCheck(args) => handle_audit_enforce_check(args).await,
+        },
         Command::Selftest(cmd) => match cmd {
             SelftestCommand::Core => handle_selftest_core().await,
             SelftestCommand::Props => handle_selftest_props().await,
@@ -3050,6 +3129,9 @@ fn classify_error(err: &anyhow::Error) -> ErrorClassification {
     }
     if error_chain_contains::<SelftestFailure>(err) {
         return ErrorClassification::new(CliExitKind::Selftest);
+    }
+    if error_chain_contains::<AuditPolicyViolationError>(err) {
+        return ErrorClassification::new(CliExitKind::Policy);
     }
     if error_chain_contains::<HubResponseError>(err)
         || error_chain_contains::<HubOperationError>(err)
@@ -8581,12 +8663,630 @@ async fn handle_env_show(args: EnvShowArgs) -> Result<()> {
     Ok(())
 }
 
+async fn handle_audit_queries(args: AuditQueriesArgs) -> Result<()> {
+    let reference = hub_reference_from_locator(&args.hub, "audit queries").await?;
+    let use_json = json_output_enabled(args.json);
+    let messages = fetch_stream_messages(&reference, &args.stream).await?;
+    let mut rows = Vec::new();
+    for message in messages {
+        if !message_schema_matches(&message, schema_query_audit()) {
+            continue;
+        }
+        let payload: QueryAuditLog = parse_message_payload(&message)?;
+        if let Some(prefix) = &args.resource_prefix {
+            if !payload.resource_identifier.starts_with(prefix) {
+                continue;
+            }
+        }
+        let request_time = payload.request_time.unwrap_or(message.sent_at);
+        if let Some(since) = args.since {
+            if request_time < since {
+                continue;
+            }
+        }
+        rows.push(AuditQueryRow {
+            requester_identity: hex::encode(payload.requester_identity.as_ref()),
+            resource_identifier: payload.resource_identifier,
+            resource_class: payload.resource_class,
+            purpose_code: payload.purpose_code,
+            request_time,
+        });
+    }
+    rows.sort_by_key(|row| row.request_time);
+    render_audit_query_rows(&rows, use_json);
+    log_cli_goal("CLI.AUDIT.QUERIES");
+    Ok(())
+}
+
+async fn handle_audit_summary(args: AuditSummaryArgs) -> Result<()> {
+    let reference = hub_reference_from_locator(&args.hub, "audit summary").await?;
+    let use_json = json_output_enabled(args.json);
+    let env_descriptor = match args.env {
+        Some(path) => Some(read_env_descriptor(&path).await?),
+        None => None,
+    };
+    let env_stream_classes = env_descriptor.as_ref().map(|descriptor| {
+        descriptor
+            .tenants
+            .iter()
+            .map(|(_, tenant)| (tenant.stream_prefix.clone(), tenant.label_class.clone()))
+            .collect::<BTreeMap<_, _>>()
+    });
+    let mut stream_inventory = gather_stream_inventory(&reference).await?;
+    let mut stream_names: BTreeSet<String> = stream_inventory.keys().cloned().collect();
+    if let Some(env_map) = &env_stream_classes {
+        stream_names.extend(env_map.keys().cloned());
+    }
+    if stream_names.is_empty() {
+        stream_names.extend(env_descriptor.iter().flat_map(|descriptor| {
+            descriptor
+                .tenants
+                .iter()
+                .map(|(_, tenant)| tenant.stream_prefix.clone())
+        }));
+    }
+    let mut summaries = Vec::new();
+    let mut label_class_state = match &reference {
+        HubReference::Remote(_) => LabelClassEndpointState::Unknown,
+        _ => LabelClassEndpointState::Unsupported,
+    };
+    for stream in stream_names {
+        let messages = fetch_stream_messages(&reference, &stream).await?;
+        let mut schema_names = BTreeSet::new();
+        let mut has_query_audit = false;
+        let mut has_access_grant = false;
+        let mut has_access_revoke = false;
+        for message in &messages {
+            if let Some(schema_id) = schema_id_from_message(message) {
+                if let Some(name) = schema_name_from_id(schema_id) {
+                    schema_names.insert(name.to_string());
+                } else if let Some(hex) = &message.schema {
+                    schema_names.insert(hex.clone());
+                }
+                if schema_id == schema_query_audit() {
+                    has_query_audit = true;
+                }
+                if schema_id == schema_access_grant() {
+                    has_access_grant = true;
+                }
+                if schema_id == schema_access_revoke() {
+                    has_access_revoke = true;
+                }
+            }
+        }
+        let mut label_class = env_stream_classes
+            .as_ref()
+            .and_then(|map| map.get(&stream).cloned());
+        let mut sensitivity = None;
+        if let HubReference::Remote(client) = &reference {
+            if !matches!(label_class_state, LabelClassEndpointState::Unsupported) {
+                match fetch_stream_label_class(client, &stream).await {
+                    Ok(Some(info)) => {
+                        label_class_state = LabelClassEndpointState::Supported;
+                        if let Some(class) = info.class {
+                            label_class = Some(class);
+                        }
+                        sensitivity = info.sensitivity;
+                    }
+                    Ok(None) => {
+                        label_class_state = LabelClassEndpointState::Supported;
+                    }
+                    Err(LabelClassFetchError::Unsupported) => {
+                        label_class_state = LabelClassEndpointState::Unsupported;
+                    }
+                    Err(LabelClassFetchError::Other(err)) => return Err(err),
+                }
+            }
+        }
+        let audit_required =
+            classification_is_sensitive(label_class.as_deref(), sensitivity.as_deref());
+        summaries.push(AuditStreamSummaryRow {
+            stream: stream.clone(),
+            last_seq: stream_inventory.remove(&stream),
+            label_class,
+            sensitivity,
+            schemas: schema_names.into_iter().collect(),
+            has_query_audit,
+            has_access_grant,
+            has_access_revoke,
+            audit_required,
+            missing_required_audit: audit_required && !has_query_audit,
+        });
+    }
+    summaries.sort_by(|a, b| a.stream.cmp(&b.stream));
+    render_audit_summary(&summaries, use_json);
+    log_cli_goal("CLI.AUDIT.SUMMARY");
+    Ok(())
+}
+
+async fn handle_audit_enforce_check(args: AuditEnforceCheckArgs) -> Result<()> {
+    if args.policy_files.is_empty() {
+        bail_usage!("--policy-file must be provided at least once");
+    }
+    let reference = hub_reference_from_locator(&args.hub, "audit enforce-check").await?;
+    let use_json = json_output_enabled(args.json);
+    let mut documents = Vec::new();
+    for path in &args.policy_files {
+        let document: AuditPolicyDocument = read_json_file(path).await?;
+        if document.version != 1 {
+            bail_usage!(
+                "unsupported policy version {} in {} (expected 1)",
+                document.version,
+                path.display()
+            );
+        }
+        documents.push(document);
+    }
+    let mut rules = Vec::new();
+    for document in documents {
+        rules.extend(document.rules);
+    }
+    let stream_inventory = gather_stream_inventory(&reference).await?;
+    let mut streams_to_scan: BTreeSet<String> = stream_inventory.keys().cloned().collect();
+    for rule in &rules {
+        if let AuditPolicyRule::RequireAudit { stream, .. } = rule {
+            streams_to_scan.insert(stream.clone());
+        }
+    }
+    let mut cache = StreamMessageCache::new(reference);
+    let mut violations = Vec::new();
+    let mut recovery_events = Vec::new();
+    let needs_recovery = rules
+        .iter()
+        .any(|rule| matches!(rule, AuditPolicyRule::RequireRecoveryThreshold { .. }));
+    if needs_recovery {
+        recovery_events = collect_recovery_execution_events(&streams_to_scan, &mut cache).await?;
+    }
+    for rule in &rules {
+        match rule {
+            AuditPolicyRule::RequireAudit {
+                stream,
+                resource_class,
+            } => {
+                let messages = cache.messages(stream).await?;
+                let mut found = false;
+                for message in messages {
+                    if !message_schema_matches(message, schema_query_audit()) {
+                        continue;
+                    }
+                    let payload: QueryAuditLog = parse_message_payload(message)?;
+                    if payload.resource_class == *resource_class {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    violations.push(format!(
+                        "stream `{}` missing query.audit.v1 events for resource_class `{}`",
+                        stream, resource_class
+                    ));
+                }
+            }
+            AuditPolicyRule::RequireRecoveryThreshold {
+                target_identity_prefix,
+                min_approvals,
+            } => {
+                let prefix = target_identity_prefix.to_ascii_lowercase();
+                for event in &recovery_events {
+                    if !event.target_identity_hex.starts_with(&prefix) {
+                        continue;
+                    }
+                    let approvals = event.approval_count as u64;
+                    if approvals < *min_approvals {
+                        violations.push(format!(
+                            "recovery.execution.v1 on stream `{}` seq {} has {approvals} approvals (expected >= {min_approvals})",
+                            event.stream, event.seq
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    render_policy_check(&violations, use_json);
+    if violations.is_empty() {
+        log_cli_goal("CLI.AUDIT.ENFORCE");
+        Ok(())
+    } else {
+        Err(anyhow::Error::new(AuditPolicyViolationError::new(
+            violations,
+        )))
+    }
+}
+
 fn handle_selftest_stub(suite: SelftestSuite) -> Result<bool> {
     if selftest_stub_enabled() {
         record_selftest_stub_marker(suite)?;
         return Ok(true);
     }
     Ok(false)
+}
+
+#[derive(Debug, Clone)]
+struct AuditQueryRow {
+    requester_identity: String,
+    resource_identifier: String,
+    resource_class: String,
+    purpose_code: Option<String>,
+    request_time: u64,
+}
+
+#[derive(Debug, Clone)]
+struct AuditStreamSummaryRow {
+    stream: String,
+    last_seq: Option<u64>,
+    label_class: Option<String>,
+    sensitivity: Option<String>,
+    schemas: Vec<String>,
+    has_query_audit: bool,
+    has_access_grant: bool,
+    has_access_revoke: bool,
+    audit_required: bool,
+    missing_required_audit: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuditPolicyDocument {
+    version: u64,
+    rules: Vec<AuditPolicyRule>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum AuditPolicyRule {
+    #[serde(rename = "require_audit")]
+    RequireAudit {
+        stream: String,
+        resource_class: String,
+    },
+    #[serde(rename = "require_recovery_threshold")]
+    RequireRecoveryThreshold {
+        target_identity_prefix: String,
+        min_approvals: u64,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct LabelClassInfo {
+    class: Option<String>,
+    sensitivity: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LabelClassEndpointState {
+    Unknown,
+    Supported,
+    Unsupported,
+}
+
+enum LabelClassFetchError {
+    Unsupported,
+    Other(anyhow::Error),
+}
+
+#[derive(Debug, Clone)]
+struct RecoveryExecutionEvent {
+    stream: String,
+    seq: u64,
+    target_identity_hex: String,
+    approval_count: usize,
+}
+
+struct StreamMessageCache {
+    reference: HubReference,
+    cache: BTreeMap<String, Vec<StoredMessage>>,
+}
+
+impl StreamMessageCache {
+    fn new(reference: HubReference) -> Self {
+        Self {
+            reference,
+            cache: BTreeMap::new(),
+        }
+    }
+
+    async fn messages(&mut self, stream: &str) -> Result<&[StoredMessage]> {
+        if !self.cache.contains_key(stream) {
+            let messages = fetch_stream_messages(&self.reference, stream).await?;
+            self.cache.insert(stream.to_string(), messages);
+        }
+        Ok(self
+            .cache
+            .get(stream)
+            .map(|messages| messages.as_slice())
+            .expect("stream cache entry present"))
+    }
+}
+
+fn render_audit_query_rows(rows: &[AuditQueryRow], use_json: bool) {
+    if use_json {
+        let payload: Vec<JsonValue> = rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "requester_identity": row.requester_identity.clone(),
+                    "resource_identifier": row.resource_identifier.clone(),
+                    "resource_class": row.resource_class.clone(),
+                    "purpose_code": row.purpose_code.clone(),
+                    "request_time": row.request_time,
+                })
+            })
+            .collect();
+        let output = json!({ "ok": true, "rows": payload });
+        println!("{}", pretty_json(output));
+        return;
+    }
+
+    if rows.is_empty() {
+        println!("no query audit records matched the provided filters");
+        return;
+    }
+
+    println!("requester_identity\tresource_identifier\tresource_class\tpurpose_code\trequest_time");
+    for row in rows {
+        println!(
+            "{}\t{}\t{}\t{}\t{}",
+            row.requester_identity,
+            row.resource_identifier,
+            row.resource_class,
+            row.purpose_code
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .unwrap_or("(none)"),
+            row.request_time
+        );
+    }
+}
+
+fn render_audit_summary(rows: &[AuditStreamSummaryRow], use_json: bool) {
+    if use_json {
+        let payload: Vec<JsonValue> = rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "stream": row.stream.clone(),
+                    "last_seq": row.last_seq,
+                    "label_class": row.label_class.clone(),
+                    "sensitivity": row.sensitivity.clone(),
+                    "schemas": row.schemas.clone(),
+                    "has_query_audit": row.has_query_audit,
+                    "has_access_grant": row.has_access_grant,
+                    "has_access_revoke": row.has_access_revoke,
+                    "audit_required": row.audit_required,
+                    "missing_required_audit": row.missing_required_audit,
+                })
+            })
+            .collect();
+        let output = json!({ "ok": true, "streams": payload });
+        println!("{}", pretty_json(output));
+        return;
+    }
+
+    if rows.is_empty() {
+        println!("no streams discovered for summary");
+        return;
+    }
+
+    for row in rows {
+        println!("stream: {}", row.stream);
+        match row.last_seq {
+            Some(seq) => println!("  last_seq: {seq}"),
+            None => println!("  last_seq: (unknown)"),
+        }
+        match &row.label_class {
+            Some(class) => println!("  label_class: {class}"),
+            None => println!("  label_class: (unknown)"),
+        }
+        match &row.sensitivity {
+            Some(value) => println!("  sensitivity: {value}"),
+            None => println!("  sensitivity: (not set)"),
+        }
+        if row.schemas.is_empty() {
+            println!("  schemas: (none)");
+        } else {
+            println!("  schemas: {}", row.schemas.join(", "));
+        }
+        println!("  query_audit_present: {}", row.has_query_audit);
+        println!("  access_grant_present: {}", row.has_access_grant);
+        println!("  access_revoke_present: {}", row.has_access_revoke);
+        println!("  audit_required: {}", row.audit_required);
+        println!("  missing_required_audit: {}", row.missing_required_audit);
+        println!("---");
+    }
+}
+
+fn render_policy_check(violations: &[String], use_json: bool) {
+    if use_json {
+        let output = json!({
+            "ok": violations.is_empty(),
+            "violations": violations,
+        });
+        println!("{}", pretty_json(output));
+        return;
+    }
+
+    if violations.is_empty() {
+        println!("no policy violations detected");
+    } else {
+        println!("policy violations detected:");
+        for violation in violations {
+            println!("- {violation}");
+        }
+    }
+}
+
+async fn fetch_stream_messages(
+    reference: &HubReference,
+    stream: &str,
+) -> Result<Vec<StoredMessage>> {
+    match reference {
+        HubReference::Local(data_dir) => {
+            let state = load_stream_state(data_dir, stream).await?;
+            Ok(state.messages)
+        }
+        HubReference::Remote(client) => {
+            let query = vec![("stream", stream.to_string())];
+            let result: Result<Vec<RemoteStoredMessage>> = client.get_json("/stream", &query).await;
+            match result {
+                Ok(messages) => Ok(messages.into_iter().map(StoredMessage::from).collect()),
+                Err(err) => {
+                    if let Some(response_err) = err.downcast_ref::<HubResponseError>() {
+                        if response_err.status == reqwest::StatusCode::NOT_FOUND {
+                            return Ok(Vec::new());
+                        }
+                    }
+                    Err(err)
+                }
+            }
+        }
+    }
+}
+
+async fn gather_stream_inventory(reference: &HubReference) -> Result<BTreeMap<String, u64>> {
+    match reference {
+        HubReference::Local(data_dir) => {
+            let state = load_hub_state(data_dir).await?;
+            Ok(state.last_stream_seq)
+        }
+        HubReference::Remote(client) => {
+            let report: RemoteObservabilityReport = client.get_json("/metrics", &[]).await?;
+            Ok(report.last_stream_seq)
+        }
+    }
+}
+
+fn schema_id_from_message(message: &StoredMessage) -> Option<[u8; 32]> {
+    let schema_hex = message.schema.as_ref()?;
+    let bytes = hex::decode(schema_hex).ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&bytes);
+    Some(id)
+}
+
+fn message_schema_matches(message: &StoredMessage, schema_id: [u8; 32]) -> bool {
+    schema_id_from_message(message)
+        .map(|id| id == schema_id)
+        .unwrap_or(false)
+}
+
+fn schema_name_from_id(schema_id: [u8; 32]) -> Option<&'static str> {
+    if schema_id == schema_paid_operation() {
+        Some("paid.operation.v1")
+    } else if schema_id == schema_access_grant() {
+        Some("access.grant.v1")
+    } else if schema_id == schema_access_revoke() {
+        Some("access.revoke.v1")
+    } else if schema_id == schema_delegated_execution() {
+        Some("delegated.execution.v1")
+    } else if schema_id == schema_agreement_definition() {
+        Some("agreement.definition.v1")
+    } else if schema_id == schema_agreement_confirmation() {
+        Some("agreement.confirmation.v1")
+    } else if schema_id == schema_data_publication() {
+        Some("data.publication.v1")
+    } else if schema_id == schema_state_checkpoint() {
+        Some("state.checkpoint.v1")
+    } else if schema_id == schema_recovery_request() {
+        Some("recovery.request.v1")
+    } else if schema_id == schema_recovery_approval() {
+        Some("recovery.approval.v1")
+    } else if schema_id == schema_recovery_execution() {
+        Some("recovery.execution.v1")
+    } else if schema_id == schema_query_audit() {
+        Some("query.audit.v1")
+    } else if schema_id == schema_federation_mirror() {
+        Some("federation.mirror.v1")
+    } else {
+        None
+    }
+}
+
+fn parse_message_payload<T>(message: &StoredMessage) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let body = message.body.as_ref().ok_or_else(|| {
+        anyhow::Error::new(ProtocolError::new(format!(
+            "message {}#{} does not retain its body",
+            message.stream, message.seq
+        )))
+    })?;
+    serde_json::from_str(body)
+        .with_context(|| format!("decoding payload for {}#{}", message.stream, message.seq))
+}
+
+fn classification_is_sensitive(class: Option<&str>, sensitivity: Option<&str>) -> bool {
+    class
+        .map(|value| value.eq_ignore_ascii_case("sensitive"))
+        .unwrap_or(false)
+        || sensitivity
+            .map(|value| value.eq_ignore_ascii_case("sensitive"))
+            .unwrap_or(false)
+}
+
+async fn fetch_stream_label_class(
+    client: &HubHttpClient,
+    stream: &str,
+) -> Result<Option<LabelClassInfo>, LabelClassFetchError> {
+    let label_hex = derive_stream_label_hex(stream).map_err(LabelClassFetchError::Other)?;
+    match fetch_label_class_descriptor(client, &label_hex).await {
+        Ok(descriptor) => {
+            if !descriptor.ok {
+                return Ok(None);
+            }
+            Ok(Some(LabelClassInfo {
+                class: descriptor.class,
+                sensitivity: descriptor.sensitivity,
+            }))
+        }
+        Err(err) => {
+            if label_class_endpoint_missing(&err) {
+                Err(LabelClassFetchError::Unsupported)
+            } else {
+                Err(LabelClassFetchError::Other(err))
+            }
+        }
+    }
+}
+
+fn derive_stream_label_hex(stream: &str) -> Result<String> {
+    let stream_id = cap_stream_id_from_label(stream)
+        .with_context(|| format!("deriving stream identifier for {stream}"))?;
+    let label = Label::derive([], stream_id, 0);
+    Ok(hex::encode(label.as_bytes()))
+}
+
+fn label_class_endpoint_missing(err: &anyhow::Error) -> bool {
+    if let Some(response) = err.downcast_ref::<HubResponseError>() {
+        return response.status == reqwest::StatusCode::NOT_FOUND
+            || response.status == reqwest::StatusCode::METHOD_NOT_ALLOWED;
+    }
+    false
+}
+
+async fn collect_recovery_execution_events(
+    streams: &BTreeSet<String>,
+    cache: &mut StreamMessageCache,
+) -> Result<Vec<RecoveryExecutionEvent>> {
+    let mut events = Vec::new();
+    for stream in streams {
+        let messages = cache.messages(stream).await?;
+        for message in messages {
+            if !message_schema_matches(message, schema_recovery_execution()) {
+                continue;
+            }
+            let payload: RecoveryExecution = parse_message_payload(message)?;
+            events.push(RecoveryExecutionEvent {
+                stream: stream.clone(),
+                seq: message.seq,
+                target_identity_hex: hex::encode(payload.target_identity.as_ref()),
+                approval_count: payload.approval_references.len(),
+            });
+        }
+    }
+    Ok(events)
 }
 
 async fn handle_selftest_core() -> Result<()> {
