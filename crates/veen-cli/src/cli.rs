@@ -8967,8 +8967,8 @@ async fn handle_audit_summary(args: AuditSummaryArgs) -> Result<()> {
     let env_stream_classes = env_descriptor.as_ref().map(|descriptor| {
         descriptor
             .tenants
-            .iter()
-            .map(|(_, tenant)| (tenant.stream_prefix.clone(), tenant.label_class.clone()))
+            .values()
+            .map(|tenant| (tenant.stream_prefix.clone(), tenant.label_class.clone()))
             .collect::<BTreeMap<_, _>>()
     });
     let mut stream_inventory = gather_stream_inventory(&reference).await?;
@@ -8980,8 +8980,8 @@ async fn handle_audit_summary(args: AuditSummaryArgs) -> Result<()> {
         stream_names.extend(env_descriptor.iter().flat_map(|descriptor| {
             descriptor
                 .tenants
-                .iter()
-                .map(|(_, tenant)| tenant.stream_prefix.clone())
+                .values()
+                .map(|tenant| tenant.stream_prefix.clone())
         }));
     }
     let mut summaries = Vec::new();
