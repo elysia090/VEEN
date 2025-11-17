@@ -2,9 +2,17 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+use veen_selftest::{SelftestReport, SelftestReporter};
+
 #[derive(Parser)]
 #[command(name = "veen-selftest", version, about = "Integration harness for VEEN", long_about = None)]
 struct Cli {
+    /// Emit a human-readable summary of the executed invariants.
+    #[arg(long, conflicts_with = "json")]
+    summary: bool,
+    /// Emit a JSON report describing the executed invariants.
+    #[arg(long, conflicts_with = "summary")]
+    json: bool,
     #[command(subcommand)]
     suite: Suite,
 }
@@ -45,18 +53,42 @@ async fn main() -> Result<()> {
     init_tracing();
     let cli = Cli::parse();
 
-    match cli.suite {
-        Suite::Core => veen_selftest::run_core().await,
-        Suite::Props => veen_selftest::run_props(),
-        Suite::Fuzz => veen_selftest::run_fuzz(),
-        Suite::All => veen_selftest::run_all().await,
-        Suite::Federated => veen_selftest::run_federated().await,
-        Suite::Kex1 => veen_selftest::run_kex1().await,
-        Suite::Hardened => veen_selftest::run_hardened().await,
-        Suite::Meta => veen_selftest::run_meta().await,
-        Suite::Plus => veen_selftest::run_plus().await,
-        Suite::Overlays(args) => veen_selftest::run_overlays(args.subset.as_deref()).await,
-    }?;
+    let mut report = if cli.summary || cli.json {
+        Some(SelftestReport::default())
+    } else {
+        None
+    };
+    let mut reporter = SelftestReporter::new(report.as_mut());
+
+    let result = match cli.suite {
+        Suite::Core => veen_selftest::run_core(&mut reporter).await,
+        Suite::Props => veen_selftest::run_props(&mut reporter),
+        Suite::Fuzz => veen_selftest::run_fuzz(&mut reporter),
+        Suite::All => veen_selftest::run_all(&mut reporter).await,
+        Suite::Federated => veen_selftest::run_federated(&mut reporter).await,
+        Suite::Kex1 => veen_selftest::run_kex1(&mut reporter).await,
+        Suite::Hardened => veen_selftest::run_hardened(&mut reporter).await,
+        Suite::Meta => veen_selftest::run_meta(&mut reporter).await,
+        Suite::Plus => veen_selftest::run_plus(&mut reporter).await,
+        Suite::Overlays(args) => {
+            veen_selftest::run_overlays(args.subset.as_deref(), &mut reporter).await
+        }
+    };
+
+    if result.is_ok() {
+        if cli.summary {
+            if let Some(report) = &report {
+                println!("{report}");
+            }
+        } else if cli.json {
+            if let Some(report) = &report {
+                let json = serde_json::to_string_pretty(report)?;
+                println!("{json}");
+            }
+        }
+    }
+
+    result?;
 
     Ok(())
 }

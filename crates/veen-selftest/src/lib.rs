@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt};
 
 use anyhow::{anyhow, ensure, Context, Result};
 use ciborium::value::Value;
@@ -24,6 +24,96 @@ mod overlays;
 mod process_harness;
 
 pub use overlays::run_overlays;
+
+#[derive(Default, serde::Serialize)]
+pub struct SelftestReport {
+    entries: Vec<SelftestGoalReport>,
+}
+
+impl SelftestReport {
+    pub fn add_entry(&mut self, entry: SelftestGoalReport) {
+        self.entries.push(entry);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl fmt::Display for SelftestReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.entries.is_empty() {
+            writeln!(f, "No self-test entries recorded.")?;
+            return Ok(());
+        }
+
+        for (idx, entry) in self.entries.iter().enumerate() {
+            writeln!(f, "Goal: {}", entry.goal)?;
+            if !entry.environment.is_empty() {
+                writeln!(f, "  Environment:")?;
+                for env in &entry.environment {
+                    writeln!(f, "    - {env}")?;
+                }
+            }
+            if !entry.invariants.is_empty() {
+                writeln!(f, "  Invariants:")?;
+                for invariant in &entry.invariants {
+                    writeln!(f, "    - {invariant}")?;
+                }
+            }
+            if !entry.evidence.is_empty() {
+                writeln!(f, "  Evidence:")?;
+                for ev in &entry.evidence {
+                    writeln!(f, "    - {ev}")?;
+                }
+            }
+            if idx + 1 < self.entries.len() {
+                writeln!(f)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct SelftestGoalReport {
+    pub goal: String,
+    pub environment: Vec<String>,
+    pub invariants: Vec<String>,
+    pub evidence: Vec<String>,
+}
+
+impl SelftestGoalReport {
+    pub fn new(goal: impl Into<String>) -> Self {
+        Self {
+            goal: goal.into(),
+            environment: Vec::new(),
+            invariants: Vec::new(),
+            evidence: Vec::new(),
+        }
+    }
+}
+
+pub struct SelftestReporter<'a> {
+    target: Option<&'a mut SelftestReport>,
+}
+
+impl<'a> SelftestReporter<'a> {
+    pub fn new(target: Option<&'a mut SelftestReport>) -> Self {
+        Self { target }
+    }
+
+    pub fn disabled() -> Self {
+        Self { target: None }
+    }
+
+    pub fn record(&mut self, entry: SelftestGoalReport) {
+        if let Some(report) = self.target.as_mut() {
+            report.add_entry(entry);
+        }
+    }
+}
 
 struct SampleData {
     msg: Msg,
@@ -219,7 +309,7 @@ impl SequenceHarness {
 }
 
 /// Execute the core protocol self-test invariants described in the CLI goal.
-pub async fn run_core() -> Result<()> {
+pub async fn run_core(reporter: &mut SelftestReporter<'_>) -> Result<()> {
     let data = SampleData::generate()?;
 
     ensure!(data.msg.has_valid_version(), "unexpected message version");
@@ -291,11 +381,31 @@ pub async fn run_core() -> Result<()> {
         "core protocol self-test satisfied invariants",
     );
 
+    let entry = SelftestGoalReport {
+        goal: "SELFTEST.CORE".into(),
+        environment: vec![
+            format!("label={}", data.msg.label),
+            format!("stream_seq={}", data.stream_seq),
+        ],
+        invariants: vec![
+            "validated message signature and payload hash".into(),
+            "validated attachment roots and tamper-detection".into(),
+            "validated receipt signature and MMR sequencing".into(),
+            "validated process harness core scenario".into(),
+        ],
+        evidence: vec![
+            format!("hub_public={}", hex::encode(data.hub_public)),
+            format!("mmr_root={}", hex::encode(data.mmr_root.as_bytes())),
+            format!("att_root={}", hex::encode(data.att_root.as_bytes())),
+        ],
+    };
+    reporter.record(entry);
+
     Ok(())
 }
 
 /// Execute property-style checks over deterministic scenarios.
-pub fn run_props() -> Result<()> {
+pub fn run_props(reporter: &mut SelftestReporter<'_>) -> Result<()> {
     check_prev_ack_within_stream_bounds()?;
     check_client_sequence_uniqueness_and_increment()?;
     check_mmr_index_consistency_under_resync()?;
@@ -306,11 +416,29 @@ pub fn run_props() -> Result<()> {
     run_overlay_scenario()?;
 
     tracing::info!("property-based VEEN self-tests completed");
+    let entry = SelftestGoalReport {
+        goal: "SELFTEST.PROPS".into(),
+        environment: vec!["harness=sequence+overlay".into()],
+        invariants: vec![
+            "prev_ack bounded by stream state".into(),
+            "client sequence monotonicity".into(),
+            "MMR index consistency".into(),
+            "CBOR determinism".into(),
+            "MMR folding invariance".into(),
+            "attachment root determinism".into(),
+            "schema registry precedence".into(),
+        ],
+        evidence: vec![
+            "overlay wallet scenario executed".into(),
+            "multiple deterministic harness passes".into(),
+        ],
+    };
+    reporter.record(entry);
     Ok(())
 }
 
 /// Execute basic fuzz-style checks by mutating valid artefacts.
-pub fn run_fuzz() -> Result<()> {
+pub fn run_fuzz(reporter: &mut SelftestReporter<'_>) -> Result<()> {
     let data = SampleData::generate()?;
 
     fuzz_truncated_cbor(&data.msg, "MSG")?;
@@ -319,21 +447,38 @@ pub fn run_fuzz() -> Result<()> {
     fuzz_nonce_uniqueness()?;
 
     tracing::info!("fuzz-style VEEN self-tests completed");
+    let entry = SelftestGoalReport {
+        goal: "SELFTEST.FUZZ".into(),
+        environment: vec![format!("label={}", data.msg.label)],
+        invariants: vec![
+            "CBOR decoding rejects truncation".into(),
+            "signature verification rejects tampering".into(),
+            "nonce uniqueness preserved".into(),
+        ],
+        evidence: vec![
+            format!("msg_ct_hash={}", hex::encode(data.msg.ct_hash.as_bytes())),
+            format!(
+                "receipt_root={}",
+                hex::encode(data.receipt.mmr_root.as_bytes())
+            ),
+        ],
+    };
+    reporter.record(entry);
     Ok(())
 }
 
 /// Run the complete self-test suite (core + props + fuzz).
-pub async fn run_all() -> Result<()> {
-    run_core().await?;
-    run_props()?;
-    run_fuzz()?;
+pub async fn run_all(reporter: &mut SelftestReporter<'_>) -> Result<()> {
+    run_core(reporter).await?;
+    run_props(reporter)?;
+    run_fuzz(reporter)?;
     tracing::info!("all VEEN self-test suites completed successfully");
     Ok(())
 }
 
 /// Execute the federated overlay suite covering FED1/AUTH1 goals.
-pub async fn run_federated() -> Result<()> {
-    run_overlays(None)
+pub async fn run_federated(reporter: &mut SelftestReporter<'_>) -> Result<()> {
+    run_overlays(None, reporter)
         .await
         .context("running federated overlay scenarios")?;
     tracing::info!("federated VEEN self-tests completed");
@@ -341,32 +486,50 @@ pub async fn run_federated() -> Result<()> {
 }
 
 /// Placeholder for lifecycle and revocation (KEX1+) self-tests.
-pub async fn run_kex1() -> Result<()> {
+pub async fn run_kex1(reporter: &mut SelftestReporter<'_>) -> Result<()> {
     tracing::info!("kex1+ lifecycle self-tests completed (placeholder)");
+    reporter.record(SelftestGoalReport {
+        goal: "SELFTEST.KEX1".into(),
+        environment: vec!["scenario=placeholder".into()],
+        invariants: vec!["reserved for lifecycle self-tests".into()],
+        evidence: vec!["no execution (placeholder)".into()],
+    });
     Ok(())
 }
 
 /// Placeholder for hardened profile (SH1+) self-tests.
-pub async fn run_hardened() -> Result<()> {
+pub async fn run_hardened(reporter: &mut SelftestReporter<'_>) -> Result<()> {
     tracing::info!("hardened self-tests completed (placeholder)");
+    reporter.record(SelftestGoalReport {
+        goal: "SELFTEST.HARDENED".into(),
+        environment: vec!["scenario=placeholder".into()],
+        invariants: vec!["reserved for hardened profile tests".into()],
+        evidence: vec!["no execution (placeholder)".into()],
+    });
     Ok(())
 }
 
 /// Placeholder for label and schema overlays (META0+) self-tests.
-pub async fn run_meta() -> Result<()> {
+pub async fn run_meta(reporter: &mut SelftestReporter<'_>) -> Result<()> {
     tracing::info!("meta overlay self-tests completed (placeholder)");
+    reporter.record(SelftestGoalReport {
+        goal: "SELFTEST.META".into(),
+        environment: vec!["scenario=placeholder".into()],
+        invariants: vec!["reserved for meta overlay tests".into()],
+        evidence: vec!["no execution (placeholder)".into()],
+    });
     Ok(())
 }
 
 /// Execute the v0.0.1+ aggregated suite.
-pub async fn run_plus() -> Result<()> {
-    run_core().await?;
-    run_props()?;
-    run_fuzz()?;
-    run_federated().await?;
-    run_kex1().await?;
-    run_hardened().await?;
-    run_meta().await?;
+pub async fn run_plus(reporter: &mut SelftestReporter<'_>) -> Result<()> {
+    run_core(reporter).await?;
+    run_props(reporter)?;
+    run_fuzz(reporter)?;
+    run_federated(reporter).await?;
+    run_kex1(reporter).await?;
+    run_hardened(reporter).await?;
+    run_meta(reporter).await?;
     tracing::info!("plus self-test suite completed successfully");
     Ok(())
 }
