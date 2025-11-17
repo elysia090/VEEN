@@ -522,11 +522,12 @@ async fn goals_pow_prefilter_enforced() -> Result<()> {
     let client_id = read_client_id(&client_dir.join("identity_card.pub"))?;
     let http = Client::new();
     let submit_endpoint = format!("http://{}/submit", runtime.listen_addr());
+    let pow_stream = "core/pow";
 
     let forbidden = http
         .post(&submit_endpoint)
         .json(&SubmitRequest {
-            stream: "core/pow".to_string(),
+            stream: pow_stream.to_string(),
             client_id: client_id.clone(),
             payload: serde_json::json!({ "text": "pow" }),
             attachments: None,
@@ -539,14 +540,17 @@ async fn goals_pow_prefilter_enforced() -> Result<()> {
         .send()
         .await
         .context("submitting message without pow cookie")?;
-    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    let forbidden_status = forbidden.status();
+    assert_eq!(forbidden_status, StatusCode::FORBIDDEN);
 
-    let pow_envelope = solve_pow_for_tests(vec![0x42; 16], 10);
+    let pow_challenge = vec![0x42; 16];
+    let pow_difficulty = 10;
+    let pow_envelope = solve_pow_for_tests(pow_challenge.clone(), pow_difficulty);
 
     let success: SubmitResponse = http
         .post(&submit_endpoint)
         .json(&SubmitRequest {
-            stream: "core/pow".to_string(),
+            stream: pow_stream.to_string(),
             client_id,
             payload: serde_json::json!({ "text": "pow" }),
             attachments: None,
@@ -565,7 +569,17 @@ async fn goals_pow_prefilter_enforced() -> Result<()> {
         .await
         .context("parsing pow submit response")?;
 
-    assert_eq!(success.stream, "core/pow");
+    assert_eq!(success.stream, pow_stream);
+
+    println!(
+        "goal: POW.PREFILTER\n  stream: {}\n  pow.challenge: {}\n  pow.difficulty: {}\n  forbidden.status: {}\n  submit.seq: {}\n  submit.mmr: {}\n  pow.cookie: accepted",
+        pow_stream,
+        hex::encode(pow_challenge),
+        pow_difficulty,
+        forbidden_status,
+        success.seq,
+        success.mmr_root,
+    );
 
     runtime.shutdown().await?;
     Ok(())
