@@ -41,7 +41,8 @@ use veen_core::operation::{
     schema_federation_mirror, schema_paid_operation, schema_query_audit, schema_recovery_approval,
     schema_recovery_execution, schema_recovery_request, schema_state_checkpoint, AccessGrant,
     AccessRevoke, AccountId, AgreementConfirmation, AgreementDefinition, DelegatedExecution,
-    OpaqueId, PaidOperation, StateCheckpoint, ACCOUNT_ID_LEN, OPERATION_ID_LEN,
+    OpaqueId, PaidOperation, RecoveryApproval, RecoveryExecution, RecoveryRequest, StateCheckpoint,
+    ACCOUNT_ID_LEN, OPERATION_ID_LEN,
 };
 use veen_core::CAP_TOKEN_VERSION;
 use veen_core::{
@@ -780,6 +781,9 @@ enum Command {
     /// Operation overlay helpers.
     #[command(subcommand)]
     Operation(OperationCommand),
+    /// Recovery procedure helpers.
+    #[command(subcommand)]
+    Recovery(RecoveryCommand),
     /// Revocation helpers.
     #[command(subcommand)]
     Revoke(RevokeCommand),
@@ -1007,6 +1011,12 @@ enum OperationCommand {
     /// Submit a delegated.execution.v1 payload.
     #[command(name = "delegated")]
     Delegated(OperationDelegatedArgs),
+}
+
+#[derive(Subcommand)]
+enum RecoveryCommand {
+    /// Show the recovery timeline for an identity.
+    Timeline(RecoveryTimelineArgs),
 }
 
 #[derive(Subcommand)]
@@ -1688,6 +1698,18 @@ struct AgreementStatusArgs {
     agreement_id: String,
     #[arg(long)]
     version: Option<u64>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct RecoveryTimelineArgs {
+    #[command(flatten)]
+    hub: HubLocatorArgs,
+    #[arg(long)]
+    stream: String,
+    #[arg(long = "target-identity", value_name = "HEX32")]
+    target_identity: String,
     #[arg(long)]
     json: bool,
 }
@@ -2900,6 +2922,9 @@ async fn run_cli() -> Result<()> {
             OperationCommand::AccessGrant(args) => handle_operation_access_grant(args).await,
             OperationCommand::AccessRevoke(args) => handle_operation_access_revoke(args).await,
             OperationCommand::Delegated(args) => handle_operation_delegated(args).await,
+        },
+        Command::Recovery(cmd) => match cmd {
+            RecoveryCommand::Timeline(args) => handle_recovery_timeline(args).await,
         },
         Command::Revoke(cmd) => match cmd {
             RevokeCommand::Publish(args) => handle_revoke_publish(args).await,
@@ -6313,6 +6338,199 @@ fn render_agreement_status(output: &AgreementStatusOutput, use_json: bool) {
         );
         if let Some(ts) = party.decision_time {
             println!("  decision_time: {ts}");
+        }
+    }
+}
+
+async fn handle_recovery_timeline(args: RecoveryTimelineArgs) -> Result<()> {
+    let target_identity = parse_principal_id_hex(&args.target_identity)?;
+    let use_json = json_output_enabled(args.json);
+    let reference = hub_reference_from_locator(&args.hub, "recovery timeline").await?;
+    let (messages, _) = load_stream_messages(reference, &args.stream, 0).await?;
+    let entries = build_recovery_timeline(&messages, &target_identity)?;
+    let output = RecoveryTimelineOutput {
+        stream: args.stream,
+        target_identity: hex::encode(target_identity.as_bytes()),
+        entries,
+    };
+    render_recovery_timeline(&output, use_json);
+    log_cli_goal("CLI.RECOVERY.TIMELINE");
+    Ok(())
+}
+
+fn build_recovery_timeline(
+    messages: &[StoredMessage],
+    target_identity: &PrincipalId,
+) -> Result<Vec<RecoveryTimelineEntry>> {
+    let request_schema = hex::encode(schema_recovery_request());
+    let approval_schema = hex::encode(schema_recovery_approval());
+    let execution_schema = hex::encode(schema_recovery_execution());
+    let mut entries = Vec::new();
+
+    for message in messages {
+        let schema_hex = match message.schema.as_deref() {
+            Some(value) => value,
+            None => continue,
+        };
+        if schema_hex.eq_ignore_ascii_case(&request_schema) {
+            let body = message.body.as_ref().ok_or_else(|| {
+                ProtocolError::new(format!(
+                    "stream {}#{} does not contain stored body for recovery request",
+                    message.stream, message.seq
+                ))
+            })?;
+            let payload: RecoveryRequest = serde_json::from_str(body).with_context(|| {
+                format!(
+                    "decoding recovery.request.v1 payload for {}#{}",
+                    message.stream, message.seq
+                )
+            })?;
+            if payload.target_identity != *target_identity {
+                continue;
+            }
+            entries.push(RecoveryTimelineEntry {
+                kind: RecoveryTimelineEntryKind::Request,
+                stream_seq: message.seq,
+                msg_id: hex::encode(compute_message_leaf_hash(message)?.as_bytes()),
+                requested_new_identity: Some(hex::encode(
+                    payload.requested_new_identity.as_bytes(),
+                )),
+                new_identity: None,
+                approver_identity: None,
+                decision: None,
+            });
+        } else if schema_hex.eq_ignore_ascii_case(&approval_schema) {
+            let body = message.body.as_ref().ok_or_else(|| {
+                ProtocolError::new(format!(
+                    "stream {}#{} does not contain stored body for recovery approval",
+                    message.stream, message.seq
+                ))
+            })?;
+            let payload: RecoveryApproval = serde_json::from_str(body).with_context(|| {
+                format!(
+                    "decoding recovery.approval.v1 payload for {}#{}",
+                    message.stream, message.seq
+                )
+            })?;
+            if payload.target_identity != *target_identity {
+                continue;
+            }
+            entries.push(RecoveryTimelineEntry {
+                kind: RecoveryTimelineEntryKind::Approval,
+                stream_seq: message.seq,
+                msg_id: hex::encode(compute_message_leaf_hash(message)?.as_bytes()),
+                requested_new_identity: Some(hex::encode(
+                    payload.requested_new_identity.as_bytes(),
+                )),
+                new_identity: None,
+                approver_identity: Some(hex::encode(payload.approver_identity.as_bytes())),
+                decision: Some(payload.decision),
+            });
+        } else if schema_hex.eq_ignore_ascii_case(&execution_schema) {
+            let body = message.body.as_ref().ok_or_else(|| {
+                ProtocolError::new(format!(
+                    "stream {}#{} does not contain stored body for recovery execution",
+                    message.stream, message.seq
+                ))
+            })?;
+            let payload: RecoveryExecution = serde_json::from_str(body).with_context(|| {
+                format!(
+                    "decoding recovery.execution.v1 payload for {}#{}",
+                    message.stream, message.seq
+                )
+            })?;
+            if payload.target_identity != *target_identity {
+                continue;
+            }
+            entries.push(RecoveryTimelineEntry {
+                kind: RecoveryTimelineEntryKind::Execution,
+                stream_seq: message.seq,
+                msg_id: hex::encode(compute_message_leaf_hash(message)?.as_bytes()),
+                requested_new_identity: None,
+                new_identity: Some(hex::encode(payload.new_identity.as_bytes())),
+                approver_identity: None,
+                decision: None,
+            });
+        }
+    }
+
+    Ok(entries)
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RecoveryTimelineOutput {
+    stream: String,
+    target_identity: String,
+    entries: Vec<RecoveryTimelineEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RecoveryTimelineEntry {
+    kind: RecoveryTimelineEntryKind,
+    stream_seq: u64,
+    msg_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_new_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approver_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum RecoveryTimelineEntryKind {
+    Request,
+    Approval,
+    Execution,
+}
+
+impl RecoveryTimelineEntryKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Approval => "approval",
+            Self::Execution => "execution",
+        }
+    }
+}
+
+fn render_recovery_timeline(output: &RecoveryTimelineOutput, use_json: bool) {
+    if use_json {
+        match serde_json::to_string_pretty(output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => match serde_json::to_string(output) {
+                Ok(rendered) => println!("{rendered}"),
+                Err(_) => println!("{}", "{\"entries\":[]}"),
+            },
+        }
+        return;
+    }
+
+    println!("stream: {}", output.stream);
+    println!("target_identity: {}", output.target_identity);
+    if output.entries.is_empty() {
+        println!("entries: (none)");
+        return;
+    }
+    println!("entries:");
+    for entry in &output.entries {
+        println!("- type: {}", entry.kind.as_str());
+        println!("  stream_seq: {}", entry.stream_seq);
+        println!("  msg_id: {}", entry.msg_id);
+        if let Some(ref requested) = entry.requested_new_identity {
+            println!("  requested_new_identity: {}", requested);
+        }
+        if let Some(ref new_identity) = entry.new_identity {
+            println!("  new_identity: {}", new_identity);
+        }
+        if let Some(ref approver) = entry.approver_identity {
+            println!("  approver_identity: {}", approver);
+        }
+        if let Some(ref decision) = entry.decision {
+            println!("  decision: {}", decision);
         }
     }
 }
