@@ -99,6 +99,8 @@ async fn goals_audit_anchor() -> Result<()> {
         .error_for_status()
         .context("hub rejected anchor request")?;
 
+    let backend_url = format!("http://{}", pseudo_backend.listen_addr());
+
     runtime.shutdown().await?;
     pseudo_backend.shutdown().await?;
 
@@ -146,6 +148,19 @@ async fn goals_audit_anchor() -> Result<()> {
         "anchor log did not record pseudo backend binding"
     );
 
+    let label_hex = hex::encode(decoded.label_curr.as_bytes());
+    let checkpoint_mmr_root = hex::encode(decoded.mmr_root.as_bytes());
+    let report = format_goal_audit_anchor_report(
+        stream,
+        submit.seq,
+        &label_hex,
+        &backend_url,
+        &checkpoint_mmr_root,
+        &stored.mmr_root,
+        &record.mmr_root,
+    );
+    println!("{report}");
+
     Ok(())
 }
 
@@ -187,6 +202,10 @@ impl PseudoAnchor {
             join: Arc::new(Mutex::new(Some(join))),
             addr,
         })
+    }
+
+    fn listen_addr(&self) -> SocketAddr {
+        self.addr
     }
 
     async fn submit(
@@ -267,6 +286,35 @@ struct PseudoAnchorRecord {
     mmr_root: String,
     #[serde(with = "serde_bytes")]
     checkpoint: Vec<u8>,
+}
+
+fn format_goal_audit_anchor_report(
+    stream: &str,
+    upto_seq: u64,
+    label_hex: &str,
+    backend_url: &str,
+    checkpoint_mmr_root: &str,
+    pseudo_backend_mmr_root: &str,
+    anchor_log_mmr_root: &str,
+) -> String {
+    format!(
+        concat!(
+            "goal: AUDIT.ANCHOR\n",
+            "stream: {stream}\n",
+            "label/upto_seq: {label}/{upto}\n",
+            "backend: {backend}\n",
+            "mmr_root.checkpoint: {checkpoint}\n",
+            "mmr_root.pseudo_backend: {pseudo}\n",
+            "mmr_root.anchor_log: {anchor}"
+        ),
+        stream = stream,
+        label = label_hex,
+        upto = upto_seq,
+        backend = backend_url,
+        checkpoint = checkpoint_mmr_root,
+        pseudo = pseudo_backend_mmr_root,
+        anchor = anchor_log_mmr_root,
+    )
 }
 
 fn generate_client_id() -> SigningKey {
