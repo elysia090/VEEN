@@ -68,6 +68,11 @@ use veen_core::{
 };
 use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::runtime::HubRuntime;
+use veen_hub::storage::{
+    self, ANCHORS_DIR, ATTACHMENTS_DIR, CHECKPOINTS_FILE, CRDT_DIR, HUB_KEY_FILE, HUB_PID_FILE,
+    MESSAGES_DIR, PAYLOADS_FILE, RECEIPTS_FILE, REVOCATIONS_FILE, STATE_DIR, STREAMS_DIR,
+    TLS_INFO_FILE,
+};
 
 #[cfg(unix)]
 use nix::errno::Errno;
@@ -94,22 +99,8 @@ const HUB_STATE_VERSION: u8 = 1;
 const HUB_KEY_VERSION: u8 = 1;
 
 const HUB_STATE_FILE: &str = "hub_state.json";
-const HUB_KEY_FILE: &str = "hub_key.cbor";
-const HUB_PID_FILE: &str = "hub.pid";
-const RECEIPTS_FILE: &str = "receipts.cborseq";
-const PAYLOADS_FILE: &str = "payloads.cborseq";
-const CHECKPOINTS_FILE: &str = "checkpoints.cborseq";
-const ANCHORS_DIR: &str = "anchors";
-const STATE_DIR: &str = "state";
-const STREAMS_DIR: &str = "streams";
-const MESSAGES_DIR: &str = "messages";
-const CAP_TOKENS_DIR: &str = "capabilities";
-const CRDT_DIR: &str = "crdt";
 const ANCHOR_LOG_FILE: &str = "anchor_log.json";
 const RETENTION_CONFIG_FILE: &str = "retention.json";
-const TLS_INFO_FILE: &str = "tls_info.json";
-const ATTACHMENTS_DIR: &str = "attachments";
-const REVOCATIONS_FILE: &str = "revocations.json";
 const ENV_DESCRIPTOR_VERSION: u64 = 1;
 
 type JsonMap = serde_json::Map<String, JsonValue>;
@@ -3029,7 +3020,7 @@ async fn run_hub_foreground(args: HubStartArgs) -> Result<()> {
         }
     }
 
-    ensure_data_dir_layout(&args.data_dir).await?;
+    storage::ensure_data_dir_layout(&args.data_dir).await?;
 
     let HubStartArgs {
         listen,
@@ -3078,7 +3069,7 @@ async fn run_hub_foreground(args: HubStartArgs) -> Result<()> {
 
     save_hub_state(&data_dir, &state).await?;
     write_pid_file(&data_dir, process::id()).await?;
-    ensure_tls_info(&data_dir).await?;
+    storage::ensure_tls_snapshot(&data_dir).await?;
 
     tracing::info!(
         listen = %actual_listen,
@@ -4339,7 +4330,7 @@ async fn send_message_with_reference(
 }
 
 async fn send_message_local(data_dir: PathBuf, args: SendArgs) -> Result<SendOutcome> {
-    ensure_data_dir_layout(&data_dir).await?;
+    storage::ensure_data_dir_layout(&data_dir).await?;
 
     let mut hub_state = load_hub_state(&data_dir).await?;
     let mut stream_state = load_stream_state(&data_dir, &args.stream).await?;
@@ -7701,95 +7692,11 @@ async fn handle_selftest_plus() -> Result<()> {
     Err(anyhow::Error::new(SelftestFailure::new(err)))
 }
 
-async fn ensure_data_dir_layout(data_dir: &Path) -> Result<()> {
-    fs::create_dir_all(data_dir)
-        .await
-        .with_context(|| format!("creating data dir {}", data_dir.display()))?;
-
-    ensure_file(&data_dir.join(RECEIPTS_FILE)).await?;
-    ensure_file(&data_dir.join(PAYLOADS_FILE)).await?;
-    ensure_file(&data_dir.join(CHECKPOINTS_FILE)).await?;
-    fs::create_dir_all(data_dir.join(ANCHORS_DIR))
-        .await
-        .with_context(|| format!("creating anchors dir under {}", data_dir.display()))?;
-    let state_dir = data_dir.join(STATE_DIR);
-    fs::create_dir_all(&state_dir)
-        .await
-        .with_context(|| format!("creating state dir under {}", data_dir.display()))?;
-    fs::create_dir_all(state_dir.join(STREAMS_DIR))
-        .await
-        .with_context(|| format!("creating streams dir under {}", data_dir.display()))?;
-    fs::create_dir_all(state_dir.join(MESSAGES_DIR))
-        .await
-        .with_context(|| format!("creating messages dir under {}", data_dir.display()))?;
-    fs::create_dir_all(state_dir.join(CAP_TOKENS_DIR))
-        .await
-        .with_context(|| format!("creating capabilities dir under {}", data_dir.display()))?;
-    fs::create_dir_all(state_dir.join(CRDT_DIR))
-        .await
-        .with_context(|| format!("creating CRDT dir under {}", data_dir.display()))?;
-    fs::create_dir_all(state_dir.join(ATTACHMENTS_DIR))
-        .await
-        .with_context(|| format!("creating attachments dir under {}", data_dir.display()))?;
-
-    Ok(())
-}
-
 async fn flush_hub_storage(data_dir: &Path) -> Result<()> {
-    flush_file_if_exists(&data_dir.join(RECEIPTS_FILE)).await?;
-    flush_file_if_exists(&data_dir.join(PAYLOADS_FILE)).await?;
-    flush_file_if_exists(&data_dir.join(CHECKPOINTS_FILE)).await?;
-    flush_file_if_exists(&data_dir.join(STATE_DIR).join(ANCHOR_LOG_FILE)).await?;
-    Ok(())
-}
-
-async fn flush_file_if_exists(path: &Path) -> Result<()> {
-    if !fs::try_exists(path)
-        .await
-        .with_context(|| format!("checking {} before flush", path.display()))?
-    {
-        return Ok(());
-    }
-
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .await
-        .with_context(|| format!("opening {} for flush", path.display()))?;
-    file.sync_all()
-        .await
-        .with_context(|| format!("flushing {}", path.display()))?;
-    Ok(())
-}
-
-async fn ensure_file(path: &Path) -> Result<()> {
-    if fs::try_exists(path)
-        .await
-        .with_context(|| format!("checking {}", path.display()))?
-    {
-        return Ok(());
-    }
-
-    fs::write(path, &[])
-        .await
-        .with_context(|| format!("initialising {}", path.display()))?;
-    Ok(())
-}
-
-async fn ensure_tls_info(data_dir: &Path) -> Result<()> {
-    let path = data_dir.join(STATE_DIR).join(TLS_INFO_FILE);
-    if fs::try_exists(&path)
-        .await
-        .with_context(|| format!("checking TLS info file {}", path.display()))?
-    {
-        return Ok(());
-    }
-
-    let info = TlsInfoSnapshot::default();
-    write_json_file(&path, &info)
-        .await
-        .with_context(|| format!("writing TLS metadata to {}", path.display()))?;
+    storage::flush_file_if_exists(&data_dir.join(RECEIPTS_FILE)).await?;
+    storage::flush_file_if_exists(&data_dir.join(PAYLOADS_FILE)).await?;
+    storage::flush_file_if_exists(&data_dir.join(CHECKPOINTS_FILE)).await?;
+    storage::flush_file_if_exists(&data_dir.join(STATE_DIR).join(ANCHOR_LOG_FILE)).await?;
     Ok(())
 }
 
