@@ -90,8 +90,9 @@ async fn goals_k8s_disposable_mesh() -> Result<()> {
             messages.into_iter().map(|entry| entry.message).collect()
         }
     };
+    let streamed_messages = messages.len();
     ensure!(
-        messages.len() == 1,
+        streamed_messages == 1,
         "expected single message in disposable mesh stream"
     );
     ensure!(
@@ -112,17 +113,17 @@ async fn goals_k8s_disposable_mesh() -> Result<()> {
             "goal: K8S.DISPOSABLE_MESH\n",
             "pvc: {pvc}\n",
             "hub_data: {hub_data}\n",
-            "messages.sent/streamed: {sent}/{streamed}\n",
-            "submit.last.seq: {seq}\n",
-            "submit.last.mmr_root: {mmr_root}\n",
-            "state_dir.exists: {state_exists}",
+            "stream: {stream}\n",
+            "submitted.seq/mmr: {seq}/{mmr_root}\n",
+            "messages.streamed: {streamed}\n",
+            "hub-data/state/: {state_exists}",
         ),
         pvc = pvc_dir.display(),
         hub_data = hub_data.display(),
-        sent = 1,
-        streamed = messages.len(),
+        stream = stream,
         seq = first.seq,
         mmr_root = first.mmr_root,
+        streamed = streamed_messages,
         state_exists = state_exists,
     );
 
