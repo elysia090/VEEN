@@ -842,6 +842,9 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
     .context("issuing capability for client B")?;
 
     let listen_addr = next_listen_addr()?;
+    let stream_quota = "core/quota";
+    let stream_revoke = "core/revoke";
+    let stream_lifetime = "core/lifetime";
     let config = HubRuntimeConfig::from_sources(
         listen_addr,
         hub_dir.path().to_path_buf(),
@@ -911,11 +914,12 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
     let client_revoke_id = read_client_id(&client_revoke_dir.join("identity_card.pub"))?;
     let token_hash_revoke = hex::encode(cap_token_hash(&cap_revoke_bytes));
 
+    let mut quota_seqs = Vec::new();
     for index in 0..2 {
-        let _: SubmitResponse = http
+        let quota_response: SubmitResponse = http
             .post(&submit_endpoint)
             .json(&SubmitRequest {
-                stream: "core/quota".to_string(),
+                stream: stream_quota.to_string(),
                 client_id: client_a_id.clone(),
                 payload: serde_json::json!({ "msg": index }),
                 attachments: None,
@@ -933,12 +937,13 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
             .json()
             .await
             .context("decoding quota submit response")?;
+        quota_seqs.push(quota_response.seq);
     }
 
     let quota_fail = http
         .post(&submit_endpoint)
         .json(&SubmitRequest {
-            stream: "core/quota".to_string(),
+            stream: stream_quota.to_string(),
             client_id: client_a_id.clone(),
             payload: serde_json::json!({ "msg": "over" }),
             attachments: None,
@@ -951,13 +956,15 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         .send()
         .await
         .context("submitting over-quota message")?;
-    assert_eq!(quota_fail.status(), StatusCode::FORBIDDEN);
+    let quota_fail_status = quota_fail.status();
+    assert_eq!(quota_fail_status, StatusCode::FORBIDDEN);
     let quota_body = quota_fail
         .text()
         .await
         .context("reading quota failure body")?;
+    let quota_error_code = quota_body.contains("E.AUTH");
     assert!(
-        quota_body.contains("E.AUTH"),
+        quota_error_code,
         "expected quota failure to return E.AUTH, got: {quota_body}"
     );
 
@@ -980,7 +987,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
     let revoked = http
         .post(&submit_endpoint)
         .json(&SubmitRequest {
-            stream: "core/revoke".to_string(),
+            stream: stream_revoke.to_string(),
             client_id: client_revoke_id.clone(),
             payload: serde_json::json!({ "msg": "revoked" }),
             attachments: None,
@@ -993,13 +1000,15 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         .send()
         .await
         .context("submitting message during revocation TTL")?;
-    assert_eq!(revoked.status(), StatusCode::FORBIDDEN);
+    let revoked_status = revoked.status();
+    assert_eq!(revoked_status, StatusCode::FORBIDDEN);
     let revoked_body = revoked
         .text()
         .await
         .context("reading revocation failure body")?;
+    let revoked_error_code = revoked_body.contains("E.AUTH");
     assert!(
-        revoked_body.contains("E.AUTH"),
+        revoked_error_code,
         "expected client-id revocation to return E.AUTH, got: {revoked_body}"
     );
 
@@ -1008,7 +1017,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
     let post_ttl = http
         .post(&submit_endpoint)
         .json(&SubmitRequest {
-            stream: "core/revoke".to_string(),
+            stream: stream_revoke.to_string(),
             client_id: client_revoke_id.clone(),
             payload: serde_json::json!({ "msg": "restored" }),
             attachments: None,
@@ -1021,18 +1030,19 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         .send()
         .await
         .context("submitting message after revocation TTL")?;
-    if !post_ttl.status().is_success() {
-        let status = post_ttl.status();
+    let post_ttl_status = post_ttl.status();
+    if !post_ttl_status.is_success() {
         let body = post_ttl
             .text()
             .await
             .unwrap_or_else(|_| "<failed to read body>".to_string());
-        panic!("post-TTL submission returned {status}: {body}");
+        panic!("post-TTL submission returned {post_ttl_status}: {body}");
     }
-    let _: SubmitResponse = post_ttl
+    let post_ttl_response: SubmitResponse = post_ttl
         .json()
         .await
         .context("decoding post-TTL submit response")?;
+    let post_ttl_seq = post_ttl_response.seq;
 
     run_cli([
         "revoke",
@@ -1051,7 +1061,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
     let cap_revoked = http
         .post(&submit_endpoint)
         .json(&SubmitRequest {
-            stream: "core/revoke".to_string(),
+            stream: stream_revoke.to_string(),
             client_id: client_revoke_id.clone(),
             payload: serde_json::json!({ "msg": "cap revoked" }),
             attachments: None,
@@ -1064,13 +1074,15 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         .send()
         .await
         .context("submitting message after cap-token revocation")?;
-    assert_eq!(cap_revoked.status(), StatusCode::FORBIDDEN);
+    let cap_revoked_status = cap_revoked.status();
+    assert_eq!(cap_revoked_status, StatusCode::FORBIDDEN);
     let cap_body = cap_revoked
         .text()
         .await
         .context("reading cap-token revocation body")?;
+    let cap_revoked_error_code = cap_body.contains("E.CAP");
     assert!(
-        cap_body.contains("E.CAP"),
+        cap_revoked_error_code,
         "expected cap-token revocation to return E.CAP, got: {cap_body}"
     );
 
@@ -1096,10 +1108,10 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
     let auth_ref_b = hex::encode(auth_b.auth_ref.as_ref());
     let client_b_id = read_client_id(&client_b_dir.join("identity_card.pub"))?;
 
-    let _: SubmitResponse = http
+    let lifetime_initial: SubmitResponse = http
         .post(&submit_endpoint)
         .json(&SubmitRequest {
-            stream: "core/lifetime".to_string(),
+            stream: stream_lifetime.to_string(),
             client_id: client_b_id.clone(),
             payload: serde_json::json!({ "msg": "first" }),
             attachments: None,
@@ -1123,11 +1135,11 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
     let lifetime_fail = http
         .post(&submit_endpoint)
         .json(&SubmitRequest {
-            stream: "core/lifetime".to_string(),
+            stream: stream_lifetime.to_string(),
             client_id: client_b_id,
             payload: serde_json::json!({ "msg": "expired" }),
             attachments: None,
-            auth_ref: Some(auth_ref_b),
+            auth_ref: Some(auth_ref_b.clone()),
             expires_at: None,
             schema: None,
             idem: None,
@@ -1136,14 +1148,32 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         .send()
         .await
         .context("submitting lifetime-expired message")?;
-    assert_eq!(lifetime_fail.status(), StatusCode::FORBIDDEN);
+    let lifetime_fail_status = lifetime_fail.status();
+    assert_eq!(lifetime_fail_status, StatusCode::FORBIDDEN);
     let lifetime_body = lifetime_fail
         .text()
         .await
         .context("reading lifetime failure body")?;
+    let lifetime_error_code = lifetime_body.contains("E.AUTH");
     assert!(
-        lifetime_body.contains("E.AUTH"),
+        lifetime_error_code,
         "expected lifetime enforcement to return E.AUTH, got: {lifetime_body}"
+    );
+
+    println!(
+        "goal: REVOCATION.ADMISSION\n  hub.url: {hub_url}\n  streams: [{stream_quota}, {stream_revoke}, {stream_lifetime}]\n  auth_ref.quota: {auth_ref_quota}\n  auth_ref.revoke: {auth_ref_revoke}\n  auth_ref.lifetime: {auth_ref_b}\n  revoke.hash: {token_hash_revoke}\n  quota.seqs: {:?}\n  quota.forbidden.status: {}\n  quota.error.E.AUTH: {}\n  revoke.forbidden.status: {}\n  revoke.error.E.AUTH: {}\n  revoke.cap.status: {}\n  revoke.cap.error.E.CAP: {}\n  revoke.restored.status: {}\n  revoke.restored.seq: {post_ttl_seq}\n  lifetime.initial.seq: {}\n  lifetime.expiry.status: {}\n  lifetime.error.E.AUTH: {}\n  lifetime.limit.sec: {}",
+        quota_seqs,
+        quota_fail_status,
+        quota_error_code,
+        revoked_status,
+        revoked_error_code,
+        cap_revoked_status,
+        cap_revoked_error_code,
+        post_ttl_status,
+        lifetime_initial.seq,
+        lifetime_fail_status,
+        lifetime_error_code,
+        3,
     );
 
     runtime.shutdown().await?;
