@@ -6503,7 +6503,7 @@ fn render_recovery_timeline(output: &RecoveryTimelineOutput, use_json: bool) {
             Ok(rendered) => println!("{rendered}"),
             Err(_) => match serde_json::to_string(output) {
                 Ok(rendered) => println!("{rendered}"),
-                Err(_) => println!("{}", "{\"entries\":[]}"),
+                Err(_) => println!("{{\"entries\":[]}}"),
             },
         }
         return;
@@ -7379,7 +7379,7 @@ fn render_snapshot_verify(
             Ok(rendered) => println!("{rendered}"),
             Err(_) => match serde_json::to_string(output) {
                 Ok(rendered) => println!("{rendered}"),
-                Err(_) => println!("{}", "{\"consistent\":false}"),
+                Err(_) => println!("{{\"consistent\":false}}"),
             },
         }
         return Ok(());
@@ -10121,9 +10121,10 @@ mod tests {
     fn snapshot_wallet_fold_computes_balance() -> anyhow::Result<()> {
         let account = AccountId::from_slice(&[0x33u8; ACCOUNT_ID_LEN])?;
         let peer = AccountId::from_slice(&[0x44u8; ACCOUNT_ID_LEN])?;
-        let mut messages = Vec::new();
-        messages.push(test_paid_message(1, &account, &peer, 50)?);
-        messages.push(test_paid_message(2, &peer, &account, 20)?);
+        let messages = vec![
+            test_paid_message(1, &account, &peer, 50)?,
+            test_paid_message(2, &peer, &account, 20)?,
+        ];
 
         let summary = fold_wallet_ledger_snapshot(&messages, 2, &account)?;
         assert_eq!(summary.account_id, hex::encode(account.as_bytes()));
