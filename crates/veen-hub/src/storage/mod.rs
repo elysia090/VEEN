@@ -141,7 +141,8 @@ impl HubStorage {
     }
 }
 
-async fn ensure_data_dir_layout(data_dir: &Path) -> Result<()> {
+/// Ensure the canonical hub data directory layout exists under `data_dir`.
+pub async fn ensure_data_dir_layout(data_dir: &Path) -> Result<()> {
     fs::create_dir_all(data_dir)
         .await
         .with_context(|| format!("creating hub data directory {}", data_dir.display()))?;
@@ -207,7 +208,8 @@ async fn ensure_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn ensure_tls_snapshot(data_dir: &Path) -> Result<()> {
+/// Create the default TLS metadata snapshot if it is missing.
+pub async fn ensure_tls_snapshot(data_dir: &Path) -> Result<()> {
     let path = data_dir.join(STATE_DIR).join(TLS_INFO_FILE);
     if fs::try_exists(&path)
         .await
@@ -264,7 +266,8 @@ async fn remove_pid_file(data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn flush_file_if_exists(path: &Path) -> Result<()> {
+/// Flush filesystem buffers for `path` if it exists.
+pub async fn flush_file_if_exists(path: &Path) -> Result<()> {
     if !fs::try_exists(path)
         .await
         .with_context(|| format!("checking {} before flush", path.display()))?
