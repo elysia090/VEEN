@@ -1,5 +1,5 @@
 use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
-use std::convert::TryInto;
+use std::convert::{TryFrom, TryInto};
 use std::env;
 use std::fmt;
 use std::fs::OpenOptions as StdOpenOptions;
@@ -41,8 +41,8 @@ use veen_core::operation::{
     schema_federation_mirror, schema_paid_operation, schema_query_audit, schema_recovery_approval,
     schema_recovery_execution, schema_recovery_request, schema_state_checkpoint, AccessGrant,
     AccessRevoke, AccountId, AgreementConfirmation, AgreementDefinition, DelegatedExecution,
-    OpaqueId, PaidOperation, RecoveryApproval, RecoveryExecution, RecoveryRequest, StateCheckpoint,
-    ACCOUNT_ID_LEN, OPERATION_ID_LEN,
+    FederationMirror, OpaqueId, PaidOperation, RecoveryApproval, RecoveryExecution,
+    RecoveryRequest, StateCheckpoint, ACCOUNT_ID_LEN, OPERATION_ID_LEN,
 };
 use veen_core::CAP_TOKEN_VERSION;
 use veen_core::{
@@ -760,6 +760,9 @@ enum Command {
     /// Federation and authority helpers.
     #[command(subcommand)]
     Fed(FedCommand),
+    /// Federation mirroring helpers.
+    #[command(subcommand)]
+    Federate(FederateCommand),
     /// Label helpers.
     #[command(subcommand)]
     Label(LabelCommand),
@@ -941,6 +944,16 @@ enum FedAuthorityCommand {
     Publish(FedAuthorityPublishArgs),
     /// Show the active authority record for a stream.
     Show(FedAuthorityShowArgs),
+}
+
+#[derive(Subcommand)]
+enum FederateCommand {
+    /// Describe the work required to mirror a stream between hubs.
+    #[command(name = "mirror-plan")]
+    MirrorPlan(FederateMirrorPlanArgs),
+    /// Execute a mirror plan by copying receipts into the target hub.
+    #[command(name = "mirror-run")]
+    MirrorRun(FederateMirrorRunArgs),
 }
 
 #[derive(Subcommand)]
@@ -1558,6 +1571,34 @@ struct FedAuthorityShowArgs {
     stream: String,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args, Clone)]
+struct FederateMirrorPlanArgs {
+    #[arg(long, value_name = "URL")]
+    source: String,
+    #[arg(long, value_name = "URL")]
+    target: String,
+    #[arg(long)]
+    stream: String,
+    #[arg(long, value_name = "SEQ")]
+    from: Option<u64>,
+    #[arg(long, value_name = "SEQ")]
+    upto: Option<u64>,
+    #[arg(long = "label-map", value_name = "SRC=TARGET")]
+    label_map: Vec<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Clone)]
+struct FederateMirrorRunArgs {
+    #[command(flatten)]
+    plan: FederateMirrorPlanArgs,
+    #[arg(long)]
+    client: PathBuf,
+    #[arg(long)]
+    cap: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -2890,6 +2931,10 @@ async fn run_cli() -> Result<()> {
                 FedAuthorityCommand::Publish(args) => handle_fed_authority_publish(args).await,
                 FedAuthorityCommand::Show(args) => handle_fed_authority_show(args).await,
             },
+        },
+        Command::Federate(cmd) => match cmd {
+            FederateCommand::MirrorPlan(args) => handle_federate_mirror_plan(args).await,
+            FederateCommand::MirrorRun(args) => handle_federate_mirror_run(args).await,
         },
         Command::Label(cmd) => match cmd {
             LabelCommand::Authority(args) => handle_label_authority(args).await,
@@ -5423,6 +5468,465 @@ async fn handle_fed_authority_show(args: FedAuthorityShowArgs) -> Result<()> {
     render_authority_record(&descriptor, json_output_enabled(json));
     log_cli_goal("CLI.FED1.AUTHORITY_SHOW");
     Ok(())
+}
+
+async fn handle_federate_mirror_plan(args: FederateMirrorPlanArgs) -> Result<()> {
+    let context = compute_federate_mirror_plan(&args).await?;
+    render_federate_mirror_plan(&context.plan, json_output_enabled(args.json));
+    log_cli_goal("CLI.FED1.MIRROR_PLAN");
+    Ok(())
+}
+
+async fn handle_federate_mirror_run(args: FederateMirrorRunArgs) -> Result<()> {
+    let use_json = json_output_enabled(args.plan.json);
+    let context = compute_federate_mirror_plan(&args.plan).await?;
+    if !use_json {
+        println!("mirror plan:");
+        render_federate_mirror_plan(&context.plan, false);
+    }
+
+    if context.plan.pending == 0 {
+        let output = FederateMirrorRunOutput {
+            plan: context.plan.clone(),
+            mirrored: Vec::new(),
+        };
+        render_federate_mirror_run_output(&output, use_json);
+        log_cli_goal("CLI.FED1.MIRROR");
+        return Ok(());
+    }
+
+    let mirrored = execute_federate_mirror_run(&context, &args, use_json).await?;
+    let mut final_plan = context.plan.clone();
+    if final_plan.pending >= mirrored.len() as u64 {
+        final_plan.pending -= mirrored.len() as u64;
+    } else {
+        final_plan.pending = 0;
+    }
+    let output = FederateMirrorRunOutput {
+        plan: final_plan,
+        mirrored,
+    };
+    render_federate_mirror_run_output(&output, use_json);
+    log_cli_goal("CLI.FED1.MIRROR");
+    Ok(())
+}
+
+#[derive(Clone)]
+struct FederateMirrorPlanContext {
+    plan: FederateMirrorPlanOutput,
+    source_client: HubHttpClient,
+    target_client: HubHttpClient,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FederateMirrorPlanOutput {
+    stream: String,
+    target_label: String,
+    copy_from_seq: u64,
+    copy_upto_seq: u64,
+    pending: u64,
+    source: FederateMirrorEndpointPlan,
+    target: FederateMirrorEndpointPlan,
+    label_map: Vec<FederateMirrorLabelMapping>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FederateMirrorEndpointPlan {
+    url: String,
+    hub_id: Option<String>,
+    label: String,
+    last_seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mmr_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FederateMirrorLabelMapping {
+    source: String,
+    target: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FederateMirrorRunEntry {
+    source_seq: u64,
+    target_seq: u64,
+    operation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FederateMirrorRunOutput {
+    plan: FederateMirrorPlanOutput,
+    mirrored: Vec<FederateMirrorRunEntry>,
+}
+
+fn render_federate_mirror_plan(plan: &FederateMirrorPlanOutput, use_json: bool) {
+    if use_json {
+        match serde_json::to_string_pretty(plan) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => println!(
+                "{}",
+                serde_json::to_string(plan).unwrap_or_else(|_| "{}".to_string())
+            ),
+        }
+        return;
+    }
+
+    println!("source.url: {}", plan.source.url);
+    println!(
+        "source.hub_id: {}",
+        plan.source.hub_id.as_deref().unwrap_or("(unknown)")
+    );
+    println!("source.label: {}", plan.source.label);
+    println!("source.last_seq: {}", plan.source.last_seq);
+    println!(
+        "source.mmr_root: {}",
+        plan.source.mmr_root.as_deref().unwrap_or("(none)")
+    );
+    println!("target.url: {}", plan.target.url);
+    println!(
+        "target.hub_id: {}",
+        plan.target.hub_id.as_deref().unwrap_or("(unknown)")
+    );
+    println!("target.label: {}", plan.target.label);
+    println!("target.last_seq: {}", plan.target.last_seq);
+    println!(
+        "target.mmr_root: {}",
+        plan.target.mmr_root.as_deref().unwrap_or("(none)")
+    );
+    println!("copy_from_seq: {}", plan.copy_from_seq);
+    println!("copy_upto_seq: {}", plan.copy_upto_seq);
+    println!("pending_messages: {}", plan.pending);
+    println!("mirror.target_label: {}", plan.target_label);
+    if plan.label_map.is_empty() {
+        println!("label_map: (none)");
+    } else {
+        println!("label_map:");
+        for mapping in &plan.label_map {
+            println!("  {} -> {}", mapping.source, mapping.target);
+        }
+    }
+}
+
+fn render_federate_mirror_run_output(output: &FederateMirrorRunOutput, use_json: bool) {
+    if use_json {
+        match serde_json::to_string_pretty(output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => println!(
+                "{}",
+                serde_json::to_string(output).unwrap_or_else(|_| "{}".to_string())
+            ),
+        }
+        return;
+    }
+
+    if output.mirrored.is_empty() {
+        println!("mirrored: (none)");
+    } else {
+        println!("mirrored:");
+        for entry in &output.mirrored {
+            println!("- source_seq: {}", entry.source_seq);
+            println!("  target_seq: {}", entry.target_seq);
+            println!("  operation_id: {}", entry.operation_id);
+        }
+    }
+    println!("remaining_pending: {}", output.plan.pending);
+}
+
+async fn compute_federate_mirror_plan(
+    args: &FederateMirrorPlanArgs,
+) -> Result<FederateMirrorPlanContext> {
+    let source_endpoint = args.source.trim();
+    if source_endpoint.is_empty() {
+        bail_usage!("--source must not be empty");
+    }
+    let target_endpoint = args.target.trim();
+    if target_endpoint.is_empty() {
+        bail_usage!("--target must not be empty");
+    }
+    let stream_label = args.stream.trim();
+    if stream_label.is_empty() {
+        bail_usage!("--stream must not be empty");
+    }
+
+    let mut label_map = parse_label_map_entries(&args.label_map)?;
+    let source_label = stream_label.to_string();
+    let target_label = label_map
+        .entry(source_label.clone())
+        .or_insert_with(|| source_label.clone())
+        .clone();
+
+    let source_client = parse_remote_hub_client(source_endpoint, "source hub")?;
+    let target_client = parse_remote_hub_client(target_endpoint, "target hub")?;
+
+    let source_plan = fetch_mirror_endpoint_plan(&source_client, &source_label)
+        .await
+        .with_context(|| format!("fetching source metrics for {}", source_label))?;
+    let target_plan = fetch_mirror_endpoint_plan(&target_client, &target_label)
+        .await
+        .with_context(|| format!("fetching target metrics for {}", target_label))?;
+
+    let requested_from = args
+        .from
+        .unwrap_or_else(|| target_plan.last_seq.saturating_add(1));
+    let requested_upto = args.upto.unwrap_or(source_plan.last_seq);
+    let copy_upto_seq = requested_upto.min(source_plan.last_seq);
+    let copy_from_seq = requested_from;
+    let pending = if copy_from_seq <= copy_upto_seq {
+        copy_upto_seq - copy_from_seq + 1
+    } else {
+        0
+    };
+
+    let label_map_entries = label_map
+        .into_iter()
+        .map(|(source, target)| FederateMirrorLabelMapping { source, target })
+        .collect();
+
+    let plan = FederateMirrorPlanOutput {
+        stream: source_label,
+        target_label,
+        copy_from_seq,
+        copy_upto_seq,
+        pending,
+        source: source_plan,
+        target: target_plan,
+        label_map: label_map_entries,
+    };
+
+    Ok(FederateMirrorPlanContext {
+        plan,
+        source_client,
+        target_client,
+    })
+}
+
+async fn fetch_mirror_endpoint_plan(
+    client: &HubHttpClient,
+    label: &str,
+) -> Result<FederateMirrorEndpointPlan> {
+    let report: RemoteObservabilityReport = client
+        .get_json("/metrics", &[])
+        .await
+        .context("fetching hub metrics for mirror plan")?;
+    let last_seq = report.last_stream_seq.get(label).copied().unwrap_or(0);
+    let mmr_root = report.mmr_roots.get(label).cloned();
+    Ok(FederateMirrorEndpointPlan {
+        url: client.endpoint().to_string(),
+        hub_id: report.hub_id.clone(),
+        label: label.to_string(),
+        last_seq,
+        mmr_root,
+    })
+}
+
+async fn execute_federate_mirror_run(
+    context: &FederateMirrorPlanContext,
+    args: &FederateMirrorRunArgs,
+    use_json: bool,
+) -> Result<Vec<FederateMirrorRunEntry>> {
+    let mut mirrored = Vec::new();
+    let mut next_seq = context.plan.copy_from_seq;
+    let upto_seq = context.plan.copy_upto_seq;
+    let source_label = context.plan.stream.clone();
+    let target_label = context.plan.target_label.clone();
+    let source_identifier = context
+        .plan
+        .source
+        .hub_id
+        .clone()
+        .unwrap_or_else(|| context.plan.source.url.clone());
+    let target_reference = HubReference::Remote(context.target_client.clone());
+    let target_locator = HubLocatorArgs {
+        hub: Some(context.plan.target.url.clone()),
+        env: None,
+        hub_name: None,
+    };
+
+    while next_seq <= upto_seq {
+        let query = vec![
+            ("stream", source_label.clone()),
+            ("from", next_seq.to_string()),
+            ("with_proof", "true".to_string()),
+        ];
+        let remote_messages: Vec<RemoteStreamMessageWithProof> = context
+            .source_client
+            .get_json("/stream", &query)
+            .await
+            .with_context(|| {
+                format!(
+                    "fetching source stream {} from seq {}",
+                    source_label, next_seq
+                )
+            })?;
+
+        if remote_messages.is_empty() {
+            bail_protocol!(
+                "source hub returned no messages for {} from seq {}",
+                source_label,
+                next_seq
+            );
+        }
+
+        let mut progressed = false;
+        for remote in remote_messages {
+            let message: StoredMessage = remote.message.into();
+            if message.seq < next_seq {
+                continue;
+            }
+            if message.seq > upto_seq {
+                return Ok(mirrored);
+            }
+            if message.seq != next_seq {
+                bail_protocol!(
+                    "expected source seq {} but received {} while mirroring {}",
+                    next_seq,
+                    message.seq,
+                    source_label
+                );
+            }
+
+            let receipt = StreamReceipt::from(remote.receipt);
+            let proof = remote
+                .proof
+                .clone()
+                .try_into_mmr()
+                .context("decoding stream proof")?;
+            validate_stream_proof(&message, &receipt, &proof)?;
+
+            let payload = encode_federation_mirror_payload(
+                &source_identifier,
+                &source_label,
+                &target_label,
+                message.seq,
+                &receipt,
+            )?;
+
+            let send_args = SendArgs {
+                hub: target_locator.clone(),
+                client: args.client.clone(),
+                stream: target_label.clone(),
+                body: payload.json_body.clone(),
+                schema: Some(payload.schema_hex()),
+                expires_at: None,
+                cap: args.cap.clone(),
+                parent: None,
+                attach: Vec::new(),
+                no_store_body: false,
+                pow_difficulty: None,
+                pow_challenge: None,
+                pow_nonce: None,
+            };
+
+            let outcome = send_message_with_reference(target_reference.clone(), send_args).await?;
+            let submission = derive_operation_submission(
+                target_reference.clone(),
+                outcome,
+                payload.schema_name.clone(),
+                payload.schema_hex(),
+            )
+            .await?;
+
+            let entry = FederateMirrorRunEntry {
+                source_seq: message.seq,
+                target_seq: submission.seq,
+                operation_id: hex::encode(submission.operation_id.as_bytes()),
+            };
+            if !use_json {
+                println!(
+                    "mirrored {} seq {} -> target seq {} (operation_id {})",
+                    source_label, entry.source_seq, entry.target_seq, entry.operation_id
+                );
+            }
+            mirrored.push(entry);
+            next_seq = next_seq.saturating_add(1);
+            progressed = true;
+
+            if next_seq > upto_seq {
+                break;
+            }
+        }
+
+        if !progressed {
+            bail_protocol!(
+                "source hub did not advance past seq {} while mirroring {}",
+                next_seq,
+                source_label
+            );
+        }
+    }
+
+    Ok(mirrored)
+}
+
+fn parse_label_map_entries(entries: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut map = BTreeMap::new();
+    for entry in entries {
+        let (raw_source, raw_target) = entry.split_once('=').ok_or_else(|| {
+            CliUsageError::new(format!(
+                "--label-map entries must use source=target form: {entry}"
+            ))
+        })?;
+        let source = raw_source.trim();
+        let target = raw_target.trim();
+        if source.is_empty() || target.is_empty() {
+            bail_usage!("--label-map entries must not be empty: {entry}");
+        }
+        if map.insert(source.to_string(), target.to_string()).is_some() {
+            bail_usage!("duplicate --label-map entry for {source}");
+        }
+    }
+    Ok(map)
+}
+
+fn parse_leaf_hash_hex(value: &str) -> Result<LeafHash> {
+    let bytes =
+        hex::decode(value).with_context(|| format!("decoding receipt leaf hash {value}"))?;
+    LeafHash::try_from(bytes.as_slice()).map_err(|err| anyhow!("invalid leaf hash: {err}"))
+}
+
+fn parse_mmr_root_hex(value: &str) -> Result<MmrRoot> {
+    let bytes = hex::decode(value).with_context(|| format!("decoding receipt mmr root {value}"))?;
+    MmrRoot::try_from(bytes.as_slice()).map_err(|err| anyhow!("invalid mmr root: {err}"))
+}
+
+fn derive_label_from_name(label: &str) -> Result<Label> {
+    let stream_id = cap_stream_id_from_label(label)
+        .with_context(|| format!("deriving stream identifier for {label}"))?;
+    Ok(Label::derive([], stream_id, 0))
+}
+
+fn encode_federation_mirror_payload(
+    source_identifier: &str,
+    source_label: &str,
+    target_label: &str,
+    source_seq: u64,
+    receipt: &StreamReceipt,
+) -> Result<EncodedOperationPayload> {
+    let leaf_hash = parse_leaf_hash_hex(&receipt.leaf_hash)?;
+    let mmr_root = parse_mmr_root_hex(&receipt.mmr_root)?;
+    let payload = FederationMirror {
+        source_hub_identifier: source_identifier.to_string(),
+        source_label: derive_label_from_name(source_label)?,
+        source_stream_seq: source_seq,
+        source_leaf_hash: leaf_hash,
+        source_receipt_root: mmr_root,
+        target_label: derive_label_from_name(target_label)?,
+        mirror_time: Some(current_unix_timestamp()?),
+        metadata: None,
+    };
+    encode_struct_operation_payload("federation.mirror.v1", schema_federation_mirror(), &payload)
+}
+
+fn parse_remote_hub_client(reference: &str, context: &str) -> Result<HubHttpClient> {
+    match parse_hub_reference(reference)? {
+        HubReference::Remote(client) => Ok(client),
+        HubReference::Local(_) => {
+            bail_usage!(
+                "{context} must be specified as an http(s) URL",
+                context = context
+            )
+        }
+    }
 }
 
 async fn handle_label_authority(args: LabelAuthorityArgs) -> Result<()> {
@@ -8765,6 +9269,22 @@ mod tests {
     use veen_hub::pipeline::StreamResponse;
     use veen_hub::runtime::HubRuntime;
 
+    #[test]
+    fn parse_label_map_entries_parses_pairs() -> anyhow::Result<()> {
+        let entries = vec!["alpha=beta".to_string(), "foo = bar/baz".to_string()];
+        let map = super::parse_label_map_entries(&entries)?;
+        assert_eq!(map.get("alpha").cloned(), Some("beta".to_string()));
+        assert_eq!(map.get("foo").cloned(), Some("bar/baz".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_label_map_entries_rejects_duplicates() {
+        let entries = vec!["alpha=one".to_string(), "alpha=two".to_string()];
+        let err = super::parse_label_map_entries(&entries).unwrap_err();
+        assert!(err.to_string().contains("duplicate --label-map entry"));
+    }
+
     async fn write_test_hub_key(data_dir: &Path) -> anyhow::Result<()> {
         let path = data_dir.join(HUB_KEY_FILE);
         if tokio::fs::try_exists(&path)
@@ -10400,6 +10920,10 @@ struct HubHttpClient {
 impl HubHttpClient {
     fn new(base_url: Url, http: HttpClient) -> Self {
         Self { base_url, http }
+    }
+
+    fn endpoint(&self) -> &Url {
+        &self.base_url
     }
 
     fn url(&self, path: &str) -> Result<Url> {
