@@ -2499,7 +2499,7 @@ fn prepare_attachments_for_storage(
         }
         total_bytes = new_total;
         let digest = sha2::Sha256::digest(&data);
-        let digest_hex = hex::encode(&digest);
+        let digest_hex = hex::encode(digest);
         let file_name = format!("{digest_hex}.bin");
         let path = storage.attachments_dir().join(&file_name);
         let stored = StoredAttachment {
