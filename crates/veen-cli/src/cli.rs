@@ -68,9 +68,9 @@ use veen_core::{
 use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::runtime::HubRuntime;
 use veen_hub::storage::{
-    self, ANCHORS_DIR, ATTACHMENTS_DIR, CHECKPOINTS_FILE, CRDT_DIR, HUB_KEY_FILE, HUB_PID_FILE,
-    MESSAGES_DIR, PAYLOADS_FILE, RECEIPTS_FILE, REVOCATIONS_FILE, STATE_DIR, STREAMS_DIR,
-    TLS_INFO_FILE,
+    self, stream_index, ANCHORS_DIR, ATTACHMENTS_DIR, CHECKPOINTS_FILE, CRDT_DIR, HUB_KEY_FILE,
+    HUB_PID_FILE, MESSAGES_DIR, PAYLOADS_FILE, RECEIPTS_FILE, REVOCATIONS_FILE, STATE_DIR,
+    STREAMS_DIR, TLS_INFO_FILE,
 };
 
 #[cfg(unix)]
@@ -9826,6 +9826,23 @@ fn stream_state_path(data_dir: &Path, stream: &str) -> PathBuf {
         .join(format!("{name}.json"))
 }
 
+fn stream_index_path(data_dir: &Path, stream: &str) -> PathBuf {
+    let name = stream_storage_name(stream);
+    data_dir
+        .join(STATE_DIR)
+        .join(STREAMS_DIR)
+        .join(format!("{name}.index"))
+}
+
+fn stream_bundle_path(data_dir: &Path, bundle: &str) -> PathBuf {
+    let path = Path::new(bundle);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        data_dir.join(STATE_DIR).join(MESSAGES_DIR).join(path)
+    }
+}
+
 fn message_bundle_path(data_dir: &Path, stream: &str, seq: u64) -> PathBuf {
     let name = stream_storage_name(stream);
     data_dir
@@ -9983,15 +10000,38 @@ async fn ensure_client_label_exists(client_dir: &Path, stream: &str) -> Result<(
 }
 
 async fn load_stream_state(data_dir: &Path, stream: &str) -> Result<HubStreamState> {
-    let path = stream_state_path(data_dir, stream);
-    if fs::try_exists(&path)
+    let json_path = stream_state_path(data_dir, stream);
+    if fs::try_exists(&json_path)
         .await
-        .with_context(|| format!("checking stream state {}", path.display()))?
+        .with_context(|| format!("checking stream state {}", json_path.display()))?
     {
-        read_json_file(&path).await
-    } else {
-        Ok(HubStreamState::default())
+        return read_json_file(&json_path).await;
     }
+
+    let index_path = stream_index_path(data_dir, stream);
+    if fs::try_exists(&index_path)
+        .await
+        .with_context(|| format!("checking stream index {}", index_path.display()))?
+    {
+        let entries = stream_index::load_stream_index(&index_path)
+            .await
+            .with_context(|| format!("loading stream index from {}", index_path.display()))?;
+        if entries.is_empty() {
+            return Ok(HubStreamState::default());
+        }
+
+        let mut messages = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let bundle_path = stream_bundle_path(data_dir, &entry.bundle);
+            let message: StoredMessage = read_json_file(&bundle_path).await.with_context(|| {
+                format!("decoding message bundle from {}", bundle_path.display())
+            })?;
+            messages.push(message);
+        }
+        return Ok(HubStreamState { messages });
+    }
+
+    Ok(HubStreamState::default())
 }
 
 async fn save_stream_state(data_dir: &Path, stream: &str, state: &HubStreamState) -> Result<()> {
