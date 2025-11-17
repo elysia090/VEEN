@@ -79,6 +79,8 @@ async fn ensure_hub_key(data_dir: &Path) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn goals_core_pipeline() -> Result<()> {
     let hub_dir = TempDir::new().context("creating hub temp directory")?;
+    let hub_data_path = hub_dir.path().to_path_buf();
+    let mut cli_streams = Vec::new();
     let client_dir = hub_dir.path().join("client");
 
     run_cli(["keygen", "--out", client_dir.to_str().unwrap()])
@@ -126,6 +128,7 @@ async fn goals_core_pipeline() -> Result<()> {
         .await
         .context("parsing submit response")?;
 
+    cli_streams.push("core/main".to_string());
     run_cli([
         "stream",
         "--hub",
@@ -170,18 +173,20 @@ async fn goals_core_pipeline() -> Result<()> {
         .await
         .context("parsing attachment submit response")?;
 
-    let bundle_path = message_bundle_path(hub_dir.path(), "core/att", attachment_response.seq);
+    let attachment_bundle_path =
+        message_bundle_path(hub_dir.path(), "core/att", attachment_response.seq);
     run_cli([
         "attachment",
         "verify",
         "--msg",
-        bundle_path.to_str().unwrap(),
+        attachment_bundle_path.to_str().unwrap(),
         "--file",
         attachment_path.to_str().unwrap(),
         "--index",
         "0",
     ])
     .context("verifying attachment via CLI")?;
+    cli_streams.push("core/att".to_string());
 
     // Capability issuance via CLI, authorization via HTTP.
     let admin_dir = hub_dir.path().join("admin");
@@ -189,6 +194,7 @@ async fn goals_core_pipeline() -> Result<()> {
         .context("generating admin identity")?;
 
     let cap_file = hub_dir.path().join("cap.cbor");
+    cli_streams.push("core/capped".to_string());
     run_cli([
         "cap",
         "issue",
@@ -474,6 +480,16 @@ async fn goals_core_pipeline() -> Result<()> {
         .context("healthz endpoint error")?;
 
     run_cli(["selftest", "core"]).context("running selftest core suite")?;
+
+    println!(
+        "goal: CORE.PIPELINE\n  hub.data: {}\n  cli.streams: {}\n  attachments.bundle: {}\n  cap.auth_ref: {}\n  metrics: E.CAP={}, E.RATE={}",
+        hub_data_path.display(),
+        cli_streams.join(","),
+        attachment_bundle_path.display(),
+        auth_ref_hex,
+        cap_errors,
+        rate_errors
+    );
 
     runtime.shutdown().await?;
     Ok(())
