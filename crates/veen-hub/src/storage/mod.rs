@@ -7,6 +7,7 @@ use tokio::fs::{self, OpenOptions};
 
 use crate::config::HubRuntimeConfig;
 
+pub mod attachments;
 pub mod stream_index;
 
 pub const RECEIPTS_FILE: &str = "receipts.cborseq";
@@ -20,6 +21,7 @@ pub const MESSAGES_DIR: &str = "messages";
 pub const CAPABILITIES_DIR: &str = "capabilities";
 pub const CRDT_DIR: &str = "crdt";
 pub const ATTACHMENTS_DIR: &str = "attachments";
+pub const ATTACHMENT_REFS_DIR: &str = "refs";
 pub const ANCHORS_DIR: &str = "anchors";
 pub const TLS_INFO_FILE: &str = "tls_info.json";
 pub const REVOCATIONS_FILE: &str = "revocations.json";
@@ -81,6 +83,14 @@ impl HubStorage {
 
     pub fn attachments_dir(&self) -> PathBuf {
         self.state_dir().join(ATTACHMENTS_DIR)
+    }
+
+    pub fn attachment_refs_dir(&self) -> PathBuf {
+        self.attachments_dir().join(ATTACHMENT_REFS_DIR)
+    }
+
+    pub fn attachment_ref_path(&self, digest: &str) -> PathBuf {
+        self.attachment_refs_dir().join(format!("{digest}.ref"))
     }
 
     pub fn anchors_dir(&self) -> PathBuf {
@@ -188,6 +198,14 @@ pub async fn ensure_data_dir_layout(data_dir: &Path) -> Result<()> {
         .with_context(|| {
             format!(
                 "creating attachments directory under {}",
+                state_dir.display()
+            )
+        })?;
+    fs::create_dir_all(state_dir.join(ATTACHMENTS_DIR).join(ATTACHMENT_REFS_DIR))
+        .await
+        .with_context(|| {
+            format!(
+                "creating attachment ref index directory under {}",
                 state_dir.display()
             )
         })?;
