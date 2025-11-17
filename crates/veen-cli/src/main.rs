@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 use std::convert::TryInto;
 use std::env;
 use std::fmt;
@@ -40,8 +40,8 @@ use veen_core::operation::{
     schema_agreement_definition, schema_data_publication, schema_delegated_execution,
     schema_federation_mirror, schema_paid_operation, schema_query_audit, schema_recovery_approval,
     schema_recovery_execution, schema_recovery_request, schema_state_checkpoint, AccessGrant,
-    AccessRevoke, AccountId, DelegatedExecution, OpaqueId, PaidOperation, ACCOUNT_ID_LEN,
-    OPERATION_ID_LEN,
+    AccessRevoke, AccountId, AgreementConfirmation, AgreementDefinition, DelegatedExecution,
+    OpaqueId, PaidOperation, ACCOUNT_ID_LEN, OPERATION_ID_LEN,
 };
 use veen_core::CAP_TOKEN_VERSION;
 use veen_core::{
@@ -780,6 +780,9 @@ enum Command {
     /// Wallet overlay helpers.
     #[command(subcommand)]
     Wallet(WalletCommand),
+    /// Multi Party Agreement helpers.
+    #[command(subcommand)]
+    Agreement(AgreementCommand),
     /// Operation overlay helpers.
     #[command(subcommand)]
     Operation(OperationCommand),
@@ -976,6 +979,12 @@ enum WalletCommand {
     Transfer(WalletTransferArgs),
     /// Fold paid operations into account balances.
     Ledger(WalletLedgerArgs),
+}
+
+#[derive(Subcommand)]
+enum AgreementCommand {
+    /// Show agreement activity and party decisions.
+    Status(AgreementStatusArgs),
 }
 
 #[derive(Subcommand)]
@@ -1665,6 +1674,20 @@ struct WalletLedgerArgs {
     upto_stream_seq: Option<u64>,
     #[arg(long, value_name = "HEX32")]
     account: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct AgreementStatusArgs {
+    #[command(flatten)]
+    hub: HubLocatorArgs,
+    #[arg(long)]
+    stream: String,
+    #[arg(long = "agreement-id", value_name = "HEX32")]
+    agreement_id: String,
+    #[arg(long)]
+    version: Option<u64>,
     #[arg(long)]
     json: bool,
 }
@@ -2847,6 +2870,9 @@ async fn run_cli() -> Result<()> {
         Command::Wallet(cmd) => match cmd {
             WalletCommand::Transfer(args) => handle_wallet_transfer(args).await,
             WalletCommand::Ledger(args) => handle_wallet_ledger(args).await,
+        },
+        Command::Agreement(cmd) => match cmd {
+            AgreementCommand::Status(args) => handle_agreement_status(args).await,
         },
         Command::Operation(cmd) => match cmd {
             OperationCommand::Id(args) => handle_operation_id(args).await,
@@ -5905,7 +5931,7 @@ async fn handle_wallet_ledger(args: WalletLedgerArgs) -> Result<()> {
 
     let reference = hub_reference_from_locator(&args.hub, "wallet ledger").await?;
     let (messages, stream_tip) =
-        load_wallet_ledger_messages(reference, &args.stream, args.since_stream_seq).await?;
+        load_stream_messages(reference, &args.stream, args.since_stream_seq).await?;
 
     let requested_upto = args.upto_stream_seq.unwrap_or(stream_tip);
     let effective_upto = requested_upto.min(stream_tip);
@@ -6028,6 +6054,250 @@ where
     Ok(balances)
 }
 
+#[derive(Serialize)]
+struct AgreementStatusPartyOutput {
+    identity: String,
+    decision: Option<String>,
+    decision_time: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct AgreementStatusOutput {
+    stream: String,
+    agreement_id: String,
+    version: u64,
+    effective_time: Option<u64>,
+    expiry_time: Option<u64>,
+    active: bool,
+    parties: Vec<AgreementStatusPartyOutput>,
+}
+
+#[derive(Clone)]
+struct AgreementPartyFold {
+    decision: String,
+    decision_time: Option<u64>,
+    seq: u64,
+}
+
+#[derive(Default)]
+struct AgreementVersionFold {
+    definition: Option<(AgreementDefinition, u64)>,
+    confirmations: BTreeMap<String, AgreementPartyFold>,
+}
+
+async fn handle_agreement_status(args: AgreementStatusArgs) -> Result<()> {
+    let agreement_id = parse_opaque_id_hex(&args.agreement_id)?;
+    let use_json = json_output_enabled(args.json);
+    let reference = hub_reference_from_locator(&args.hub, "agreement status").await?;
+    let (messages, _) = load_stream_messages(reference, &args.stream, 0).await?;
+
+    let versions = fold_agreement_versions(&messages, &agreement_id)?;
+    let (version, state) = select_agreement_version(&versions, args.version)?;
+    let (definition, _) = state.definition.clone().ok_or_else(|| {
+        ProtocolError::new("agreement definition missing for requested version".to_string())
+    })?;
+
+    let mut seen_parties = BTreeSet::new();
+    let mut parties = Vec::new();
+    let mut all_parties_accept = true;
+    for party in &definition.parties {
+        let identity_hex = hex::encode(party.as_bytes());
+        if !seen_parties.insert(identity_hex.clone()) {
+            continue;
+        }
+        if let Some(status) = state.confirmations.get(&identity_hex) {
+            if !status.decision.eq_ignore_ascii_case("accept") {
+                all_parties_accept = false;
+            }
+            parties.push(AgreementStatusPartyOutput {
+                identity: identity_hex,
+                decision: Some(status.decision.clone()),
+                decision_time: status.decision_time,
+            });
+        } else {
+            all_parties_accept = false;
+            parties.push(AgreementStatusPartyOutput {
+                identity: identity_hex,
+                decision: None,
+                decision_time: None,
+            });
+        }
+    }
+
+    for (identity, status) in &state.confirmations {
+        if seen_parties.contains(identity) {
+            continue;
+        }
+        parties.push(AgreementStatusPartyOutput {
+            identity: identity.clone(),
+            decision: Some(status.decision.clone()),
+            decision_time: status.decision_time,
+        });
+    }
+
+    let now = current_unix_timestamp()?;
+    let effective_time = definition.effective_time;
+    let expiry_time = definition.expiry_time;
+    let effective_ok = effective_time.map_or(true, |ts| now >= ts);
+    let expiry_ok = expiry_time.map_or(true, |ts| now <= ts);
+    let active = all_parties_accept && effective_ok && expiry_ok;
+
+    let output = AgreementStatusOutput {
+        stream: args.stream.clone(),
+        agreement_id: hex::encode(definition.agreement_id.as_bytes()),
+        version,
+        effective_time,
+        expiry_time,
+        active,
+        parties,
+    };
+
+    render_agreement_status(&output, use_json);
+    log_cli_goal("CLI.MPA.STATUS");
+    Ok(())
+}
+
+fn select_agreement_version<'a>(
+    versions: &'a BTreeMap<u64, AgreementVersionFold>,
+    requested: Option<u64>,
+) -> Result<(u64, &'a AgreementVersionFold)> {
+    if let Some(version) = requested {
+        let state = versions.get(&version).ok_or_else(|| {
+            ProtocolError::new(format!("no agreement entries found for version {version}"))
+        })?;
+        if state.definition.is_none() {
+            bail_protocol!("agreement definition missing for version {version}");
+        }
+        return Ok((version, state));
+    }
+
+    for (&version, state) in versions.iter().rev() {
+        if state.definition.is_some() {
+            return Ok((version, state));
+        }
+    }
+
+    bail_protocol!("no agreement definitions found in stream")
+}
+
+fn fold_agreement_versions<'a, I>(
+    messages: I,
+    target_id: &OpaqueId,
+) -> Result<BTreeMap<u64, AgreementVersionFold>>
+where
+    I: IntoIterator<Item = &'a StoredMessage>,
+{
+    let mut versions = BTreeMap::new();
+    let def_schema_hex = hex::encode(schema_agreement_definition());
+    let conf_schema_hex = hex::encode(schema_agreement_confirmation());
+
+    for message in messages {
+        let schema_hex = match message.schema.as_deref() {
+            Some(value) => value,
+            None => continue,
+        };
+        if schema_hex.eq_ignore_ascii_case(&def_schema_hex) {
+            let body = message.body.as_ref().ok_or_else(|| {
+                ProtocolError::new(format!(
+                    "stream {}#{} does not contain stored body for agreement definition",
+                    message.stream, message.seq
+                ))
+            })?;
+            let payload: AgreementDefinition = serde_json::from_str(body).with_context(|| {
+                format!(
+                    "decoding agreement.definition.v1 payload for {}#{}",
+                    message.stream, message.seq
+                )
+            })?;
+            if payload.agreement_id != *target_id {
+                continue;
+            }
+            let entry = versions
+                .entry(payload.version)
+                .or_insert_with(AgreementVersionFold::default);
+            entry.definition = Some((payload, message.seq));
+        } else if schema_hex.eq_ignore_ascii_case(&conf_schema_hex) {
+            let body = message.body.as_ref().ok_or_else(|| {
+                ProtocolError::new(format!(
+                    "stream {}#{} does not contain stored body for agreement confirmation",
+                    message.stream, message.seq
+                ))
+            })?;
+            let payload: AgreementConfirmation = serde_json::from_str(body).with_context(|| {
+                format!(
+                    "decoding agreement.confirmation.v1 payload for {}#{}",
+                    message.stream, message.seq
+                )
+            })?;
+            if payload.agreement_id != *target_id {
+                continue;
+            }
+            let entry = versions
+                .entry(payload.version)
+                .or_insert_with(AgreementVersionFold::default);
+            let identity_hex = hex::encode(payload.party_identity.as_bytes());
+            let updated = AgreementPartyFold {
+                decision: payload.decision,
+                decision_time: payload.decision_time,
+                seq: message.seq,
+            };
+            match entry.confirmations.entry(identity_hex) {
+                Entry::Occupied(mut existing) => {
+                    if message.seq >= existing.get().seq {
+                        *existing.get_mut() = updated;
+                    }
+                }
+                Entry::Vacant(slot) => {
+                    slot.insert(updated);
+                }
+            }
+        }
+    }
+
+    Ok(versions)
+}
+
+fn render_agreement_status(output: &AgreementStatusOutput, use_json: bool) {
+    if use_json {
+        match serde_json::to_string_pretty(output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => match serde_json::to_string(output) {
+                Ok(rendered) => println!("{rendered}"),
+                Err(_) => println!("{{\"active\":false}}"),
+            },
+        }
+        return;
+    }
+
+    println!("stream: {}", output.stream);
+    println!("agreement_id: {}", output.agreement_id);
+    println!("version: {}", output.version);
+    match output.effective_time {
+        Some(value) => println!("effective_time: {value}"),
+        None => println!("effective_time: (none)"),
+    }
+    match output.expiry_time {
+        Some(value) => println!("expiry_time: {value}"),
+        None => println!("expiry_time: (none)"),
+    }
+    println!("active: {}", output.active);
+    if output.parties.is_empty() {
+        println!("parties: (none)");
+        return;
+    }
+    println!("parties:");
+    for party in &output.parties {
+        println!("- identity: {}", party.identity);
+        println!(
+            "  decision: {}",
+            party.decision.as_deref().unwrap_or("pending")
+        );
+        if let Some(ts) = party.decision_time {
+            println!("  decision_time: {ts}");
+        }
+    }
+}
+
 fn apply_balance_delta(
     balances: &mut BTreeMap<String, i128>,
     account: &AccountId,
@@ -6048,7 +6318,7 @@ fn apply_balance_delta(
     Ok(())
 }
 
-async fn load_wallet_ledger_messages(
+async fn load_stream_messages(
     reference: HubReference,
     stream: &str,
     from_seq: u64,
@@ -6072,7 +6342,7 @@ async fn load_wallet_ledger_messages(
             let remote_messages: Vec<RemoteStoredMessage> = client
                 .get_json("/stream", &query)
                 .await
-                .context("fetching stream messages for ledger")?;
+                .context("fetching stream messages")?;
             let tip = remote_messages
                 .last()
                 .map(|msg| msg.seq)
