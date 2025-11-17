@@ -1,3 +1,4 @@
+use std::io::Cursor;
 use std::net::{SocketAddr, TcpListener};
 use std::path::Path;
 
@@ -29,6 +30,9 @@ async fn goals_dr_cutover() -> Result<()> {
 
     ensure_hub_key(primary_dir.path()).await?;
     ensure_hub_key(replica_dir.path()).await?;
+
+    let primary_hub_id = hub_id_from_dir(primary_dir.path()).await?;
+    let replica_hub_id = hub_id_from_dir(replica_dir.path()).await?;
 
     let primary_addr = next_listen_addr()?;
     let replica_addr = next_listen_addr()?;
@@ -72,6 +76,7 @@ async fn goals_dr_cutover() -> Result<()> {
     let replica_base = format!("http://{}", replica_runtime.listen_addr());
 
     let mut submit_roots = Vec::new();
+    let mut bridged_receipts = 0usize;
     for idx in 0..3u8 {
         let body = serde_json::json!({"text": format!("primary-{idx}")});
         let response: SubmitResponse = http
@@ -135,6 +140,7 @@ async fn goals_dr_cutover() -> Result<()> {
             ingest.mmr_root == message.receipt.mmr_root,
             "replica computed unexpected mmr root"
         );
+        bridged_receipts += 1;
     }
 
     let primary_metrics: ObservabilitySnapshot = http
@@ -238,6 +244,19 @@ async fn goals_dr_cutover() -> Result<()> {
         "promoted hub reported inconsistent mmr root"
     );
 
+    log_goal_dr_cutover(GoalDrCutoverSummary {
+        stream: stream.to_string(),
+        primary_addr,
+        replica_addr,
+        primary_hub_id,
+        replica_hub_id,
+        bridged_receipts,
+        shared_mmr_root: primary_root.clone(),
+        primary_replica_roots_match: primary_root == replica_root,
+        first_sequence_after_promotion: promote_response.seq,
+        promoted_root: promoted_root.clone(),
+    });
+
     promoted_runtime.shutdown().await?;
     Ok(())
 }
@@ -279,6 +298,16 @@ async fn ensure_hub_key(data_dir: &Path) -> Result<()> {
         .with_context(|| format!("writing hub key material to {}", path.display()))
 }
 
+async fn hub_id_from_dir(data_dir: &Path) -> Result<String> {
+    let path = data_dir.join("hub_key.cbor");
+    let contents = fs::read(&path)
+        .await
+        .with_context(|| format!("reading hub key material from {}", path.display()))?;
+    let material: HubKeyMaterial =
+        ciborium::de::from_reader(Cursor::new(contents)).context("decoding hub key material")?;
+    Ok(hex::encode(material.public_key.as_ref()))
+}
+
 fn next_listen_addr() -> Result<SocketAddr> {
     let listener = TcpListener::bind("127.0.0.1:0").context("binding ephemeral port")?;
     let addr = listener
@@ -304,3 +333,42 @@ struct HubKeyMaterial {
 }
 
 const HUB_KEY_VERSION: u8 = 1;
+
+struct GoalDrCutoverSummary {
+    stream: String,
+    primary_addr: SocketAddr,
+    replica_addr: SocketAddr,
+    primary_hub_id: String,
+    replica_hub_id: String,
+    bridged_receipts: usize,
+    shared_mmr_root: String,
+    primary_replica_roots_match: bool,
+    first_sequence_after_promotion: u64,
+    promoted_root: String,
+}
+
+fn log_goal_dr_cutover(summary: GoalDrCutoverSummary) {
+    println!(
+        "goal: DR.CUTOVER\n\
+stream: {}\n\
+primary_listen_addr: {}\n\
+replica_listen_addr: {}\n\
+primary_hub_id: {}\n\
+replica_hub_id: {}\n\
+bridged_receipts: {}\n\
+shared_mmr_root_before_promotion: {}\n\
+primary_replica_roots_match: {}\n\
+first_sequence_after_promotion: {}\n\
+promoted_root: {}",
+        summary.stream,
+        summary.primary_addr,
+        summary.replica_addr,
+        summary.primary_hub_id,
+        summary.replica_hub_id,
+        summary.bridged_receipts,
+        summary.shared_mmr_root,
+        summary.primary_replica_roots_match,
+        summary.first_sequence_after_promotion,
+        summary.promoted_root,
+    );
+}
