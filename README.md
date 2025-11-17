@@ -292,6 +292,27 @@ is preferred.
 These commands keep hub manifests reproducible and remove the need for bespoke
 shell wrappers when managing Kubernetes-native deployments.
 
+### Snapshot verification
+
+The CLI can fold a stream's durable state and compare it to
+`state.checkpoint.v1` messages to ensure the ledger has not been tampered with.
+Use `veen snapshot verify` with the stream identifier, state metadata, and the
+target sequence number from the checkpoint:
+
+```shell
+veen snapshot verify \
+  --hub https://hub.example \
+  --stream my/ledger \
+  --state-class wallet.ledger \
+  --state-id deadbeef... \
+  --upto-stream-seq 42
+```
+
+The command prints the state hash, the MMR root for the requested prefix, and a
+`consistent` flag in text or JSON (`--json`). When the computed values diverge
+from the checkpoint, the output highlights the first mismatch so operators know
+whether the ledger contents or the stream history failed verification.
+
 Environment variables such as `VEEN_LISTEN`, `VEEN_LOG_LEVEL`, or
 `VEEN_PROFILE_ID` can be overridden in `docker-compose.yml` (or via
 `docker compose run -e`) to adjust listening addresses, logging verbosity, or

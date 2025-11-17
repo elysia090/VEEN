@@ -41,7 +41,7 @@ use veen_core::operation::{
     schema_federation_mirror, schema_paid_operation, schema_query_audit, schema_recovery_approval,
     schema_recovery_execution, schema_recovery_request, schema_state_checkpoint, AccessGrant,
     AccessRevoke, AccountId, AgreementConfirmation, AgreementDefinition, DelegatedExecution,
-    OpaqueId, PaidOperation, ACCOUNT_ID_LEN, OPERATION_ID_LEN,
+    OpaqueId, PaidOperation, StateCheckpoint, ACCOUNT_ID_LEN, OPERATION_ID_LEN,
 };
 use veen_core::CAP_TOKEN_VERSION;
 use veen_core::{
@@ -774,6 +774,9 @@ enum Command {
     /// Multi Party Agreement helpers.
     #[command(subcommand)]
     Agreement(AgreementCommand),
+    /// State snapshot helpers.
+    #[command(subcommand)]
+    Snapshot(SnapshotCommand),
     /// Operation overlay helpers.
     #[command(subcommand)]
     Operation(OperationCommand),
@@ -976,6 +979,12 @@ enum WalletCommand {
 enum AgreementCommand {
     /// Show agreement activity and party decisions.
     Status(AgreementStatusArgs),
+}
+
+#[derive(Subcommand)]
+enum SnapshotCommand {
+    /// Verify folded state against a state.checkpoint.v1 record.
+    Verify(SnapshotVerifyArgs),
 }
 
 #[derive(Subcommand)]
@@ -1679,6 +1688,22 @@ struct AgreementStatusArgs {
     agreement_id: String,
     #[arg(long)]
     version: Option<u64>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SnapshotVerifyArgs {
+    #[command(flatten)]
+    hub: HubLocatorArgs,
+    #[arg(long)]
+    stream: String,
+    #[arg(long = "state-id", value_name = "HEX32")]
+    state_id: String,
+    #[arg(long = "upto-stream-seq", value_name = "SEQ")]
+    upto_stream_seq: u64,
+    #[arg(long = "state-class", value_name = "CLASS_NAME")]
+    state_class: String,
     #[arg(long)]
     json: bool,
 }
@@ -2864,6 +2889,9 @@ async fn run_cli() -> Result<()> {
         },
         Command::Agreement(cmd) => match cmd {
             AgreementCommand::Status(args) => handle_agreement_status(args).await,
+        },
+        Command::Snapshot(cmd) => match cmd {
+            SnapshotCommand::Verify(args) => handle_snapshot_verify(args).await,
         },
         Command::Operation(cmd) => match cmd {
             OperationCommand::Id(args) => handle_operation_id(args).await,
@@ -7003,6 +7031,314 @@ async fn handle_resync_remote(client: HubHttpClient, args: ResyncArgs) -> Result
     Ok(())
 }
 
+async fn handle_snapshot_verify(args: SnapshotVerifyArgs) -> Result<()> {
+    if args.upto_stream_seq == 0 {
+        bail_usage!("--upto-stream-seq must be at least 1");
+    }
+    let state_class_filter = args.state_class.trim();
+    if state_class_filter.is_empty() {
+        bail_usage!("--state-class must not be empty");
+    }
+
+    let state_id = parse_opaque_id_hex(&args.state_id)?;
+    let state_id_hex = hex::encode(state_id.as_bytes());
+    let use_json = json_output_enabled(args.json);
+
+    let reference = hub_reference_from_locator(&args.hub, "snapshot verify").await?;
+    let (messages, stream_tip) = load_stream_messages(reference, &args.stream, 0).await?;
+    if stream_tip < args.upto_stream_seq {
+        bail_usage!(
+            "stream {} only has seq {}, cannot verify upto {}",
+            args.stream,
+            stream_tip,
+            args.upto_stream_seq
+        );
+    }
+
+    let checkpoint_match = find_state_checkpoint(
+        &messages,
+        &state_id,
+        args.upto_stream_seq,
+        state_class_filter,
+    )?;
+    let (checkpoint_seq, checkpoint) = checkpoint_match.ok_or_else(|| {
+        ProtocolError::new(format!(
+            "no state.checkpoint.v1 found for state_id {} upto_stream_seq {}",
+            state_id_hex, args.upto_stream_seq
+        ))
+    })?;
+    let canonical_state_class = checkpoint.state_class.clone();
+
+    let (serialized_state, state_json, wallet_state_summary) = match canonical_state_class.as_str()
+    {
+        "wallet.ledger" => {
+            let account = AccountId::from_slice(state_id.as_bytes()).map_err(|err| {
+                CliUsageError::new(format!(
+                    "state-id must be a valid account id for wallet.ledger snapshots: {err}"
+                ))
+            })?;
+            let summary = fold_wallet_ledger_snapshot(&messages, args.upto_stream_seq, &account)?;
+            let json_value = serde_json::to_value(&summary)
+                .context("serializing wallet ledger snapshot state")?;
+            let serialized = summary.serialize_bytes()?;
+            (serialized, Some(json_value), Some(summary))
+        }
+        other => {
+            bail_usage!("unsupported state class `{other}`");
+        }
+    };
+
+    let computed_state_hash = ht(
+        &format!("veen/state-{}", canonical_state_class),
+        &serialized_state,
+    );
+    let computed_state_hash_hex = hex::encode(computed_state_hash);
+    let checkpoint_state_hash_hex = hex::encode(checkpoint.state_hash.as_bytes());
+
+    let computed_mmr_root = compute_stream_prefix_mmr_root(&messages, args.upto_stream_seq)?;
+    let computed_mmr_root_hex = hex::encode(computed_mmr_root.as_bytes());
+    let checkpoint_mmr_root_hex = hex::encode(checkpoint.mmr_root.as_bytes());
+
+    let mismatch_detail = if computed_mmr_root_hex != checkpoint_mmr_root_hex {
+        Some(format!(
+            "mmr_root mismatch (checkpoint={}, computed={})",
+            checkpoint_mmr_root_hex, computed_mmr_root_hex
+        ))
+    } else if computed_state_hash_hex != checkpoint_state_hash_hex {
+        Some(format!(
+            "state_hash mismatch (checkpoint={}, computed={})",
+            checkpoint_state_hash_hex, computed_state_hash_hex
+        ))
+    } else {
+        None
+    };
+
+    let output = SnapshotVerifyOutput {
+        stream: args.stream.clone(),
+        state_class: canonical_state_class,
+        state_id: state_id_hex,
+        upto_stream_seq: args.upto_stream_seq,
+        checkpoint_seq,
+        consistent: mismatch_detail.is_none(),
+        mismatch: mismatch_detail,
+        checkpoint_state_hash: checkpoint_state_hash_hex,
+        computed_state_hash: computed_state_hash_hex,
+        checkpoint_mmr_root: checkpoint_mmr_root_hex,
+        computed_mmr_root: computed_mmr_root_hex,
+        state: state_json,
+    };
+
+    render_snapshot_verify(&output, wallet_state_summary.as_ref(), use_json)?;
+    log_cli_goal("CLI.SNAPSHOT.VERIFY");
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct SnapshotVerifyOutput {
+    stream: String,
+    state_class: String,
+    state_id: String,
+    upto_stream_seq: u64,
+    checkpoint_seq: u64,
+    consistent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mismatch: Option<String>,
+    checkpoint_state_hash: String,
+    computed_state_hash: String,
+    checkpoint_mmr_root: String,
+    computed_mmr_root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<JsonValue>,
+}
+
+fn render_snapshot_verify(
+    output: &SnapshotVerifyOutput,
+    wallet_state: Option<&WalletLedgerSnapshotState>,
+    use_json: bool,
+) -> Result<()> {
+    if use_json {
+        match serde_json::to_string_pretty(output) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(_) => match serde_json::to_string(output) {
+                Ok(rendered) => println!("{rendered}"),
+                Err(_) => println!("{}", "{\"consistent\":false}"),
+            },
+        }
+        return Ok(());
+    }
+
+    println!("stream: {}", output.stream);
+    println!("state_class: {}", output.state_class);
+    println!("state_id: {}", output.state_id);
+    println!("upto_stream_seq: {}", output.upto_stream_seq);
+    println!("checkpoint_seq: {}", output.checkpoint_seq);
+    println!("consistent: {}", output.consistent);
+    if let Some(mismatch) = &output.mismatch {
+        println!("mismatch: {mismatch}");
+    }
+    println!("checkpoint.state_hash: {}", output.checkpoint_state_hash);
+    println!("computed.state_hash: {}", output.computed_state_hash);
+    println!("checkpoint.mmr_root: {}", output.checkpoint_mmr_root);
+    println!("computed.mmr_root: {}", output.computed_mmr_root);
+    if let Some(state) = wallet_state {
+        println!("wallet.account_id: {}", state.account_id);
+        println!("wallet.balance: {}", state.balance);
+    }
+    Ok(())
+}
+
+fn find_state_checkpoint<'a, I>(
+    messages: I,
+    state_id: &OpaqueId,
+    upto_stream_seq: u64,
+    state_class: &str,
+) -> Result<Option<(u64, StateCheckpoint)>>
+where
+    I: IntoIterator<Item = &'a StoredMessage>,
+{
+    let checkpoint_schema_hex = hex::encode(schema_state_checkpoint());
+    let mut found: Option<(u64, StateCheckpoint)> = None;
+    for message in messages {
+        let Some(schema_hex) = message.schema.as_deref() else {
+            continue;
+        };
+        if !schema_hex.eq_ignore_ascii_case(&checkpoint_schema_hex) {
+            continue;
+        }
+        let body = message.body.as_ref().ok_or_else(|| {
+            ProtocolError::new(format!(
+                "stream {}#{} does not contain stored body for state checkpoint",
+                message.stream, message.seq
+            ))
+        })?;
+        let checkpoint: StateCheckpoint = serde_json::from_str(body).with_context(|| {
+            format!(
+                "decoding state.checkpoint.v1 payload for {}#{}",
+                message.stream, message.seq
+            )
+        })?;
+        if checkpoint.upto_stream_seq != upto_stream_seq {
+            continue;
+        }
+        if checkpoint.state_id.as_bytes() != state_id.as_bytes() {
+            continue;
+        }
+        if !checkpoint.state_class.eq_ignore_ascii_case(state_class) {
+            continue;
+        }
+        found = Some((message.seq, checkpoint));
+    }
+    Ok(found)
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WalletLedgerSnapshotState {
+    account_id: String,
+    balance: i128,
+}
+
+impl WalletLedgerSnapshotState {
+    fn new(account: &AccountId, balance: i128) -> Self {
+        Self {
+            account_id: hex::encode(account.as_bytes()),
+            balance,
+        }
+    }
+
+    fn serialize_bytes(&self) -> Result<Vec<u8>> {
+        serde_json::to_vec(self).context("serializing wallet ledger snapshot state")
+    }
+}
+
+fn fold_wallet_ledger_snapshot<'a, I>(
+    messages: I,
+    upto_stream_seq: u64,
+    account: &AccountId,
+) -> Result<WalletLedgerSnapshotState>
+where
+    I: IntoIterator<Item = &'a StoredMessage>,
+{
+    let schema_hex = hex::encode(schema_paid_operation());
+    let mut balance: i128 = 0;
+    let account_hex = hex::encode(account.as_bytes());
+    for message in messages {
+        if message.seq > upto_stream_seq {
+            break;
+        }
+        let Some(current_schema) = message.schema.as_deref() else {
+            continue;
+        };
+        if !current_schema.eq_ignore_ascii_case(&schema_hex) {
+            continue;
+        }
+        let body = message.body.as_ref().ok_or_else(|| {
+            ProtocolError::new(format!(
+                "stream {}#{} does not contain stored body for paid operation",
+                message.stream, message.seq
+            ))
+        })?;
+        let payload: PaidOperation = serde_json::from_str(body).with_context(|| {
+            format!(
+                "decoding paid.operation.v1 payload for {}#{}",
+                message.stream, message.seq
+            )
+        })?;
+        let amount = payload.amount as i128;
+        if payload.payer_account.as_bytes() == account.as_bytes() {
+            balance = balance
+                .checked_sub(amount)
+                .ok_or_else(|| anyhow!("ledger balance underflow for account {}", account_hex))?;
+        }
+        if payload.payee_account.as_bytes() == account.as_bytes() {
+            balance = balance
+                .checked_add(amount)
+                .ok_or_else(|| anyhow!("ledger balance overflow for account {}", account_hex))?;
+        }
+    }
+    Ok(WalletLedgerSnapshotState::new(account, balance))
+}
+
+fn compute_stream_prefix_mmr_root<'a, I>(messages: I, upto_stream_seq: u64) -> Result<MmrRoot>
+where
+    I: IntoIterator<Item = &'a StoredMessage>,
+{
+    let mut mmr = Mmr::new();
+    let mut last_seq = 0;
+    let mut last_root: Option<MmrRoot> = None;
+    for message in messages {
+        if message.seq > upto_stream_seq {
+            break;
+        }
+        let leaf = compute_message_leaf_hash(message)?;
+        let (seq, root) = mmr.append(leaf);
+        last_seq = seq;
+        last_root = Some(root);
+    }
+
+    if last_seq == 0 {
+        bail_protocol!(
+            "no messages available to compute mmr_root for upto seq {}",
+            upto_stream_seq
+        );
+    }
+    if last_seq != upto_stream_seq {
+        bail_protocol!(
+            "stream data missing message {} required for snapshot (last folded seq {})",
+            upto_stream_seq,
+            last_seq
+        );
+    }
+
+    if let Some(root) = last_root {
+        Ok(root)
+    } else {
+        bail_protocol!(
+            "missing mmr root after folding upto seq {}",
+            upto_stream_seq
+        );
+    }
+}
+
 async fn handle_verify_state(args: VerifyStateArgs) -> Result<()> {
     let hub = hub_reference_from_locator(&args.hub, "verify-state").await?;
     let client_state: ClientStateFile = read_json_file(&args.client.join("state.json")).await?;
@@ -9561,6 +9897,98 @@ mod tests {
         assert_eq!(computed.as_bytes(), expected.as_bytes());
 
         Ok(())
+    }
+
+    #[test]
+    fn snapshot_wallet_fold_computes_balance() -> anyhow::Result<()> {
+        let account = AccountId::from_slice(&[0x33u8; ACCOUNT_ID_LEN])?;
+        let peer = AccountId::from_slice(&[0x44u8; ACCOUNT_ID_LEN])?;
+        let mut messages = Vec::new();
+        messages.push(test_paid_message(1, &account, &peer, 50)?);
+        messages.push(test_paid_message(2, &peer, &account, 20)?);
+
+        let summary = fold_wallet_ledger_snapshot(&messages, 2, &account)?;
+        assert_eq!(summary.account_id, hex::encode(account.as_bytes()));
+        assert_eq!(summary.balance, -30);
+
+        let summary_one = fold_wallet_ledger_snapshot(&messages, 1, &account)?;
+        assert_eq!(summary_one.balance, -50);
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_prefix_mmr_matches_manual_fold() -> anyhow::Result<()> {
+        let mut messages = Vec::new();
+        for seq in 1..=3 {
+            messages.push(test_plain_message(seq));
+        }
+
+        let mut manual = Mmr::new();
+        let mut expected = None;
+        for message in &messages {
+            let leaf = compute_message_leaf_hash(message)?;
+            let (_, root) = manual.append(leaf);
+            expected = Some(root);
+        }
+
+        let computed = compute_stream_prefix_mmr_root(&messages, 3)?;
+        assert_eq!(
+            computed.as_bytes(),
+            expected.expect("manual root").as_bytes()
+        );
+        Ok(())
+    }
+
+    fn test_paid_message(
+        seq: u64,
+        payer: &AccountId,
+        payee: &AccountId,
+        amount: u64,
+    ) -> anyhow::Result<StoredMessage> {
+        let payload = PaidOperation {
+            operation_type: "transfer".to_string(),
+            operation_args: CborValue::Null,
+            payer_account: *payer,
+            payee_account: *payee,
+            amount,
+            currency_code: Some("USD".to_string()),
+            operation_reference: None,
+            parent_operation_id: None,
+            ttl_seconds: None,
+            metadata: None,
+        };
+        let body = serde_json::to_string(&payload)?;
+        Ok(StoredMessage {
+            stream: "wallet/demo".to_string(),
+            seq,
+            sent_at: 1_700_000_000 + seq,
+            client_id: "client".to_string(),
+            schema: Some(hex::encode(schema_paid_operation())),
+            expires_at: None,
+            parent: None,
+            body: Some(body),
+            body_digest: None,
+            attachments: Vec::new(),
+            auth_ref: None,
+            idem: None,
+        })
+    }
+
+    fn test_plain_message(seq: u64) -> StoredMessage {
+        StoredMessage {
+            stream: "wallet/demo".to_string(),
+            seq,
+            sent_at: 1_700_000_000 + seq,
+            client_id: format!("client-{seq}"),
+            schema: Some("test.schema".to_string()),
+            expires_at: None,
+            parent: None,
+            body: Some(format!("{{\"seq\":{seq}}}")),
+            body_digest: None,
+            attachments: Vec::new(),
+            auth_ref: None,
+            idem: None,
+        }
     }
 
     #[tokio::test]
