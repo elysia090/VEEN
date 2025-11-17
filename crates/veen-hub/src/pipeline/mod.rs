@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::convert::TryInto;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ use sha2::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::fs::OpenOptions;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
 use veen_core::hub::HubId;
 use veen_core::meta::SchemaRegistry;
@@ -244,6 +244,16 @@ impl HubPipeline {
                 limit: MAX_BODY_BYTES,
             }));
         }
+        let prepared_attachments = prepare_attachments_for_storage(
+            &self.storage,
+            &stream,
+            &attachments,
+            payload_json.len(),
+        )?;
+        let stored_attachments = prepared_attachments
+            .iter()
+            .map(|attachment| attachment.stored.clone())
+            .collect::<Vec<_>>();
         let submitted_at = current_unix_timestamp();
         let submitted_at_ms = current_unix_timestamp_millis();
         let client_id_value = ClientId::from_str(&client_id)
@@ -264,6 +274,7 @@ impl HubPipeline {
             .context("constructing auth_ref revocation target")?;
 
         let mut guard = self.inner.lock().await;
+        let mut capability_store_dirty = false;
 
         let authority = guard
             .authority_view
@@ -366,14 +377,18 @@ impl HubPipeline {
                 submitted_at,
                 submitted_at_ms,
             ) {
-                update_capability_store(&self.storage, &guard.capabilities).await?;
-                return Err(anyhow::Error::new(err));
+                return self.capability_err(guard, err).await;
             }
+            capability_store_dirty = true;
         } else if self.admission.capability_gating_enabled {
-            update_capability_store(&self.storage, &guard.capabilities).await?;
-            return Err(anyhow::Error::new(CapabilityError::Unauthorized {
-                auth_ref: "missing".to_string(),
-            }));
+            return self
+                .capability_err(
+                    guard,
+                    CapabilityError::Unauthorized {
+                        auth_ref: "missing".to_string(),
+                    },
+                )
+                .await;
         }
 
         if let Some((token_hash, target)) = token_revocation {
@@ -381,10 +396,9 @@ impl HubPipeline {
                 .revocations
                 .is_revoked(RevocationKind::CapToken, target, submitted_at)
             {
-                update_capability_store(&self.storage, &guard.capabilities).await?;
-                return Err(anyhow::Error::new(CapabilityError::CapTokenRevoked {
-                    token_hash,
-                }));
+                return self
+                    .capability_err(guard, CapabilityError::CapTokenRevoked { token_hash })
+                    .await;
             }
         }
 
@@ -397,11 +411,9 @@ impl HubPipeline {
         ) {
             Ok(update) => update,
             Err(err) => {
-                update_capability_store(&self.storage, &guard.capabilities).await?;
-                return Err(anyhow::Error::new(err));
+                return self.capability_err(guard, err).await;
             }
         };
-
         let stream_runtime = guard
             .streams
             .entry(stream.clone())
@@ -413,9 +425,6 @@ impl HubPipeline {
             .last()
             .map(|m| m.seq + 1)
             .unwrap_or(1);
-
-        let stored_attachments =
-            persist_attachments(&self.storage, &stream, &attachments, payload_json.len()).await?;
 
         let stored_message = StoredMessage {
             stream: stream.clone(),
@@ -436,10 +445,12 @@ impl HubPipeline {
         let (computed_seq, mmr_root, proof) = stream_runtime.mmr.append_with_proof(leaf);
         debug_assert_eq!(computed_seq, seq, "stream mmr seq must match message seq");
         stream_runtime.state.messages.push(stored_message.clone());
+        let leaf_hex = hex::encode(leaf.as_bytes());
+        let mmr_root_hex = hex::encode(mmr_root.as_bytes());
         let receipt = StreamReceipt {
             seq,
-            leaf_hash: hex::encode(leaf.as_bytes()),
-            mmr_root: hex::encode(mmr_root.as_bytes()),
+            leaf_hash: leaf_hex.clone(),
+            mmr_root: mmr_root_hex.clone(),
             hub_ts: submitted_at,
         };
         let message_with_proof = StreamMessageWithProof {
@@ -451,34 +462,54 @@ impl HubPipeline {
             .proven_messages
             .push(message_with_proof.clone());
 
-        persist_message_bundle(&self.storage, &stream, seq, &message_with_proof).await?;
-        stream_index::append_stream_index(
-            &self.storage,
-            &stream,
-            &StreamIndexEntry {
-                seq,
-                leaf_hash: hex::encode(leaf.as_bytes()),
-                bundle: self.storage.message_bundle_filename(&stream, seq),
-            },
-        )
-        .await?;
-        append_receipt(&self.storage, &message_with_proof).await?;
-
+        let usage_update_present = usage_update.is_some();
         if let Err(err) = apply_client_usage_update(&mut guard.capabilities, usage_update) {
-            update_capability_store(&self.storage, &guard.capabilities).await?;
-            return Err(anyhow::Error::new(err));
+            return self.capability_err(guard, err).await;
+        }
+        if usage_update_present {
+            capability_store_dirty = true;
         }
 
-        update_capability_store(&self.storage, &guard.capabilities).await?;
+        let stream_index_entry = StreamIndexEntry {
+            seq,
+            leaf_hash: leaf_hex,
+            bundle: self.storage.message_bundle_filename(&stream, seq),
+        };
+        let capability_snapshot = if capability_store_dirty {
+            Some(guard.capabilities.clone())
+        } else {
+            None
+        };
+        drop(guard);
+
+        persist_attachments(&self.storage, &prepared_attachments).await?;
+        persist_stream_state(&self.storage, &stream, &stream_index_entry).await?;
+        persist_message_bundle(&self.storage, &stream, seq, &message_with_proof).await?;
+        append_receipt(&self.storage, &message_with_proof).await?;
+
+        if let Some(store) = capability_snapshot {
+            update_capability_store(&self.storage, &store).await?;
+        }
 
         self.observability.record_submit_ok();
 
         Ok(SubmitResponse {
             stream,
             seq,
-            mmr_root: hex::encode(mmr_root.as_bytes()),
+            mmr_root: mmr_root_hex,
             stored_attachments,
         })
+    }
+
+    async fn capability_err<T>(
+        &self,
+        guard: MutexGuard<'_, HubState>,
+        err: CapabilityError,
+    ) -> Result<T> {
+        let snapshot = guard.capabilities.clone();
+        drop(guard);
+        update_capability_store(&self.storage, &snapshot).await?;
+        Err(anyhow::Error::new(err))
     }
 
     pub async fn bridge_ingest(
@@ -1658,6 +1689,12 @@ pub struct StoredAttachment {
     pub stored_path: String,
 }
 
+struct PreparedAttachment {
+    stored: StoredAttachment,
+    path: PathBuf,
+    data: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AnchorLog {
     pub entries: Vec<AnchorRecord>,
@@ -2336,6 +2373,14 @@ fn build_proven_messages(messages: &[StoredMessage]) -> Result<Vec<StreamMessage
     Ok(proven)
 }
 
+async fn persist_stream_state(
+    storage: &HubStorage,
+    stream: &str,
+    entry: &StreamIndexEntry,
+) -> Result<()> {
+    stream_index::append_stream_index(storage, stream, entry).await
+}
+
 async fn persist_message_bundle(
     storage: &HubStorage,
     stream: &str,
@@ -2423,19 +2468,18 @@ async fn read_checkpoints(storage: &HubStorage) -> Result<Vec<Checkpoint>> {
     Ok(checkpoints)
 }
 
-async fn persist_attachments(
+fn prepare_attachments_for_storage(
     storage: &HubStorage,
     stream: &str,
     attachments: &[AttachmentUpload],
     initial_bytes: usize,
-) -> Result<Vec<StoredAttachment>> {
+) -> Result<Vec<PreparedAttachment>> {
     if attachments.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut decoded = Vec::with_capacity(attachments.len());
     let mut total_bytes = initial_bytes;
-
+    let mut prepared = Vec::with_capacity(attachments.len());
     for (index, attachment) in attachments.iter().enumerate() {
         let data = BASE64_STANDARD
             .decode(&attachment.data)
@@ -2454,7 +2498,31 @@ async fn persist_attachments(
             .into());
         }
         total_bytes = new_total;
-        decoded.push((index, attachment.name.clone(), data));
+        let digest = sha2::Sha256::digest(&data);
+        let digest_hex = hex::encode(&digest);
+        let file_name = format!("{digest_hex}.bin");
+        let path = storage.attachments_dir().join(&file_name);
+        let stored = StoredAttachment {
+            name: attachment
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("attachment-{index}")),
+            digest: digest_hex,
+            size: data.len() as u64,
+            stored_path: path.to_string_lossy().into_owned(),
+        };
+        prepared.push(PreparedAttachment { stored, path, data });
+    }
+
+    Ok(prepared)
+}
+
+async fn persist_attachments(
+    storage: &HubStorage,
+    attachments: &[PreparedAttachment],
+) -> Result<()> {
+    if attachments.is_empty() {
+        return Ok(());
     }
 
     fs::create_dir_all(storage.attachments_dir())
@@ -2466,26 +2534,13 @@ async fn persist_attachments(
             )
         })?;
 
-    let mut stored = Vec::with_capacity(decoded.len());
-    for (index, name, data) in decoded {
-        let digest = sha2::Sha256::digest(&data);
-        let digest_hex = hex::encode(digest);
-        let file_name = format!("{digest_hex}.bin");
-        let path = storage.attachments_dir().join(&file_name);
-        fs::write(&path, &data)
+    for attachment in attachments {
+        fs::write(&attachment.path, &attachment.data)
             .await
-            .with_context(|| format!("writing attachment to {}", path.display()))?;
-        stored.push(StoredAttachment {
-            name: name
-                .clone()
-                .unwrap_or_else(|| format!("attachment-{index}")),
-            digest: digest_hex,
-            size: data.len() as u64,
-            stored_path: path.to_string_lossy().into_owned(),
-        });
+            .with_context(|| format!("writing attachment to {}", attachment.path.display()))?;
     }
 
-    Ok(stored)
+    Ok(())
 }
 
 fn check_client_usage(
