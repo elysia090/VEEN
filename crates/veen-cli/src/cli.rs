@@ -8832,6 +8832,16 @@ fn record_selftest_stub_marker(suite: SelftestSuite) -> Result<()> {
     Ok(())
 }
 
+fn emit_selftest_report(suite: SelftestSuite, report: &veen_selftest::SelftestReport) {
+    println!();
+    println!("self-test suite {} report:", suite.name());
+    if report.is_empty() {
+        println!("  (no self-test entries recorded)");
+    } else {
+        println!("{report}");
+    }
+}
+
 async fn handle_env_init(args: EnvInitArgs) -> Result<()> {
     ensure_non_empty_field(&args.name, "name")?;
     ensure_non_empty_field(&args.cluster_context, "cluster-context")?;
@@ -9553,13 +9563,21 @@ async fn handle_selftest_core() -> Result<()> {
         return Ok(());
     }
     println!("running VEEN core self-tests...");
-    let mut reporter = veen_selftest::SelftestReporter::disabled();
-    match veen_selftest::run_core(&mut reporter).await {
+    let mut report = veen_selftest::SelftestReport::default();
+    let result = {
+        let mut reporter = veen_selftest::SelftestReporter::new(Some(&mut report));
+        veen_selftest::run_core(&mut reporter).await
+    };
+    match result {
         Ok(()) => {
+            emit_selftest_report(SelftestSuite::Core, &report);
             log_cli_goal("CLI.SELFTEST.CORE");
             Ok(())
         }
-        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
+        Err(err) => {
+            emit_selftest_report(SelftestSuite::Core, &report);
+            Err(anyhow::Error::new(SelftestFailure::new(err)))
+        }
     }
 }
 
@@ -9568,13 +9586,21 @@ async fn handle_selftest_props() -> Result<()> {
         return Ok(());
     }
     println!("running VEEN property self-tests...");
-    let mut reporter = veen_selftest::SelftestReporter::disabled();
-    match veen_selftest::run_props(&mut reporter) {
+    let mut report = veen_selftest::SelftestReport::default();
+    let result = {
+        let mut reporter = veen_selftest::SelftestReporter::new(Some(&mut report));
+        veen_selftest::run_props(&mut reporter)
+    };
+    match result {
         Ok(()) => {
+            emit_selftest_report(SelftestSuite::Props, &report);
             log_cli_goal("CLI.SELFTEST.PROPS");
             Ok(())
         }
-        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
+        Err(err) => {
+            emit_selftest_report(SelftestSuite::Props, &report);
+            Err(anyhow::Error::new(SelftestFailure::new(err)))
+        }
     }
 }
 
@@ -9583,13 +9609,21 @@ async fn handle_selftest_fuzz() -> Result<()> {
         return Ok(());
     }
     println!("running VEEN fuzz self-tests...");
-    let mut reporter = veen_selftest::SelftestReporter::disabled();
-    match veen_selftest::run_fuzz(&mut reporter) {
+    let mut report = veen_selftest::SelftestReport::default();
+    let result = {
+        let mut reporter = veen_selftest::SelftestReporter::new(Some(&mut report));
+        veen_selftest::run_fuzz(&mut reporter)
+    };
+    match result {
         Ok(()) => {
+            emit_selftest_report(SelftestSuite::Fuzz, &report);
             log_cli_goal("CLI.SELFTEST.FUZZ");
             Ok(())
         }
-        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
+        Err(err) => {
+            emit_selftest_report(SelftestSuite::Fuzz, &report);
+            Err(anyhow::Error::new(SelftestFailure::new(err)))
+        }
     }
 }
 
@@ -9598,13 +9632,21 @@ async fn handle_selftest_all() -> Result<()> {
         return Ok(());
     }
     println!("running full VEEN self-test suite...");
-    let mut reporter = veen_selftest::SelftestReporter::disabled();
-    match veen_selftest::run_all(&mut reporter).await {
+    let mut report = veen_selftest::SelftestReport::default();
+    let result = {
+        let mut reporter = veen_selftest::SelftestReporter::new(Some(&mut report));
+        veen_selftest::run_all(&mut reporter).await
+    };
+    match result {
         Ok(()) => {
+            emit_selftest_report(SelftestSuite::All, &report);
             log_cli_goal("CLI.SELFTEST.ALL");
             Ok(())
         }
-        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
+        Err(err) => {
+            emit_selftest_report(SelftestSuite::All, &report);
+            Err(anyhow::Error::new(SelftestFailure::new(err)))
+        }
     }
 }
 
@@ -9613,13 +9655,21 @@ async fn handle_selftest_federated() -> Result<()> {
         return Ok(());
     }
     println!("running VEEN federated self-tests...");
-    let mut reporter = veen_selftest::SelftestReporter::disabled();
-    match veen_selftest::run_federated(&mut reporter).await {
+    let mut report = veen_selftest::SelftestReport::default();
+    let result = {
+        let mut reporter = veen_selftest::SelftestReporter::new(Some(&mut report));
+        veen_selftest::run_federated(&mut reporter).await
+    };
+    match result {
         Ok(()) => {
+            emit_selftest_report(SelftestSuite::Federated, &report);
             log_cli_goal("CLI.SELFTEST.FEDERATED");
             Ok(())
         }
-        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
+        Err(err) => {
+            emit_selftest_report(SelftestSuite::Federated, &report);
+            Err(anyhow::Error::new(SelftestFailure::new(err)))
+        }
     }
 }
 
@@ -9628,13 +9678,21 @@ async fn handle_selftest_kex1() -> Result<()> {
         return Ok(());
     }
     println!("running VEEN KEX1+ self-tests...");
-    let mut reporter = veen_selftest::SelftestReporter::disabled();
-    match veen_selftest::run_kex1(&mut reporter).await {
+    let mut report = veen_selftest::SelftestReport::default();
+    let result = {
+        let mut reporter = veen_selftest::SelftestReporter::new(Some(&mut report));
+        veen_selftest::run_kex1(&mut reporter).await
+    };
+    match result {
         Ok(()) => {
+            emit_selftest_report(SelftestSuite::Kex1, &report);
             log_cli_goal("CLI.SELFTEST.KEX1");
             Ok(())
         }
-        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
+        Err(err) => {
+            emit_selftest_report(SelftestSuite::Kex1, &report);
+            Err(anyhow::Error::new(SelftestFailure::new(err)))
+        }
     }
 }
 
@@ -9643,13 +9701,21 @@ async fn handle_selftest_hardened() -> Result<()> {
         return Ok(());
     }
     println!("running VEEN hardened self-tests...");
-    let mut reporter = veen_selftest::SelftestReporter::disabled();
-    match veen_selftest::run_hardened(&mut reporter).await {
+    let mut report = veen_selftest::SelftestReport::default();
+    let result = {
+        let mut reporter = veen_selftest::SelftestReporter::new(Some(&mut report));
+        veen_selftest::run_hardened(&mut reporter).await
+    };
+    match result {
         Ok(()) => {
+            emit_selftest_report(SelftestSuite::Hardened, &report);
             log_cli_goal("CLI.SELFTEST.HARDENED");
             Ok(())
         }
-        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
+        Err(err) => {
+            emit_selftest_report(SelftestSuite::Hardened, &report);
+            Err(anyhow::Error::new(SelftestFailure::new(err)))
+        }
     }
 }
 
@@ -9658,13 +9724,21 @@ async fn handle_selftest_meta() -> Result<()> {
         return Ok(());
     }
     println!("running VEEN meta self-tests...");
-    let mut reporter = veen_selftest::SelftestReporter::disabled();
-    match veen_selftest::run_meta(&mut reporter).await {
+    let mut report = veen_selftest::SelftestReport::default();
+    let result = {
+        let mut reporter = veen_selftest::SelftestReporter::new(Some(&mut report));
+        veen_selftest::run_meta(&mut reporter).await
+    };
+    match result {
         Ok(()) => {
+            emit_selftest_report(SelftestSuite::Meta, &report);
             log_cli_goal("CLI.SELFTEST.META");
             Ok(())
         }
-        Err(err) => Err(anyhow::Error::new(SelftestFailure::new(err))),
+        Err(err) => {
+            emit_selftest_report(SelftestSuite::Meta, &report);
+            Err(anyhow::Error::new(SelftestFailure::new(err)))
+        }
     }
 }
 
