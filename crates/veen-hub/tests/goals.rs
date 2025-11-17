@@ -667,8 +667,9 @@ async fn goals_capability_gating_persists() -> Result<()> {
             capability_store_path.display()
         )
     })?;
+    let capability_store_survived = stored_caps.contains(&auth_ref_hex);
     assert!(
-        stored_caps.contains(&auth_ref_hex),
+        capability_store_survived,
         "capability store missing authorised record"
     );
 
@@ -752,6 +753,17 @@ async fn goals_capability_gating_persists() -> Result<()> {
     assert!(
         auth_errors >= 1,
         "expected at least one E.AUTH error recorded for missing auth_ref, got {auth_errors}"
+    );
+
+    println!(
+        "goal: CAP.PERSISTENCE\n  hub.path: {}\n  cap.file: {}\n  auth_ref: {}\n  capability.store: {}\n  restart.addr: {}\n  submit.seq: {}\n  metrics.E.AUTH: {}",
+        hub_dir.path().display(),
+        cap_file.display(),
+        auth_ref_hex,
+        if capability_store_survived { "persisted" } else { "missing" },
+        restart_runtime.listen_addr(),
+        authorized.seq,
+        auth_errors,
     );
 
     restart_runtime.shutdown().await?;
