@@ -9553,7 +9553,8 @@ async fn handle_selftest_core() -> Result<()> {
         return Ok(());
     }
     println!("running VEEN core self-tests...");
-    match veen_selftest::run_core().await {
+    let mut reporter = veen_selftest::SelftestReporter::disabled();
+    match veen_selftest::run_core(&mut reporter).await {
         Ok(()) => {
             log_cli_goal("CLI.SELFTEST.CORE");
             Ok(())
@@ -9567,7 +9568,8 @@ async fn handle_selftest_props() -> Result<()> {
         return Ok(());
     }
     println!("running VEEN property self-tests...");
-    match veen_selftest::run_props() {
+    let mut reporter = veen_selftest::SelftestReporter::disabled();
+    match veen_selftest::run_props(&mut reporter) {
         Ok(()) => {
             log_cli_goal("CLI.SELFTEST.PROPS");
             Ok(())
@@ -9581,7 +9583,8 @@ async fn handle_selftest_fuzz() -> Result<()> {
         return Ok(());
     }
     println!("running VEEN fuzz self-tests...");
-    match veen_selftest::run_fuzz() {
+    let mut reporter = veen_selftest::SelftestReporter::disabled();
+    match veen_selftest::run_fuzz(&mut reporter) {
         Ok(()) => {
             log_cli_goal("CLI.SELFTEST.FUZZ");
             Ok(())
@@ -9595,7 +9598,8 @@ async fn handle_selftest_all() -> Result<()> {
         return Ok(());
     }
     println!("running full VEEN self-test suite...");
-    match veen_selftest::run_all().await {
+    let mut reporter = veen_selftest::SelftestReporter::disabled();
+    match veen_selftest::run_all(&mut reporter).await {
         Ok(()) => {
             log_cli_goal("CLI.SELFTEST.ALL");
             Ok(())
@@ -9609,7 +9613,8 @@ async fn handle_selftest_federated() -> Result<()> {
         return Ok(());
     }
     println!("running VEEN federated self-tests...");
-    match veen_selftest::run_federated().await {
+    let mut reporter = veen_selftest::SelftestReporter::disabled();
+    match veen_selftest::run_federated(&mut reporter).await {
         Ok(()) => {
             log_cli_goal("CLI.SELFTEST.FEDERATED");
             Ok(())
@@ -9623,7 +9628,8 @@ async fn handle_selftest_kex1() -> Result<()> {
         return Ok(());
     }
     println!("running VEEN KEX1+ self-tests...");
-    match veen_selftest::run_kex1().await {
+    let mut reporter = veen_selftest::SelftestReporter::disabled();
+    match veen_selftest::run_kex1(&mut reporter).await {
         Ok(()) => {
             log_cli_goal("CLI.SELFTEST.KEX1");
             Ok(())
@@ -9637,7 +9643,8 @@ async fn handle_selftest_hardened() -> Result<()> {
         return Ok(());
     }
     println!("running VEEN hardened self-tests...");
-    match veen_selftest::run_hardened().await {
+    let mut reporter = veen_selftest::SelftestReporter::disabled();
+    match veen_selftest::run_hardened(&mut reporter).await {
         Ok(()) => {
             log_cli_goal("CLI.SELFTEST.HARDENED");
             Ok(())
@@ -9651,7 +9658,8 @@ async fn handle_selftest_meta() -> Result<()> {
         return Ok(());
     }
     println!("running VEEN meta self-tests...");
-    match veen_selftest::run_meta().await {
+    let mut reporter = veen_selftest::SelftestReporter::disabled();
+    match veen_selftest::run_meta(&mut reporter).await {
         Ok(()) => {
             log_cli_goal("CLI.SELFTEST.META");
             Ok(())

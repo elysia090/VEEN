@@ -22,6 +22,8 @@ use veen_hub::pipeline::{HubStreamState, SubmitRequest};
 use veen_hub::runtime::HubRuntime;
 use veen_hub::storage::HUB_KEY_FILE;
 
+use crate::{SelftestGoalReport, SelftestReporter};
+
 const FED_CHAT_STREAM: &str = "fed/chat";
 const DEFAULT_CLIENT_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -43,13 +45,27 @@ struct HubKeyMaterial {
     secret_key: ByteBuf,
 }
 
-pub async fn run_overlays(subset: Option<&str>) -> Result<()> {
+pub async fn run_overlays(subset: Option<&str>, reporter: &mut SelftestReporter<'_>) -> Result<()> {
     match subset {
         None | Some("fed-auth") => run_fed_auth()
             .await
             .context("executing federation authority overlay self-test")?,
         Some(other) => bail!("unknown overlay subset {other}"),
     }
+    let subset_label = subset.unwrap_or("fed-auth");
+    reporter.record(SelftestGoalReport {
+        goal: format!("SELFTEST.OVERLAYS.{subset_label}"),
+        environment: vec![
+            format!("subset={subset_label}"),
+            format!("stream={FED_CHAT_STREAM}"),
+        ],
+        invariants: vec![
+            "replica rejects direct submissions".into(),
+            "bridge relays submissions across hubs".into(),
+            "MMR roots converge after replication".into(),
+        ],
+        evidence: vec!["fed-auth scenario executed with bridge and hubs".into()],
+    });
     Ok(())
 }
 
