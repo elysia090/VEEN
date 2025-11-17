@@ -5,7 +5,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use ciborium::de::from_reader;
@@ -29,7 +29,7 @@ use veen_core::wire::checkpoint::Checkpoint;
 use veen_core::wire::{
     mmr::Mmr,
     proof::{Direction, MmrPathNode, MmrProof},
-    types::{AuthRef, ClientId, LeafHash, MmrNode, MmrRoot},
+    types::{AuthRef, ClientId, LeafHash, MmrNode},
 };
 use veen_core::{
     cap_stream_id_from_label, cap_token_from_cbor, schema_fed_authority, schema_label_class,
@@ -78,17 +78,33 @@ struct HubState {
 
 struct StreamRuntime {
     state: HubStreamState,
+    proven_messages: Vec<StreamMessageWithProof>,
     mmr: Mmr,
 }
 
 impl StreamRuntime {
-    fn new(state: HubStreamState) -> Result<Self> {
+    fn new(state: HubStreamState, proven_messages: Vec<StreamMessageWithProof>) -> Result<Self> {
+        if state.messages.len() != proven_messages.len() {
+            bail!(
+                "stream state and proof history length mismatch: {} vs {}",
+                state.messages.len(),
+                proven_messages.len()
+            );
+        }
         let mut mmr = Mmr::new();
         for message in &state.messages {
             let leaf = leaf_hash_for(message)?;
             mmr.append(leaf);
         }
-        Ok(Self { state, mmr })
+        Ok(Self {
+            state,
+            proven_messages,
+            mmr,
+        })
+    }
+
+    fn empty() -> Self {
+        Self::new(HubStreamState::default(), Vec::new()).expect("empty stream state")
     }
 }
 
@@ -386,9 +402,10 @@ impl HubPipeline {
             }
         };
 
-        let stream_runtime = guard.streams.entry(stream.clone()).or_insert_with(|| {
-            StreamRuntime::new(HubStreamState::default()).expect("empty stream state")
-        });
+        let stream_runtime = guard
+            .streams
+            .entry(stream.clone())
+            .or_insert_with(StreamRuntime::empty);
 
         let seq = stream_runtime
             .state
@@ -416,10 +433,25 @@ impl HubPipeline {
         };
 
         let leaf = leaf_hash_for(&stored_message)?;
-        let (_, mmr_root) = stream_runtime.mmr.append(leaf);
+        let (computed_seq, mmr_root, proof) = stream_runtime.mmr.append_with_proof(leaf);
+        debug_assert_eq!(computed_seq, seq, "stream mmr seq must match message seq");
         stream_runtime.state.messages.push(stored_message.clone());
+        let receipt = StreamReceipt {
+            seq,
+            leaf_hash: hex::encode(leaf.as_bytes()),
+            mmr_root: hex::encode(mmr_root.as_bytes()),
+            hub_ts: submitted_at,
+        };
+        let message_with_proof = StreamMessageWithProof {
+            message: stored_message.clone(),
+            receipt: receipt.clone(),
+            proof: StreamProof::from(proof),
+        };
+        stream_runtime
+            .proven_messages
+            .push(message_with_proof.clone());
 
-        persist_message_bundle(&self.storage, &stream, seq, &stored_message).await?;
+        persist_message_bundle(&self.storage, &stream, seq, &message_with_proof).await?;
         stream_index::append_stream_index(
             &self.storage,
             &stream,
@@ -430,7 +462,7 @@ impl HubPipeline {
             },
         )
         .await?;
-        append_receipt(&self.storage, &stream, seq, &leaf, &mmr_root, submitted_at).await?;
+        append_receipt(&self.storage, &message_with_proof).await?;
 
         if let Err(err) = apply_client_usage_update(&mut guard.capabilities, usage_update) {
             update_capability_store(&self.storage, &guard.capabilities).await?;
@@ -464,9 +496,10 @@ impl HubPipeline {
         let stream = message.stream.clone();
 
         let mut guard = self.inner.lock().await;
-        let stream_runtime = guard.streams.entry(stream.clone()).or_insert_with(|| {
-            StreamRuntime::new(HubStreamState::default()).expect("empty stream state")
-        });
+        let stream_runtime = guard
+            .streams
+            .entry(stream.clone())
+            .or_insert_with(StreamRuntime::empty);
 
         if let Some(existing) = stream_runtime
             .state
@@ -513,7 +546,7 @@ impl HubPipeline {
         }
 
         let leaf = leaf_hash_for(&message)?;
-        let (_, mmr_root) = stream_runtime.mmr.append(leaf);
+        let (_, mmr_root, proof) = stream_runtime.mmr.append_with_proof(leaf);
         let computed_root = hex::encode(mmr_root.as_bytes());
         if !expected_mmr_root.is_empty() && expected_mmr_root != computed_root {
             bail!(
@@ -526,8 +559,22 @@ impl HubPipeline {
         }
 
         stream_runtime.state.messages.push(message.clone());
+        let receipt = StreamReceipt {
+            seq: message.seq,
+            leaf_hash: hex::encode(leaf.as_bytes()),
+            mmr_root: computed_root.clone(),
+            hub_ts: message.sent_at,
+        };
+        let message_with_proof = StreamMessageWithProof {
+            message: message.clone(),
+            receipt: receipt.clone(),
+            proof: StreamProof::from(proof),
+        };
+        stream_runtime
+            .proven_messages
+            .push(message_with_proof.clone());
 
-        persist_message_bundle(&self.storage, &stream, message.seq, &message).await?;
+        persist_message_bundle(&self.storage, &stream, message.seq, &message_with_proof).await?;
         stream_index::append_stream_index(
             &self.storage,
             &stream,
@@ -538,15 +585,7 @@ impl HubPipeline {
             },
         )
         .await?;
-        append_receipt(
-            &self.storage,
-            &stream,
-            message.seq,
-            &leaf,
-            &mmr_root,
-            message.sent_at,
-        )
-        .await?;
+        append_receipt(&self.storage, &message_with_proof).await?;
 
         self.observability.record_submit_ok();
 
@@ -661,25 +700,12 @@ impl HubPipeline {
             return Ok(StreamResponse::Messages(messages));
         }
 
-        let mut mmr = Mmr::new();
-        let mut proven = Vec::new();
-        for message in &runtime.state.messages {
-            let leaf = leaf_hash_for(message)?;
-            let (_, root, proof) = mmr.append_with_proof(leaf);
-            if message.seq >= from {
-                let receipt = StreamReceipt {
-                    seq: message.seq,
-                    leaf_hash: hex::encode(leaf.as_bytes()),
-                    mmr_root: hex::encode(root.as_bytes()),
-                    hub_ts: message.sent_at,
-                };
-                proven.push(StreamMessageWithProof {
-                    message: message.clone(),
-                    receipt,
-                    proof: StreamProof::from(proof),
-                });
-            }
-        }
+        let proven = runtime
+            .proven_messages
+            .iter()
+            .filter(|entry| entry.message.seq >= from)
+            .cloned()
+            .collect();
 
         Ok(StreamResponse::Proven(proven))
     }
@@ -1614,6 +1640,16 @@ pub struct StoredMessage {
     pub idem: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredMessageBundle {
+    #[serde(flatten)]
+    message: StoredMessage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    receipt: Option<StreamReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proof: Option<StreamProof>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredAttachment {
     pub name: String,
@@ -2120,12 +2156,13 @@ async fn load_existing_streams(storage: &HubStorage) -> Result<HashMap<String, S
             .is_file()
         {
             let path = entry.path();
-            let state = if matches!(path.extension().and_then(|ext| ext.to_str()), Some("json")) {
+            let loaded = if matches!(path.extension().and_then(|ext| ext.to_str()), Some("json")) {
                 load_legacy_stream_state(&path).await?
             } else {
                 load_stream_state_from_index(storage, &path).await?
             };
-            let stream_name = state
+            let stream_name = loaded
+                .state
                 .messages
                 .first()
                 .map(|msg| msg.stream.clone())
@@ -2135,7 +2172,7 @@ async fn load_existing_streams(storage: &HubStorage) -> Result<HashMap<String, S
                         .map(|s| s.to_string())
                 });
             if let Some(name) = stream_name {
-                let runtime = StreamRuntime::new(state)?;
+                let runtime = StreamRuntime::new(loaded.state, loaded.proven)?;
                 map.insert(name, runtime);
             }
         }
@@ -2143,39 +2180,167 @@ async fn load_existing_streams(storage: &HubStorage) -> Result<HashMap<String, S
     Ok(map)
 }
 
-async fn load_legacy_stream_state(path: &Path) -> Result<HubStreamState> {
+#[derive(Default)]
+struct LoadedStreamState {
+    state: HubStreamState,
+    proven: Vec<StreamMessageWithProof>,
+}
+
+async fn load_legacy_stream_state(path: &Path) -> Result<LoadedStreamState> {
     let data = fs::read(path)
         .await
         .with_context(|| format!("reading stream state from {}", path.display()))?;
-    serde_json::from_slice(&data)
-        .with_context(|| format!("decoding stream state from {}", path.display()))
+    let state: HubStreamState = serde_json::from_slice(&data)
+        .with_context(|| format!("decoding stream state from {}", path.display()))?;
+    let proven = build_proven_messages(&state.messages)?;
+    Ok(LoadedStreamState { state, proven })
 }
 
-async fn load_stream_state_from_index(storage: &HubStorage, path: &Path) -> Result<HubStreamState> {
+async fn load_stream_state_from_index(
+    storage: &HubStorage,
+    path: &Path,
+) -> Result<LoadedStreamState> {
     let entries = stream_index::load_stream_index(path).await?;
     if entries.is_empty() {
-        return Ok(HubStreamState::default());
+        return Ok(LoadedStreamState::default());
     }
 
     let mut messages = Vec::with_capacity(entries.len());
+    let mut proven = Vec::with_capacity(entries.len());
+    let mut mmr = Mmr::new();
+    let mut migrations = Vec::new();
+
     for entry in entries {
         let bundle_path = stream_index::bundle_path(storage, &entry);
         let data = fs::read(&bundle_path)
             .await
             .with_context(|| format!("reading message bundle from {}", bundle_path.display()))?;
-        let message: StoredMessage = serde_json::from_slice(&data)
-            .with_context(|| format!("decoding message bundle from {}", bundle_path.display()))?;
+        let bundle: StoredMessageBundle = match serde_json::from_slice(&data) {
+            Ok(bundle) => bundle,
+            Err(parse_err) => {
+                let legacy: StoredMessage = serde_json::from_slice(&data).with_context(|| {
+                    format!(
+                        "decoding legacy message bundle from {} after error: {parse_err}",
+                        bundle_path.display()
+                    )
+                })?;
+                StoredMessageBundle {
+                    message: legacy,
+                    receipt: None,
+                    proof: None,
+                }
+            }
+        };
+
+        let StoredMessageBundle {
+            message,
+            receipt,
+            proof,
+        } = bundle;
+        let leaf = leaf_hash_for(&message)?;
+        let leaf_hex = hex::encode(leaf.as_bytes());
+        if let (Some(receipt), Some(proof)) = (receipt, proof) {
+            let (seq, root) = mmr.append(leaf);
+            ensure!(
+                seq == message.seq,
+                "stored message seq {} diverges from mmr seq {} for {}",
+                message.seq,
+                seq,
+                bundle_path.display()
+            );
+            ensure!(
+                receipt.seq == message.seq,
+                "receipt seq {} diverges from message seq {} for {}",
+                receipt.seq,
+                message.seq,
+                bundle_path.display()
+            );
+            ensure!(
+                receipt.leaf_hash == leaf_hex,
+                "receipt leaf hash mismatch for {}",
+                bundle_path.display()
+            );
+            let computed_root = hex::encode(root.as_bytes());
+            ensure!(
+                receipt.mmr_root == computed_root,
+                "receipt mmr root {} mismatches computed {} for {}",
+                receipt.mmr_root,
+                computed_root,
+                bundle_path.display()
+            );
+            proven.push(StreamMessageWithProof {
+                message: message.clone(),
+                receipt,
+                proof,
+            });
+        } else {
+            let (seq, root, proof) = mmr.append_with_proof(leaf);
+            ensure!(
+                seq == message.seq,
+                "legacy message seq {} diverges from mmr seq {} for {}",
+                message.seq,
+                seq,
+                bundle_path.display()
+            );
+            let receipt = StreamReceipt {
+                seq,
+                leaf_hash: leaf_hex,
+                mmr_root: hex::encode(root.as_bytes()),
+                hub_ts: message.sent_at,
+            };
+            let entry_with_proof = StreamMessageWithProof {
+                message: message.clone(),
+                receipt: receipt.clone(),
+                proof: StreamProof::from(proof),
+            };
+            proven.push(entry_with_proof.clone());
+            migrations.push(entry_with_proof);
+        }
         messages.push(message);
     }
 
-    Ok(HubStreamState { messages })
+    for entry in &migrations {
+        persist_message_bundle(storage, &entry.message.stream, entry.message.seq, entry).await?;
+    }
+
+    Ok(LoadedStreamState {
+        state: HubStreamState { messages },
+        proven,
+    })
+}
+
+fn build_proven_messages(messages: &[StoredMessage]) -> Result<Vec<StreamMessageWithProof>> {
+    let mut mmr = Mmr::new();
+    let mut proven = Vec::with_capacity(messages.len());
+    for message in messages {
+        let leaf = leaf_hash_for(message)?;
+        let (seq, root, proof) = mmr.append_with_proof(leaf);
+        ensure!(
+            seq == message.seq,
+            "stream message seq {} diverges from mmr seq {}",
+            message.seq,
+            seq
+        );
+        let receipt = StreamReceipt {
+            seq,
+            leaf_hash: hex::encode(leaf.as_bytes()),
+            mmr_root: hex::encode(root.as_bytes()),
+            hub_ts: message.sent_at,
+        };
+        proven.push(StreamMessageWithProof {
+            message: message.clone(),
+            receipt,
+            proof: StreamProof::from(proof),
+        });
+    }
+    Ok(proven)
 }
 
 async fn persist_message_bundle(
     storage: &HubStorage,
     stream: &str,
     seq: u64,
-    message: &StoredMessage,
+    entry: &StreamMessageWithProof,
 ) -> Result<()> {
     let path = storage.message_bundle_path(stream, seq);
     if let Some(parent) = path.parent() {
@@ -2183,27 +2348,26 @@ async fn persist_message_bundle(
             .await
             .with_context(|| format!("ensuring message directory {}", parent.display()))?;
     }
-    let data = serde_json::to_vec(message)
+    let bundle = StoredMessageBundle {
+        message: entry.message.clone(),
+        receipt: Some(entry.receipt.clone()),
+        proof: Some(entry.proof.clone()),
+    };
+    let data = serde_json::to_vec(&bundle)
         .with_context(|| format!("encoding message bundle for {stream}#{seq}"))?;
     fs::write(&path, data)
         .await
         .with_context(|| format!("writing message bundle to {}", path.display()))
 }
 
-async fn append_receipt(
-    storage: &HubStorage,
-    stream: &str,
-    seq: u64,
-    leaf: &LeafHash,
-    mmr_root: &MmrRoot,
-    submitted_at: u64,
-) -> Result<()> {
+async fn append_receipt(storage: &HubStorage, entry: &StreamMessageWithProof) -> Result<()> {
     let receipt = ReceiptRecord {
-        stream: stream.to_string(),
-        seq,
-        leaf_hash: hex::encode(leaf.as_bytes()),
-        mmr_root: hex::encode(mmr_root.as_bytes()),
-        hub_ts: submitted_at,
+        stream: entry.message.stream.clone(),
+        seq: entry.message.seq,
+        leaf_hash: entry.receipt.leaf_hash.clone(),
+        mmr_root: entry.receipt.mmr_root.clone(),
+        hub_ts: entry.receipt.hub_ts,
+        proof: Some(entry.proof.clone()),
     };
     let mut encoded = Vec::new();
     ciborium::ser::into_writer(&receipt, &mut encoded).context("serialising receipt record")?;
@@ -2227,6 +2391,8 @@ struct ReceiptRecord {
     leaf_hash: String,
     mmr_root: String,
     hub_ts: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proof: Option<StreamProof>,
 }
 
 async fn read_checkpoints(storage: &HubStorage) -> Result<Vec<Checkpoint>> {
