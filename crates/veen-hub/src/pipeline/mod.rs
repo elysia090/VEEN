@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::convert::TryInto;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -369,7 +369,7 @@ impl HubPipeline {
         };
 
         if let Some(cap) = auth_ref.as_ref() {
-            if let Err(err) = enforce_capability(
+            let capability_dirty = match enforce_capability(
                 &mut guard.capabilities,
                 cap,
                 &client_id,
@@ -377,9 +377,12 @@ impl HubPipeline {
                 submitted_at,
                 submitted_at_ms,
             ) {
-                return self.capability_err(guard, err).await;
-            }
-            capability_store_dirty = true;
+                Ok(dirty) => dirty,
+                Err(err) => {
+                    return self.capability_err(guard, err).await;
+                }
+            };
+            capability_store_dirty |= capability_dirty;
         } else if self.admission.capability_gating_enabled {
             return self
                 .capability_err(
@@ -402,18 +405,19 @@ impl HubPipeline {
             }
         }
 
-        let usage_update = match check_client_usage(
+        let (usage_update, usage_dirty) = match check_client_usage(
             &mut guard.capabilities,
             &self.admission,
             &client_id,
             &stream,
             submitted_at,
         ) {
-            Ok(update) => update,
+            Ok(result) => result,
             Err(err) => {
                 return self.capability_err(guard, err).await;
             }
         };
+        capability_store_dirty |= usage_dirty;
         let stream_runtime = guard
             .streams
             .entry(stream.clone())
@@ -462,13 +466,14 @@ impl HubPipeline {
             .proven_messages
             .push(message_with_proof.clone());
 
-        let usage_update_present = usage_update.is_some();
-        if let Err(err) = apply_client_usage_update(&mut guard.capabilities, usage_update) {
-            return self.capability_err(guard, err).await;
-        }
-        if usage_update_present {
-            capability_store_dirty = true;
-        }
+        let usage_applied_dirty =
+            match apply_client_usage_update(&mut guard.capabilities, usage_update) {
+                Ok(dirty) => dirty,
+                Err(err) => {
+                    return self.capability_err(guard, err).await;
+                }
+            };
+        capability_store_dirty |= usage_applied_dirty;
 
         let stream_index_entry = StreamIndexEntry {
             seq,
@@ -2549,17 +2554,21 @@ fn check_client_usage(
     client_id: &str,
     stream: &str,
     now: u64,
-) -> Result<Option<ClientUsageUpdate>, CapabilityError> {
+) -> Result<(Option<ClientUsageUpdate>, bool), CapabilityError> {
     if admission.max_client_id_lifetime_sec.is_none()
         && admission.max_msgs_per_client_id_per_label.is_none()
     {
-        return Ok(None);
+        return Ok((None, false));
     }
 
-    let entry = store
-        .client_usage
-        .entry(client_id.to_string())
-        .or_insert_with(|| ClientAdmissionState::new(now));
+    let mut store_dirty = false;
+    let entry = match store.client_usage.entry(client_id.to_string()) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(vacant) => {
+            store_dirty = true;
+            vacant.insert(ClientAdmissionState::new(now))
+        }
+    };
 
     if let Some(limit) = admission.max_client_id_lifetime_sec {
         if now.saturating_sub(entry.first_seen) >= limit {
@@ -2582,23 +2591,28 @@ fn check_client_usage(
         }
     }
 
-    Ok(Some(ClientUsageUpdate {
-        client_id: client_id.to_string(),
-        stream: stream.to_string(),
-        first_seen: entry.first_seen,
-    }))
+    Ok((
+        Some(ClientUsageUpdate {
+            client_id: client_id.to_string(),
+            stream: stream.to_string(),
+            first_seen: entry.first_seen,
+        }),
+        store_dirty,
+    ))
 }
 
 fn apply_client_usage_update(
     store: &mut CapabilityStore,
     update: Option<ClientUsageUpdate>,
-) -> Result<(), CapabilityError> {
+) -> Result<bool, CapabilityError> {
+    let mut store_dirty = false;
     if let Some(ClientUsageUpdate {
         client_id,
         stream,
         first_seen,
     }) = update
     {
+        store_dirty = true;
         let entry = store
             .client_usage
             .entry(client_id.clone())
@@ -2611,7 +2625,7 @@ fn apply_client_usage_update(
                 stream: stream.clone(),
             })?;
     }
-    Ok(())
+    Ok(store_dirty)
 }
 
 fn enforce_capability(
@@ -2621,13 +2635,14 @@ fn enforce_capability(
     stream: &str,
     now: u64,
     now_ms: u64,
-) -> Result<(), CapabilityError> {
+) -> Result<bool, CapabilityError> {
     if !store.records.contains_key(auth_ref) {
         return Err(CapabilityError::Unauthorized {
             auth_ref: auth_ref.to_string(),
         });
     }
 
+    let mut store_dirty = false;
     if let Some(expired) = store
         .records
         .get(auth_ref)
@@ -2653,6 +2668,7 @@ fn enforce_capability(
     }
 
     if record.rate.is_some() && record.bucket_state.is_none() {
+        store_dirty = true;
         record.bucket_state = record
             .rate
             .as_ref()
@@ -2677,7 +2693,12 @@ fn enforce_capability(
     }
 
     if let (Some(rate), Some(state)) = (&record.rate, record.bucket_state.as_mut()) {
+        let previous_tokens = state.tokens;
+        let previous_last_refill = state.last_refill;
         refill_bucket(state, rate, now_ms);
+        if state.tokens != previous_tokens || state.last_refill != previous_last_refill {
+            store_dirty = true;
+        }
         if state.tokens == 0 {
             let retry_after = retry_after_seconds(rate, state, now_ms);
             return Err(CapabilityError::RateLimited {
@@ -2685,11 +2706,20 @@ fn enforce_capability(
                 retry_after,
             });
         }
+        let tokens_before = state.tokens;
         state.tokens = state.tokens.saturating_sub(1);
+        if state.tokens != tokens_before {
+            store_dirty = true;
+        }
     }
 
-    record.uses = record.uses.saturating_add(1);
-    Ok(())
+    let previous_uses = record.uses;
+    let new_uses = record.uses.saturating_add(1);
+    if new_uses != previous_uses {
+        record.uses = new_uses;
+        store_dirty = true;
+    }
+    Ok(store_dirty)
 }
 
 fn refill_bucket(state: &mut TokenBucketState, rate: &CapTokenRate, now_ms: u64) {
@@ -2762,7 +2792,7 @@ async fn update_capability_store(storage: &HubStorage, store: &CapabilityStore) 
             .await
             .with_context(|| format!("ensuring capability directory {}", parent.display()))?;
     }
-    let data = serde_json::to_vec_pretty(store).context("encoding capability store")?;
+    let data = serde_json::to_vec(store).context("encoding capability store")?;
     fs::write(&path, data)
         .await
         .with_context(|| format!("writing capability store to {}", path.display()))
