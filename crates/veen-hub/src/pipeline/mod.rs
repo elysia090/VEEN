@@ -1,6 +1,6 @@
 use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::convert::TryInto;
-use std::io::Cursor;
+use std::io::{Cursor, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -43,6 +43,7 @@ use thiserror::Error;
 use crate::config::{AdmissionConfig, FederationConfig, HubRole, HubRuntimeConfig};
 use crate::observability::{HubObservability, ObservabilitySnapshot};
 use crate::storage::{
+    attachments,
     stream_index::{self, StreamIndexEntry},
     HubStorage,
 };
@@ -54,6 +55,7 @@ pub struct HubPipeline {
     storage: HubStorage,
     observability: HubObservability,
     inner: Arc<Mutex<HubState>>,
+    attachment_ref_counts: Arc<Mutex<HashMap<String, u64>>>,
     role: HubRole,
     profile_id: Option<String>,
     admission: AdmissionConfig,
@@ -114,6 +116,7 @@ impl HubPipeline {
     pub async fn initialise(config: &HubRuntimeConfig, storage: &HubStorage) -> Result<Self> {
         let observability = HubObservability::new();
         let streams = load_existing_streams(storage).await?;
+        let attachment_ref_counts = rebuild_attachment_ref_counts(storage, &streams).await?;
         let capabilities = load_capabilities(storage).await?;
         let anchors = load_anchor_log(storage).await?;
         let revocation_log = load_revocation_log(storage).await?;
@@ -150,6 +153,7 @@ impl HubPipeline {
             storage: storage.clone(),
             observability,
             inner: Arc::new(Mutex::new(state)),
+            attachment_ref_counts: Arc::new(Mutex::new(attachment_ref_counts)),
             role: config.role,
             profile_id: config.profile_id.clone(),
             admission: config.admission.clone(),
@@ -487,7 +491,12 @@ impl HubPipeline {
         };
         drop(guard);
 
-        persist_attachments(&self.storage, &prepared_attachments).await?;
+        persist_attachments(
+            &self.storage,
+            &prepared_attachments,
+            &self.attachment_ref_counts,
+        )
+        .await?;
         persist_stream_state(&self.storage, &stream, &stream_index_entry).await?;
         persist_message_bundle(&self.storage, &stream, seq, &message_with_proof).await?;
         append_receipt(&self.storage, &message_with_proof).await?;
@@ -2222,6 +2231,23 @@ async fn load_existing_streams(storage: &HubStorage) -> Result<HashMap<String, S
     Ok(map)
 }
 
+async fn rebuild_attachment_ref_counts(
+    storage: &HubStorage,
+    streams: &HashMap<String, StreamRuntime>,
+) -> Result<HashMap<String, u64>> {
+    let mut counts = HashMap::new();
+    for runtime in streams.values() {
+        for message in &runtime.state.messages {
+            for attachment in &message.attachments {
+                *counts.entry(attachment.digest.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    attachments::rewrite_all_refcounts(storage, &counts).await?;
+    Ok(counts)
+}
+
 #[derive(Default)]
 struct LoadedStreamState {
     state: HubStreamState,
@@ -2514,7 +2540,7 @@ fn prepare_attachments_for_storage(
                 .unwrap_or_else(|| format!("attachment-{index}")),
             digest: digest_hex,
             size: data.len() as u64,
-            stored_path: path.to_string_lossy().into_owned(),
+            stored_path: file_name,
         };
         prepared.push(PreparedAttachment { stored, path, data });
     }
@@ -2525,6 +2551,7 @@ fn prepare_attachments_for_storage(
 async fn persist_attachments(
     storage: &HubStorage,
     attachments: &[PreparedAttachment],
+    ref_counts: &Arc<Mutex<HashMap<String, u64>>>,
 ) -> Result<()> {
     if attachments.is_empty() {
         return Ok(());
@@ -2540,9 +2567,47 @@ async fn persist_attachments(
         })?;
 
     for attachment in attachments {
-        fs::write(&attachment.path, &attachment.data)
-            .await
-            .with_context(|| format!("writing attachment to {}", attachment.path.display()))?;
+        let mut needs_write = true;
+        match fs::metadata(&attachment.path).await {
+            Ok(metadata) => {
+                if metadata.len() == attachment.data.len() as u64 {
+                    needs_write = false;
+                } else {
+                    bail!(
+                        "existing attachment {} size mismatch: expected {} bytes, found {} bytes",
+                        attachment.path.display(),
+                        attachment.data.len(),
+                        metadata.len()
+                    );
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("checking attachment {}", attachment.path.display()));
+            }
+        }
+
+        if needs_write {
+            fs::write(&attachment.path, &attachment.data)
+                .await
+                .with_context(|| format!("writing attachment to {}", attachment.path.display()))?;
+        }
+
+        let mut counts = ref_counts.lock().await;
+        let counter = counts.entry(attachment.stored.digest.clone()).or_insert(0);
+        *counter = counter.checked_add(1).ok_or_else(|| {
+            anyhow!(
+                "attachment refcount overflow for {}",
+                attachment.stored.digest
+            )
+        })?;
+        if let Err(err) =
+            attachments::write_refcount(storage, &attachment.stored.digest, *counter).await
+        {
+            *counter = counter.saturating_sub(1);
+            return Err(err);
+        }
     }
 
     Ok(())
