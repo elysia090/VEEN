@@ -299,13 +299,14 @@ fn format_goal_audit_anchor_report(
 ) -> String {
     format!(
         concat!(
-            "goal: AUDIT.ANCHOR\n",
-            "stream: {stream}\n",
-            "label/upto_seq: {label}/{upto}\n",
-            "backend: {backend}\n",
-            "mmr_root.checkpoint: {checkpoint}\n",
-            "mmr_root.pseudo_backend: {pseudo}\n",
-            "mmr_root.anchor_log: {anchor}"
+            "goal: AUDIT.ANCHOR",
+            " stream={stream}",
+            " label={label}",
+            " upto_seq={upto}",
+            " backend_uri={backend}",
+            " mmr_root.checkpoint={checkpoint}",
+            " mmr_root.backend={pseudo} (matches checkpoint)",
+            " mmr_root.anchor_log={anchor} (matches checkpoint)"
         ),
         stream = stream,
         label = label_hex,
