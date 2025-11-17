@@ -6138,8 +6138,8 @@ async fn handle_agreement_status(args: AgreementStatusArgs) -> Result<()> {
     let now = current_unix_timestamp()?;
     let effective_time = definition.effective_time;
     let expiry_time = definition.expiry_time;
-    let effective_ok = effective_time.map_or(true, |ts| now >= ts);
-    let expiry_ok = expiry_time.map_or(true, |ts| now <= ts);
+    let effective_ok = effective_time.is_none_or(|ts| now >= ts);
+    let expiry_ok = expiry_time.is_none_or(|ts| now <= ts);
     let active = all_parties_accept && effective_ok && expiry_ok;
 
     let output = AgreementStatusOutput {
@@ -6157,10 +6157,10 @@ async fn handle_agreement_status(args: AgreementStatusArgs) -> Result<()> {
     Ok(())
 }
 
-fn select_agreement_version<'a>(
-    versions: &'a BTreeMap<u64, AgreementVersionFold>,
+fn select_agreement_version(
+    versions: &BTreeMap<u64, AgreementVersionFold>,
     requested: Option<u64>,
-) -> Result<(u64, &'a AgreementVersionFold)> {
+) -> Result<(u64, &AgreementVersionFold)> {
     if let Some(version) = requested {
         let state = versions.get(&version).ok_or_else(|| {
             ProtocolError::new(format!("no agreement entries found for version {version}"))
