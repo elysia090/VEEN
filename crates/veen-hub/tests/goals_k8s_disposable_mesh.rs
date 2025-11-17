@@ -101,11 +101,29 @@ async fn goals_k8s_disposable_mesh() -> Result<()> {
 
     runtime.shutdown().await?;
 
-    ensure!(
-        fs::try_exists(hub_data.join("state"))
-            .await
-            .context("checking hub state directory inside pvc")?,
-        "hub state directory missing after shutdown",
+    let state_path = hub_data.join("state");
+    let state_exists = fs::try_exists(&state_path)
+        .await
+        .context("checking hub state directory inside pvc")?;
+    ensure!(state_exists, "hub state directory missing after shutdown");
+
+    println!(
+        concat!(
+            "goal: K8S.DISPOSABLE_MESH\n",
+            "pvc: {pvc}\n",
+            "hub_data: {hub_data}\n",
+            "messages.sent/streamed: {sent}/{streamed}\n",
+            "submit.last.seq: {seq}\n",
+            "submit.last.mmr_root: {mmr_root}\n",
+            "state_dir.exists: {state_exists}",
+        ),
+        pvc = pvc_dir.display(),
+        hub_data = hub_data.display(),
+        sent = 1,
+        streamed = messages.len(),
+        seq = first.seq,
+        mmr_root = first.mmr_root,
+        state_exists = state_exists,
     );
 
     Ok(())
