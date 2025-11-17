@@ -46,10 +46,34 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-target-
 
       - name: Format check
+        id: fmt
         run: cargo fmt --all --check
 
       - name: Clippy
+        id: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Tests
+        id: tests
         run: cargo test --workspace
+
+      - name: Report results summary
+        if: always()
+        env:
+          FMT_RESULT: ${{ steps.fmt.conclusion }}
+          CLIPPY_RESULT: ${{ steps.clippy.conclusion }}
+          TEST_RESULT: ${{ steps.tests.conclusion }}
+        run: |
+          cat <<'SUMMARY' >> "$GITHUB_STEP_SUMMARY"
+          ## CI Report
+
+          | Check | Result |
+          | --- | --- |
+          | Format | ${FMT_RESULT} |
+          | Clippy | ${CLIPPY_RESULT} |
+          | Tests | ${TEST_RESULT} |
+
+          - Format uses `cargo fmt --all --check`
+          - Clippy uses `cargo clippy --workspace --all-targets -- -D warnings`
+          - Tests use `cargo test --workspace`
+          SUMMARY
