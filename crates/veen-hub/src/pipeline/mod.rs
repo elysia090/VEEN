@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::convert::TryInto;
 use std::io::Cursor;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -41,7 +42,10 @@ use thiserror::Error;
 
 use crate::config::{AdmissionConfig, FederationConfig, HubRole, HubRuntimeConfig};
 use crate::observability::{HubObservability, ObservabilitySnapshot};
-use crate::storage::HubStorage;
+use crate::storage::{
+    stream_index::{self, StreamIndexEntry},
+    HubStorage,
+};
 use rand::rngs::OsRng;
 use rand::RngCore;
 
@@ -415,8 +419,17 @@ impl HubPipeline {
         let (_, mmr_root) = stream_runtime.mmr.append(leaf);
         stream_runtime.state.messages.push(stored_message.clone());
 
-        persist_stream_state(&self.storage, &stream, &stream_runtime.state).await?;
         persist_message_bundle(&self.storage, &stream, seq, &stored_message).await?;
+        stream_index::append_stream_index(
+            &self.storage,
+            &stream,
+            &StreamIndexEntry {
+                seq,
+                leaf_hash: hex::encode(leaf.as_bytes()),
+                bundle: self.storage.message_bundle_filename(&stream, seq),
+            },
+        )
+        .await?;
         append_receipt(&self.storage, &stream, seq, &leaf, &mmr_root, submitted_at).await?;
 
         if let Err(err) = apply_client_usage_update(&mut guard.capabilities, usage_update) {
@@ -514,8 +527,17 @@ impl HubPipeline {
 
         stream_runtime.state.messages.push(message.clone());
 
-        persist_stream_state(&self.storage, &stream, &stream_runtime.state).await?;
         persist_message_bundle(&self.storage, &stream, message.seq, &message).await?;
+        stream_index::append_stream_index(
+            &self.storage,
+            &stream,
+            &StreamIndexEntry {
+                seq: message.seq,
+                leaf_hash: hex::encode(leaf.as_bytes()),
+                bundle: self.storage.message_bundle_filename(&stream, message.seq),
+            },
+        )
+        .await?;
         append_receipt(
             &self.storage,
             &stream,
@@ -2098,41 +2120,55 @@ async fn load_existing_streams(storage: &HubStorage) -> Result<HashMap<String, S
             .is_file()
         {
             let path = entry.path();
-            if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
-                let data = fs::read(&path)
-                    .await
-                    .with_context(|| format!("reading stream state from {}", path.display()))?;
-                let state: HubStreamState = serde_json::from_slice(&data)
-                    .with_context(|| format!("decoding stream state from {}", path.display()))?;
-                let stream_name = state
-                    .messages
-                    .first()
-                    .map(|msg| msg.stream.clone())
-                    .unwrap_or_else(|| name.to_string());
+            let state = if matches!(path.extension().and_then(|ext| ext.to_str()), Some("json")) {
+                load_legacy_stream_state(&path).await?
+            } else {
+                load_stream_state_from_index(storage, &path).await?
+            };
+            let stream_name = state
+                .messages
+                .first()
+                .map(|msg| msg.stream.clone())
+                .or_else(|| {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
+                });
+            if let Some(name) = stream_name {
                 let runtime = StreamRuntime::new(state)?;
-                map.insert(stream_name, runtime);
+                map.insert(name, runtime);
             }
         }
     }
     Ok(map)
 }
 
-async fn persist_stream_state(
-    storage: &HubStorage,
-    stream: &str,
-    state: &HubStreamState,
-) -> Result<()> {
-    let path = storage.stream_state_path(stream);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("ensuring stream state directory {}", parent.display()))?;
-    }
-    let data = serde_json::to_vec_pretty(state)
-        .with_context(|| format!("encoding stream state for {}", stream))?;
-    fs::write(&path, data)
+async fn load_legacy_stream_state(path: &Path) -> Result<HubStreamState> {
+    let data = fs::read(path)
         .await
-        .with_context(|| format!("writing stream state to {}", path.display()))
+        .with_context(|| format!("reading stream state from {}", path.display()))?;
+    serde_json::from_slice(&data)
+        .with_context(|| format!("decoding stream state from {}", path.display()))
+}
+
+async fn load_stream_state_from_index(storage: &HubStorage, path: &Path) -> Result<HubStreamState> {
+    let entries = stream_index::load_stream_index(path).await?;
+    if entries.is_empty() {
+        return Ok(HubStreamState::default());
+    }
+
+    let mut messages = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let bundle_path = stream_index::bundle_path(storage, &entry);
+        let data = fs::read(&bundle_path)
+            .await
+            .with_context(|| format!("reading message bundle from {}", bundle_path.display()))?;
+        let message: StoredMessage = serde_json::from_slice(&data)
+            .with_context(|| format!("decoding message bundle from {}", bundle_path.display()))?;
+        messages.push(message);
+    }
+
+    Ok(HubStreamState { messages })
 }
 
 async fn persist_message_bundle(
@@ -2147,7 +2183,7 @@ async fn persist_message_bundle(
             .await
             .with_context(|| format!("ensuring message directory {}", parent.display()))?;
     }
-    let data = serde_json::to_vec_pretty(message)
+    let data = serde_json::to_vec(message)
         .with_context(|| format!("encoding message bundle for {stream}#{seq}"))?;
     fs::write(&path, data)
         .await

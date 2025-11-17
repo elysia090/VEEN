@@ -7,6 +7,8 @@ use tokio::fs::{self, OpenOptions};
 
 use crate::config::HubRuntimeConfig;
 
+pub mod stream_index;
+
 pub const RECEIPTS_FILE: &str = "receipts.cborseq";
 pub const PAYLOADS_FILE: &str = "payloads.cborseq";
 pub const CHECKPOINTS_FILE: &str = "checkpoints.cborseq";
@@ -68,6 +70,11 @@ impl HubStorage {
         self.state_dir().join(MESSAGES_DIR)
     }
 
+    pub fn stream_index_path(&self, stream: &str) -> PathBuf {
+        self.streams_dir()
+            .join(format!("{}.index", stream_storage_name(stream)))
+    }
+
     pub fn capabilities_dir(&self) -> PathBuf {
         self.state_dir().join(CAPABILITIES_DIR)
     }
@@ -105,9 +112,13 @@ impl HubStorage {
             .join(format!("{}.json", stream_storage_name(stream)))
     }
 
+    pub fn message_bundle_filename(&self, stream: &str, seq: u64) -> String {
+        format!("{}-{seq:08}.json", stream_storage_name(stream))
+    }
+
     pub fn message_bundle_path(&self, stream: &str, seq: u64) -> PathBuf {
         self.messages_dir()
-            .join(format!("{}-{seq:08}.json", stream_storage_name(stream)))
+            .join(self.message_bundle_filename(stream, seq))
     }
 
     pub fn crdt_stream_dir(&self, stream: &str) -> PathBuf {
