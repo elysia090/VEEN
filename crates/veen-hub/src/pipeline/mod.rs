@@ -17,7 +17,7 @@ use sha2::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::fs::OpenOptions;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::{Mutex, RwLock, RwLockWriteGuard};
 
 use veen_core::hub::HubId;
 use veen_core::meta::SchemaRegistry;
@@ -54,7 +54,7 @@ use rand::RngCore;
 pub struct HubPipeline {
     storage: HubStorage,
     observability: HubObservability,
-    inner: Arc<Mutex<HubState>>,
+    inner: Arc<RwLock<HubState>>,
     attachment_ref_counts: Arc<Mutex<HashMap<String, u64>>>,
     role: HubRole,
     profile_id: Option<String>,
@@ -78,6 +78,7 @@ struct HubState {
     schema_registry: SchemaRegistry,
 }
 
+#[derive(Clone)]
 struct StreamRuntime {
     state: HubStreamState,
     proven_messages: Vec<StreamMessageWithProof>,
@@ -152,7 +153,7 @@ impl HubPipeline {
         Ok(Self {
             storage: storage.clone(),
             observability,
-            inner: Arc::new(Mutex::new(state)),
+            inner: Arc::new(RwLock::new(state)),
             attachment_ref_counts: Arc::new(Mutex::new(attachment_ref_counts)),
             role: config.role,
             profile_id: config.profile_id.clone(),
@@ -277,7 +278,7 @@ impl HubPipeline {
             .transpose()
             .context("constructing auth_ref revocation target")?;
 
-        let mut guard = self.inner.lock().await;
+        let mut guard = self.inner.write().await;
         let mut capability_store_dirty = false;
 
         let authority = guard
@@ -517,7 +518,7 @@ impl HubPipeline {
 
     async fn capability_err<T>(
         &self,
-        guard: MutexGuard<'_, HubState>,
+        guard: RwLockWriteGuard<'_, HubState>,
         err: CapabilityError,
     ) -> Result<T> {
         let snapshot = guard.capabilities.clone();
@@ -540,7 +541,7 @@ impl HubPipeline {
         } = request;
         let stream = message.stream.clone();
 
-        let mut guard = self.inner.lock().await;
+        let mut guard = self.inner.write().await;
         let stream_runtime = guard
             .streams
             .entry(stream.clone())
@@ -655,7 +656,7 @@ impl HubPipeline {
         let record = envelope.body;
         tracing::info!(?record, "recorded revocation");
 
-        let mut guard = self.inner.lock().await;
+        let mut guard = self.inner.write().await;
         guard.revocations.insert(record.clone());
         guard.revocation_log.push(record);
         persist_revocations(&self.storage, &guard.revocation_log).await
@@ -675,7 +676,7 @@ impl HubPipeline {
         let record = envelope.body;
         tracing::info!(?record, "recorded authority record");
 
-        let mut guard = self.inner.lock().await;
+        let mut guard = self.inner.write().await;
         guard.authority_records.push(record.clone());
         guard.authority_view.insert(record);
         persist_authority_records(&self.storage, &guard.authority_records).await
@@ -695,7 +696,7 @@ impl HubPipeline {
         let record = envelope.body;
         tracing::info!(?record, "recorded label class");
 
-        let mut guard = self.inner.lock().await;
+        let mut guard = self.inner.write().await;
         guard.label_class_index.insert(record.label, record.clone());
         guard.label_class_records.push(record);
         persist_label_classes(&self.storage, &guard.label_class_records).await
@@ -715,7 +716,7 @@ impl HubPipeline {
         let descriptor = envelope.body;
         tracing::info!(?descriptor, "registered schema descriptor");
 
-        let mut guard = self.inner.lock().await;
+        let mut guard = self.inner.write().await;
         guard.schema_descriptors.push(descriptor.clone());
         let seq = guard.schema_descriptors.len() as u64;
         guard.schema_registry.upsert(descriptor, seq);
@@ -728,40 +729,48 @@ impl HubPipeline {
         from: u64,
         with_proof: bool,
     ) -> Result<StreamResponse> {
-        let guard = self.inner.lock().await;
-        let runtime = guard
-            .streams
-            .get(stream)
-            .ok_or_else(|| anyhow!("stream {stream} has no stored messages"))?;
+        let runtime = {
+            let guard = self.inner.read().await;
+            guard
+                .streams
+                .get(stream)
+                .cloned()
+                .ok_or_else(|| anyhow!("stream {stream} has no stored messages"))?
+        };
+
+        let StreamRuntime {
+            state,
+            proven_messages,
+            ..
+        } = runtime;
 
         if !with_proof {
-            let messages = runtime
-                .state
+            let messages = state
                 .messages
-                .iter()
+                .into_iter()
                 .filter(|msg| msg.seq >= from)
-                .cloned()
                 .collect();
             return Ok(StreamResponse::Messages(messages));
         }
 
-        let proven = runtime
-            .proven_messages
-            .iter()
+        let proven = proven_messages
+            .into_iter()
             .filter(|entry| entry.message.seq >= from)
-            .cloned()
             .collect();
 
         Ok(StreamResponse::Proven(proven))
     }
 
     pub async fn resync(&self, stream: &str) -> Result<HubStreamState> {
-        let guard = self.inner.lock().await;
-        let runtime = guard
-            .streams
-            .get(stream)
-            .ok_or_else(|| anyhow!("stream {stream} has no stored messages"))?;
-        Ok(runtime.state.clone())
+        let runtime = {
+            let guard = self.inner.read().await;
+            guard
+                .streams
+                .get(stream)
+                .cloned()
+                .ok_or_else(|| anyhow!("stream {stream} has no stored messages"))?
+        };
+        Ok(runtime.state)
     }
 
     pub async fn authorize_capability(&self, token_bytes: &[u8]) -> Result<AuthorizeResponse> {
@@ -802,7 +811,7 @@ impl HubPipeline {
             "authorised capability admission"
         );
 
-        let mut guard = self.inner.lock().await;
+        let mut guard = self.inner.write().await;
         let record = CapabilityRecord {
             subject: subject_hex,
             stream_ids,
@@ -830,7 +839,7 @@ impl HubPipeline {
     }
 
     pub async fn anchor_checkpoint(&self, anchor: AnchorRequest) -> Result<()> {
-        let mut guard = self.inner.lock().await;
+        let mut guard = self.inner.write().await;
         guard.anchors.entries.push(AnchorRecord {
             stream: anchor.stream,
             mmr_root: anchor.mmr_root,
@@ -842,7 +851,7 @@ impl HubPipeline {
 
     pub async fn metrics_snapshot(&self) -> ObservabilityReport {
         let snapshot = self.observability.snapshot();
-        let guard = self.inner.lock().await;
+        let guard = self.inner.read().await;
         let mut last_seq = HashMap::new();
         let mut peaks = HashMap::new();
         let mut max_seq = 0u64;
@@ -897,7 +906,7 @@ impl HubPipeline {
         let now = current_unix_timestamp();
         let mut indexes_initialised = true;
         let authority_readiness = {
-            let guard = self.inner.lock().await;
+            let guard = self.inner.read().await;
             for (stream, runtime) in &guard.streams {
                 let mmr_seq = runtime.mmr.seq();
                 let message_count = runtime.state.messages.len() as u64;
@@ -949,7 +958,7 @@ impl HubPipeline {
     }
 
     pub async fn profile_descriptor(&self) -> HubProfileDescriptor {
-        let guard = self.inner.lock().await;
+        let guard = self.inner.read().await;
         let features = HubProfileFeatures {
             core: true,
             fed1: matches!(self.role, HubRole::Replica)
@@ -993,7 +1002,7 @@ impl HubPipeline {
         .to_string();
 
         if let Some(stream_id) = stream_id {
-            let guard = self.inner.lock().await;
+            let guard = self.inner.read().await;
             let now = current_unix_timestamp();
             let authority = guard
                 .authority_view
@@ -1034,7 +1043,7 @@ impl HubPipeline {
     }
 
     pub async fn kex_policy_descriptor(&self) -> HubKexPolicyDescriptor {
-        let guard = self.inner.lock().await;
+        let guard = self.inner.read().await;
         let default_cap_ttl_sec = guard
             .capabilities
             .records
@@ -1060,7 +1069,7 @@ impl HubPipeline {
     }
 
     pub async fn admission_report(&self) -> HubAdmissionReport {
-        let guard = self.inner.lock().await;
+        let guard = self.inner.read().await;
         let mut stages = Vec::new();
         let mut recent_err_rates = BTreeMap::new();
         recent_err_rates.insert("E.AUTH".to_string(), 0.0);
@@ -1123,7 +1132,7 @@ impl HubPipeline {
         limit: Option<usize>,
         codes: Option<Vec<String>>,
     ) -> HubAdmissionLogResponse {
-        let guard = self.inner.lock().await;
+        let guard = self.inner.read().await;
         let code_filter = codes.map(|values| {
             values
                 .into_iter()
@@ -1155,7 +1164,7 @@ impl HubPipeline {
         code: &str,
         detail: &str,
     ) {
-        let mut guard = self.inner.lock().await;
+        let mut guard = self.inner.write().await;
         if guard.admission_events.len() >= MAX_ADMISSION_EVENTS {
             guard.admission_events.pop_front();
         }
@@ -1174,7 +1183,7 @@ impl HubPipeline {
         }
         let auth_target = revocation_target_from_hex_str(auth_ref_hex)?;
         let now = current_unix_timestamp();
-        let guard = self.inner.lock().await;
+        let guard = self.inner.read().await;
         let record = guard.capabilities.records.get(auth_ref_hex);
         let mut revocation_detail: Option<(RevocationKind, RevocationRecord)> = guard
             .revocation_log
@@ -1236,7 +1245,7 @@ impl HubPipeline {
         limit: Option<usize>,
     ) -> HubRevocationList {
         let now = current_unix_timestamp();
-        let guard = self.inner.lock().await;
+        let guard = self.inner.read().await;
         let mut entries: Vec<HubRevocationEntry> = guard
             .revocation_log
             .iter()
@@ -1294,7 +1303,7 @@ impl HubPipeline {
     ) -> HubAuthorityRecordDescriptor {
         let now = current_unix_timestamp();
         let records = {
-            let guard = self.inner.lock().await;
+            let guard = self.inner.read().await;
             guard.authority_view.records_for(realm_id, stream_id)
         };
 
@@ -1349,7 +1358,7 @@ impl HubPipeline {
     ) -> HubLabelAuthorityDescriptor {
         let now = current_unix_timestamp();
         let authority = {
-            let guard = self.inner.lock().await;
+            let guard = self.inner.read().await;
             guard
                 .authority_view
                 .label_authority_for_stream(stream_id, now)
@@ -1388,7 +1397,7 @@ impl HubPipeline {
 
     pub async fn label_class_descriptor(&self, label: Label) -> HubLabelClassDescriptor {
         let record = {
-            let guard = self.inner.lock().await;
+            let guard = self.inner.read().await;
             guard.label_class_index.get(&label).cloned()
         };
 
@@ -1424,7 +1433,7 @@ impl HubPipeline {
         let _ = realm;
         let class_filter = class_filter.map(|value| value.to_ascii_lowercase());
         let entries = {
-            let guard = self.inner.lock().await;
+            let guard = self.inner.read().await;
             let mut entries = guard
                 .label_class_records
                 .iter()
@@ -1450,7 +1459,7 @@ impl HubPipeline {
     }
 
     pub async fn anchor_log(&self) -> Result<AnchorLog> {
-        let guard = self.inner.lock().await;
+        let guard = self.inner.read().await;
         Ok(guard.anchors.clone())
     }
 
@@ -3256,7 +3265,7 @@ mod tests {
             let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
 
             {
-                let mut guard = pipeline.inner.lock().await;
+                let mut guard = pipeline.inner.write().await;
                 guard.capabilities.records.insert(
                     "deadbeef".to_string(),
                     CapabilityRecord {
@@ -3406,7 +3415,7 @@ mod tests {
             pipeline.submit(request).await.unwrap();
 
             {
-                let mut guard = pipeline.inner.lock().await;
+                let mut guard = pipeline.inner.write().await;
                 let runtime = guard.streams.get_mut(stream).expect("stream runtime");
                 let mut dup = runtime
                     .state
@@ -3447,7 +3456,7 @@ mod tests {
 
             pipeline.publish_authority(&payload).await.unwrap();
 
-            let guard = pipeline.inner.lock().await;
+            let guard = pipeline.inner.read().await;
             assert_eq!(guard.authority_records.len(), 1);
             assert_eq!(guard.authority_records[0], record);
             assert!(guard
@@ -3570,7 +3579,7 @@ mod tests {
 
             pipeline.publish_label_class(&payload).await.unwrap();
 
-            let guard = pipeline.inner.lock().await;
+            let guard = pipeline.inner.read().await;
             assert_eq!(guard.label_class_records.len(), 1);
             assert_eq!(guard.label_class_index.get(&label), Some(&record));
         });
@@ -3640,7 +3649,7 @@ mod tests {
 
             pipeline.register_schema_descriptor(&payload).await.unwrap();
 
-            let guard = pipeline.inner.lock().await;
+            let guard = pipeline.inner.read().await;
             assert_eq!(guard.schema_descriptors.len(), 1);
             let stored = guard
                 .schema_registry
