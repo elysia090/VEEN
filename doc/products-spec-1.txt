@@ -1,0 +1,493 @@
+Server Drive Recorder and Air-gap Bridge Product Specification
+Version v0.0.2 (Products)
+	0.	Scope
+
+This document defines two product-grade profiles built on a VEEN-compatible deployment:
+	1.	VEEN Server Drive Recorder (SDR0)
+Continuous, tamper-evident recording and replay of selected events inside a trust domain.
+	2.	VEEN Air-gap Bridge (AGB0)
+Controlled, auditable, and optionally one-way transfer of events and proofs between two trust domains.
+
+The goal of v0.0.2 is to turn the previous conceptual profiles into concrete products:
+	•	with explicit SKUs,
+	•	with concrete CLI and deployment expectations,
+	•	with testable invariants,
+	•	with minimal but sufficient threat model and operations model.
+
+This specification assumes:
+	•	VEEN core (hub, streams, receipts, checkpoints, MMR log) is available,
+	•	0-series overlays (KEX0, AUTH1, ANCHOR0, DR0, OBS0) are present where referenced,
+	•	VEEN CLI v0.0.1+ is available and self-tests are green.
+
+	1.	Product line and SKUs
+
+1.1. SKUs
+
+SKU SDR0:
+	•	Name: VEEN Server Drive Recorder
+	•	Purpose: domain-internal forensic and operational evidence log
+	•	Dependencies: VEEN hub, VEEN CLI, ANCHOR0 optional but recommended
+
+SKU AGB0:
+	•	Name: VEEN Air-gap Bridge
+	•	Purpose: inter-domain evidence-carrying event transfer, optionally strictly one-way
+	•	Dependencies: VEEN hub (both zones), VEEN CLI, ANCHOR0 recommended, DR0 optional
+
+SKU SDR0+AGB0:
+	•	Name: VEEN Recorder + Bridge bundle
+	•	Purpose: combined deployment of SDR0 in both zones plus AGB0 between them
+
+1.2. Minimal VEEN feature set required
+
+All SKUs require at least:
+	•	Ordered encrypted streams
+	•	Message receipts with:
+	•	stream id
+	•	sequence number
+	•	MMR root
+	•	signatures (hub and sender)
+	•	Checkpoint support:
+	•	log root
+	•	per-stream last sequence
+	•	hub identity
+	•	timestamp
+	•	Capability tokens:
+	•	stream-level access
+	•	rate and TTL limits
+	•	Revocation support (AUTH1):
+	•	revocation records for client ids and cap tokens
+
+	2.	Common terminology and types
+
+2.1. Core terms
+
+hub: VEEN-compatible message hub.
+stream: named ordered sequence of messages in a hub.
+event: application-level payload plus metadata emitted as one message to a stream.
+receipt: verifiable record of a committed event.
+checkpoint: compact snapshot of log state and stream positions.
+trust domain: set of systems and operators sharing security policy and boundary.
+zone: specific deployment region within or adjacent to a trust domain.
+bridge: process that transfers events and proofs between hubs.
+
+2.2. Stream namespaces (product-level)
+
+SDR0 streams:
+	•	Namespace: record/*
+	•	record/app/*
+	•	record/security/*
+	•	record/infrastructure/*
+
+AGB0 streams:
+	•	Export: export/*
+	•	Import: import/*
+	•	Bridge audit: bridge/online/log, bridge/offline/log
+
+2.3. Identity and capability roles
+
+Shared patterns:
+	•	recorder_producer:
+	•	one identity per emitting service
+	•	append-only to specific record/* streams
+	•	recorder_admin:
+	•	manage label_class, retention, checkpoint triggers
+	•	read access across record/*
+	•	bridge_online:
+	•	read-only on export/* (Z1)
+	•	optional read-only on specific record/* where export is derived
+	•	bridge_offline:
+	•	write-only on import/* (Z2)
+
+No identity may simultaneously hold read access in one zone and write access in the opposite direction for the same logical bridge.
+	3.	VEEN Server Drive Recorder (SDR0)
+
+3.1. Product goal
+
+Provide a deterministic and verifiable logging fabric that answers:
+	•	“What happened, in which order, and who caused it?”
+	•	“Up to which point is the log provably consistent?”
+	•	“Which subset of events belongs to a given actor or time window?”
+
+without introducing new cryptography.
+
+3.2. Functional requirements
+
+3.2.1. Event shape
+
+Each recorder event MUST expose the following fields (payload or metadata):
+	1.	subject_id       (stable actor id)
+	2.	principal_id     (client public key id)
+	3.	event_type       (string, application-defined)
+	4.	event_time       (application-observed timestamp)
+	5.	hub_commit_seq   (implicit from stream / receipt)
+	6.	hub_commit_time  (hub-observed timestamp)
+	7.	origin           (service/component identifier)
+	8.	payload          (opaque structured content)
+
+The hub MUST:
+	•	sign committed messages,
+	•	include them in an append-only log,
+	•	provide inclusion proofs.
+
+3.2.2. Stream configuration
+
+For SDR0 compliance:
+	•	All in-scope events MUST be written to record/* streams.
+	•	Each application event type MUST map to exactly one recorder stream.
+	•	record/* streams MUST have:
+	•	retention_hint = long_term
+	•	admission policy forbidding oversized payloads beyond configured bound
+	•	renames and splits MUST be logged as explicit migration events in a dedicated management stream (e.g. record/infrastructure/changes).
+
+3.2.3. Capability and isolation
+	•	recorder_producer identities:
+	•	capabilities limited to:
+	•	append to specific record/* streams,
+	•	no delete, no stream admin operations.
+	•	recorder_admin identities:
+	•	may manage label_class and retention policies,
+	•	may read across record/* streams,
+	•	MUST be distinct from any producer identity.
+
+3.2.4. Checkpointing
+
+Deployment MUST define:
+	•	checkpoint frequency:
+	•	by time (e.g. every 5 minutes) and/or
+	•	by volume (e.g. every 10k events).
+	•	checkpoint content MUST include:
+	•	log_root (MMR root or equivalent)
+	•	per-stream last sequence for all record/*
+	•	hub_public key
+	•	profile id identifying the SDR0 configuration
+	•	creation timestamp
+
+3.2.5. Replay API
+
+Minimal replay interface:
+	•	Replay by range:
+	•	input: stream id, from_seq, to_seq (inclusive or half-open, specified)
+	•	output: ordered events plus receipts
+	•	Replay by time window:
+	•	input: stream set, start_time, end_time
+	•	output: events with hub_commit_time in [start_time, end_time]
+
+Replay consumers MUST, at least for critical flows:
+	•	verify hub identity against configured root-of-trust,
+	•	verify selected inclusion proofs against log_root.
+
+3.3. Non-functional requirements
+
+3.3.1. Operational
+	•	Checkpoint generation MUST be scriptable via CLI.
+	•	Replay MUST be automatable (non-interactive CLI mode).
+	•	Operators MUST have a documented runbook for:
+	•	generating an ad-hoc checkpoint,
+	•	validating the last checkpoint after incident,
+	•	deriving a safe replay window.
+
+3.3.2. Performance
+	•	Recorder logging path MUST not require additional interactive network round-trips beyond normal VEEN submit path.
+	•	Checkpoints MAY be generated asynchronously from the event ingestion path, provided consistency is preserved.
+
+3.4. Invariants (SDR0)
+
+Informal invariants:
+
+I1. Order:
+For any stream S and events e_i, e_j with i < j, any replay by sequence range on S MUST return e_i before e_j.
+
+I2. Stability up to checkpoint:
+Given checkpoint C with log_root R_C and per-stream last_seq_C(S), any event e in S with seq <= last_seq_C(S) is either:
+	•	verifiable against R_C, or
+	•	causes verification failure; silent omission is forbidden.
+
+I3. Actor consistency:
+For any principal_id P, the set of events recorded with principal_id = P corresponds to all uses of that VEEN client identity on recorder streams under the configured policies. Implementation MUST NOT multiplex multiple unrelated principals behind one VEEN client if that breaks auditability.
+
+3.5. VEEN CLI mapping (SDR0)
+
+A minimal SDR0 product MUST expose at least:
+	•	Recorder event emission:
+	•	via existing veen send with fixed schemas for record/*
+	•	Recorder stream management:
+	•	veen label-class set/list/show for record/*
+	•	Checkpoints:
+	•	veen hub checkpoint (or equivalent)
+	•	veen hub anchor for external anchoring (recommended with ANCHOR0)
+	•	Replay:
+	•	veen stream … –with-proofs for record/* streams
+	•	Self-test:
+	•	veen selftest core
+	•	SDR0-specific selftest scenario MAY be added as selftest recorder
+
+AGCI (Acceptance-grade CI) MUST ensure:
+	•	veen-core tests green,
+	•	veen-hub tests green,
+	•	goals_core_pipeline green,
+	•	goals_audit_anchor green when ANCHOR0 is enabled.
+
+	4.	VEEN Air-gap Bridge (AGB0)
+
+4.1. Product goal
+
+Provide a controlled and auditable path to move events (and their cryptographic evidence) from zone Z1 to zone Z2, preserving:
+	•	directionality constraints,
+	•	tamper-evident properties,
+	•	traceable operational actions.
+
+4.2. Topology and roles
+
+Zones:
+	•	Z1 (online zone):
+	•	hub_online
+	•	export/* streams
+	•	optional record/* streams feeding export/*
+	•	bridge/online/log audit stream
+	•	Z2 (offline or higher-trust zone):
+	•	hub_offline
+	•	import/* streams
+	•	bridge/offline/log audit stream
+
+Bridge:
+	•	AGB0 bridge process:
+	•	runs in its own environment,
+	•	has:
+	•	read-only capabilities in Z1 (export/*),
+	•	write-only capabilities in Z2 (import/*),
+	•	has no shared private keys between hubs.
+
+4.3. Directionality
+
+AGB0 product MUST enforce:
+	•	At capability level:
+	•	bridge_online identities:
+	•	read-only on export/*,
+	•	MUST NOT have write access in Z1.
+	•	bridge_offline identities:
+	•	write-only on import/*,
+	•	MUST NOT have read access in Z2 beyond import control scope.
+	•	At network/physical level:
+	•	Strict one-way option:
+	•	transfer via removable media or one-way link,
+	•	no route from Z2 back to Z1 under same operator control.
+
+4.4. Export bundle format
+
+Bundle B has:
+	•	header:
+	•	bundle_id (hash of bundle contents)
+	•	source_hub_id
+	•	source_profile_id (SDR0 or other)
+	•	export_stream_id
+	•	export_seq_from, export_seq_to
+	•	export_time_from, export_time_to
+	•	export_checkpoint:
+	•	root
+	•	per-stream last_seq
+	•	timestamp
+	•	hub_public
+	•	events:
+	•	ordered list of events in [export_seq_from, export_seq_to]
+	•	for each:
+	•	payload
+	•	metadata (including subject_id, principal_id, event_type, times, origin)
+	•	receipt or a reference to a bundled proof index
+	•	proof:
+	•	evidence that all events are consistent with export_checkpoint:
+	•	minimal subset of MMR peaks, membership proofs, or aggregated structure
+
+Bundle immutability:
+	•	Any change to payload, metadata, or proof MUST change bundle_id.
+	•	Import MUST fail if bundle_id or internal signatures do not verify.
+
+4.5. Import procedure
+
+For each bundle B:
+	1.	Receive B via physical or network means.
+	2.	Validate:
+	•	source_hub_id against trusted list,
+	•	export_checkpoint signature,
+	•	bundle_proof against export_checkpoint,
+	•	internal receipts.
+	3.	Apply stream mapping:
+	•	export/zoneX/foo -> import/zoneX/foo
+	4.	For each event:
+	•	create new event in import stream with:
+	•	original payload and metadata,
+	•	origin_receipt (or reference),
+	•	import_time,
+	•	bridge_id.
+	5.	Commit events to hub_offline.
+	6.	Optionally generate and anchor an import checkpoint.
+
+Import MUST NOT:
+	•	reuse source sequence numbers as hub_offline commit sequence,
+	•	silently drop events on verification failure,
+	•	modify payload content.
+
+On any failure:
+	•	record an audit entry in bridge/offline/log including:
+	•	bundle_id,
+	•	reason,
+	•	position in bundle.
+
+4.6. Bridge audit streams
+
+bridge/online/log:
+	•	records bundle creation:
+	•	bundle_id, hash
+	•	export_stream_id and seq range
+	•	event count
+	•	export_checkpoint id
+	•	operator/automation id
+
+bridge/offline/log:
+	•	records imports:
+	•	bundle_id
+	•	target import streams and seq ranges
+	•	event count
+	•	verification_result (success/failure, error code)
+	•	operator/automation id
+
+4.7. Reconciliation and consistency
+
+Given a chosen export checkpoint C1 in Z1:
+	•	In Z1:
+	•	compute exported ranges per export/* stream up to C1 from bundle headers.
+	•	In Z2:
+	•	compute imported ranges per import/* stream,
+	•	track origin_receipt set.
+
+AGB0 MUST offer a reconciliation tool or script that can:
+	•	detect missing bundles,
+	•	detect duplicate imports,
+	•	detect partial imports,
+	•	report them in a machine-readable format.
+
+4.8. Invariants (AGB0)
+
+Informal invariants:
+
+J1. One-to-one origin mapping:
+For any imported event in Z2, there exists exactly one origin_receipt in Z1, and reconciliation MUST be able to map between them.
+
+J2. No silent loss in normal operation:
+If bundle B is marked as successfully imported, then all events in B MUST have corresponding imported events, unless an explicit and logged exclusion policy is configured.
+
+J3. Directionality:
+For a strictly one-way Z1→Z2 bridge, there exists no identity and no network path that allows events originating in Z2 to directly influence any stream in hub_online under the same bridge operator’s control.
+
+4.9. VEEN CLI mapping (AGB0)
+
+AGB0 implementation SHOULD be expressed mainly as:
+	•	Bundle exporter:
+	•	veen bridge export or equivalent:
+	•	pulls from export/* streams,
+	•	builds bundle CBOR/JSON artifact,
+	•	writes audit event to bridge/online/log.
+	•	Bundle importer:
+	•	veen bridge import or equivalent:
+	•	verifies bundle,
+	•	writes events to import/*,
+	•	writes audit event to bridge/offline/log.
+	•	Hubs and anchors:
+	•	veen hub start/stop/status
+	•	veen hub anchor /anchor endpoint for anchoring checkpoints.
+	•	Self-test:
+	•	goals_dr_cutover MUST be green when DR0 overlay is used.
+	•	goals_k8s_disposable_mesh SHOULD be green for k8s deployments.
+	•	AGB0-specific selftest MAY be added that:
+	•	starts temporary hubs for Z1/Z2,
+	•	exports synthetic events,
+	•	imports them,
+	•	runs reconciliation.
+
+	5.	Combined product: SDR0+AGB0
+
+5.1. Pattern
+
+Recommended pattern:
+	1.	Run SDR0 in both Z1 and Z2:
+	•	record/* streams with long_term retention.
+	2.	Select subset of record/* as export candidates:
+	•	e.g. record/security/* and record/infrastructure/changes.
+	3.	Configure AGB0 to:
+	•	export from export/* (derived from record/* or mapped 1–1),
+	•	import to import/* in Z2,
+	•	log all bridge operations.
+	4.	Use SDR0 replay in Z2 for analysis:
+	•	import/* plus local record/*.
+	5.	Optionally anchor:
+	•	SDR0 checkpoints in both zones via ANCHOR0,
+	•	AGB0 bundle ids and reconciliation results.
+
+5.2. Shared invariants
+
+K1. End-to-end trace:
+
+For any critical event that originated in Z1 and is imported to Z2:
+	•	there MUST exist:
+	•	a chain:
+	•	SDR0 event in record/* in Z1,
+	•	inclusion in export bundle,
+	•	audit record in bridge/online/log,
+	•	audit record in bridge/offline/log,
+	•	imported event in import/* in Z2,
+	•	optional SDR0 event in record/* in Z2 that references the import.
+
+K2. Bounded uncertainty window:
+
+Given checkpoints C1 in Z1 and C2 in Z2 and a reconciliation run, the system MUST be able to:
+	•	identify a closed region of time/sequence where log state is provably consistent across bridge operations,
+	•	identify any gaps beyond that region.
+
+	6.	Threat model and non-goals
+
+6.1. In-scope threats
+	•	Attempted log tampering at VEEN API level:
+	•	removing or reordering events,
+	•	injecting forged events not signed by valid keys.
+	•	Attempted bundle tampering:
+	•	modification of payload, receipts, or proofs after export.
+	•	Misconfiguration of capabilities:
+	•	accidentally granting write where only read is intended (AGB0),
+	•	bypassing append-only policy for recorder streams.
+	•	Bridge operation errors:
+	•	partial imports,
+	•	duplicated imports.
+
+6.2. Out-of-scope threats
+	•	OS-level compromise of hub hosts or bridge hosts:
+	•	arbitrary root access on machines is treated as out-of-scope.
+	•	Physical access to storage leading to complete data replacement without VEEN validation paths being used.
+	•	Side-channel attacks on cryptographic primitives (reuse of VEEN’s crypto assumptions).
+
+6.3. Expected mitigations
+	•	Anchoring (ANCHOR0) to external services or ledgers is RECOMMENDED for:
+	•	SDR0 checkpoints,
+	•	AGB0 bundle ids,
+	•	reconciliation reports.
+	•	Strict identity and key management MUST be enforced by deployment processes and is not provided by the spec.
+
+	7.	Implementation and test requirements for v0.0.2
+
+To claim v0.0.2 product compliance:
+	•	All existing VEEN test suites MUST be green:
+	•	veen-core, veen-hub, veen-cli, veen-bridge, veen-selftest,
+	•	goals_core_pipeline,
+	•	goals_audit_anchor,
+	•	goals_dr_cutover,
+	•	goals_k8s_disposable_mesh (for k8s environments).
+	•	At least one SDR0 integration selftest MUST exist that:
+	•	emits events to record/*,
+	•	generates and verifies checkpoints,
+	•	replays with proofs.
+	•	At least one AGB0 integration selftest MUST exist that:
+	•	creates hubs for Z1/Z2,
+	•	exports bundles,
+	•	imports them,
+	•	runs reconciliation,
+	•	asserts invariants J1–J3.
+
+This v0.0.2 spec is intentionally minimal at the product surface: UI, billing, and higher-level workflows may be added freely as long as the invariants and capabilities defined above remain satisfied.
