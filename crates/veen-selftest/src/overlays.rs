@@ -25,7 +25,7 @@ use veen_hub::pipeline::{
 use veen_hub::runtime::HubRuntime;
 use veen_hub::storage::HUB_KEY_FILE;
 
-use crate::{SelftestGoalReport, SelftestReporter};
+use crate::{query, SelftestGoalReport, SelftestReporter};
 
 const FED_CHAT_STREAM: &str = "fed/chat";
 const DEFAULT_CLIENT_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -73,6 +73,13 @@ pub async fn run_overlays(subset: Option<&str>, reporter: &mut SelftestReporter<
             evidence: vec!["fed-auth scenario executed with bridge and hubs".into()],
             perf: None,
         });
+    }
+
+    if subset.is_none() || subset == Some("query") {
+        query::run_query_overlays(reporter)
+            .await
+            .context("executing query overlay self-tests")?;
+        executed.push("query");
     }
 
     if subset.is_none() || subset == Some("agb0") {
