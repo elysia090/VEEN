@@ -602,6 +602,7 @@ fn validate_evidence_summary(
             if summary_obj.contains_key("sample_rate") {
                 return Err(QueryError::UnexpectedSampleRate);
             }
+            validate_verified_entries(summary_obj.get("verified"))?;
         }
         EvidenceMode::Spot => {
             let expected = policy.sample_rate.ok_or(QueryError::MissingSampleRate)?;
@@ -613,25 +614,72 @@ fn validate_evidence_summary(
             if (sample_rate - expected).abs() > f64::EPSILON {
                 return Err(QueryError::EvidenceSampleRateMismatch);
             }
+
+            let summary_query_id = summary_obj
+                .get("query_id")
+                .and_then(Value::as_str)
+                .ok_or(QueryError::InvalidEvidenceSummary)?
+                .trim();
+            let summary_result_id = summary_obj
+                .get("result_id")
+                .and_then(Value::as_str)
+                .ok_or(QueryError::InvalidEvidenceSummary)?
+                .trim();
+
+            if summary_query_id != query_id || summary_result_id != result_id {
+                return Err(QueryError::EvidenceIdentifierMismatch);
+            }
+
+            let verified = summary_obj
+                .get("verified")
+                .ok_or(QueryError::InvalidEvidenceSummary)?;
+            validate_verified_entries(Some(verified))?;
         }
         EvidenceMode::Full => {
             if summary_obj.contains_key("sample_rate") {
                 return Err(QueryError::UnexpectedSampleRate);
             }
-        }
-    }
 
-    if let Some(verified) = summary_obj.get("verified") {
-        let entries = verified
-            .as_array()
-            .ok_or(QueryError::InvalidEvidenceSummary)?;
+            let summary_query_id = summary_obj
+                .get("query_id")
+                .and_then(Value::as_str)
+                .ok_or(QueryError::InvalidEvidenceSummary)?
+                .trim();
+            let summary_result_id = summary_obj
+                .get("result_id")
+                .and_then(Value::as_str)
+                .ok_or(QueryError::InvalidEvidenceSummary)?
+                .trim();
 
-        if entries.iter().any(|entry| !entry.is_object()) {
-            return Err(QueryError::InvalidEvidenceSummary);
+            if summary_query_id != query_id || summary_result_id != result_id {
+                return Err(QueryError::EvidenceIdentifierMismatch);
+            }
+
+            let verified = summary_obj
+                .get("verified")
+                .ok_or(QueryError::InvalidEvidenceSummary)?;
+            validate_verified_entries(Some(verified))?;
         }
     }
 
     Ok(())
+}
+
+fn validate_verified_entries(value: Option<&Value>) -> Result<(), QueryError> {
+    match value {
+        None => Ok(()),
+        Some(verified) => {
+            let entries = verified
+                .as_array()
+                .ok_or(QueryError::InvalidEvidenceSummary)?;
+
+            if entries.iter().any(|entry| !entry.is_object()) {
+                return Err(QueryError::InvalidEvidenceSummary);
+            }
+
+            Ok(())
+        }
+    }
 }
 
 fn canonicalize_value(value: &Value) -> Value {
@@ -1045,5 +1093,69 @@ mod tests {
         .expect_err("should fail");
 
         assert_eq!(error, QueryError::EvidenceSampleRateMismatch);
+    }
+
+    #[test]
+    fn rejects_incomplete_evidence_summary_for_strict_modes() {
+        let rows = vec![serde_json::json!({ "subject_id": "user:123" })];
+        let spot_policy = EvidencePolicy {
+            mode: EvidenceMode::Spot,
+            sample_rate: Some(0.5),
+        };
+
+        let error = ResultDigest::from_rows_and_evidence(
+            "q-1",
+            Some("r-1".into()),
+            &rows,
+            spot_policy.clone(),
+            &serde_json::json!({
+                "mode": "spot",
+                "sample_rate": 0.5,
+                "verified": [],
+            }),
+            ResultContext::new("2025-11-19T03:20:00Z", "hub-1", None),
+            || "ignored".into(),
+        )
+        .expect_err("should fail when IDs are missing");
+
+        assert_eq!(error, QueryError::InvalidEvidenceSummary);
+
+        let error = ResultDigest::from_rows_and_evidence(
+            "q-1",
+            Some("r-1".into()),
+            &rows,
+            spot_policy,
+            &serde_json::json!({
+                "mode": "spot",
+                "sample_rate": 0.5,
+                "query_id": "q-1",
+                "result_id": "r-1",
+            }),
+            ResultContext::new("2025-11-19T03:20:00Z", "hub-1", None),
+            || "ignored".into(),
+        )
+        .expect_err("should fail when verified is missing");
+
+        assert_eq!(error, QueryError::InvalidEvidenceSummary);
+
+        let error = ResultDigest::from_rows_and_evidence(
+            "q-1",
+            Some("r-1".into()),
+            &rows,
+            EvidencePolicy {
+                mode: EvidenceMode::Full,
+                sample_rate: None,
+            },
+            &serde_json::json!({
+                "mode": "full",
+                "query_id": "q-1",
+                "result_id": "r-1",
+            }),
+            ResultContext::new("2025-11-19T03:20:00Z", "hub-1", None),
+            || "ignored".into(),
+        )
+        .expect_err("should fail when verified is missing for full mode");
+
+        assert_eq!(error, QueryError::InvalidEvidenceSummary);
     }
 }
