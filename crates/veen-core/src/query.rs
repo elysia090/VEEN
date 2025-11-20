@@ -86,11 +86,14 @@ pub struct QueryFilter {
 }
 
 impl TimeFilter {
-    fn validate(&self) -> Result<(), QueryError> {
-        let start = self.from.as_deref().map(validate_timestamp).transpose()?;
-        let end = self.to.as_deref().map(validate_timestamp).transpose()?;
+    fn normalize(&mut self) -> Result<(), QueryError> {
+        let (from_value, from_ts) = normalize_timestamp(self.from.as_deref())?;
+        let (to_value, to_ts) = normalize_timestamp(self.to.as_deref())?;
 
-        if let (Some(start), Some(end)) = (start, end) {
+        self.from = from_value;
+        self.to = to_value;
+
+        if let (Some(start), Some(end)) = (from_ts, to_ts) {
             if start > end {
                 return Err(QueryError::InvalidTimeWindow);
             }
@@ -137,13 +140,7 @@ impl QueryFilter {
             }
         }
 
-        if let Some(to) = self.time.to.as_ref() {
-            if to.trim().is_empty() {
-                return Err(QueryError::InvalidTimestamp);
-            }
-        }
-
-        self.time.validate()?;
+        self.time.normalize()?;
 
         Ok(self)
     }
@@ -518,6 +515,27 @@ fn validate_timestamp(raw: &str) -> Result<OffsetDateTime, QueryError> {
     Ok(timestamp)
 }
 
+fn normalize_timestamp(
+    raw: Option<&str>,
+) -> Result<(Option<String>, Option<OffsetDateTime>), QueryError> {
+    match raw {
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(QueryError::InvalidTimestamp);
+            }
+
+            let parsed = validate_timestamp(trimmed)?;
+            let formatted = parsed
+                .format(&Rfc3339)
+                .map_err(|_| QueryError::InvalidTimestamp)?;
+
+            Ok((Some(formatted), Some(parsed)))
+        }
+        None => Ok((None, None)),
+    }
+}
+
 fn hash_rows(rows: &[Value]) -> Result<String, QueryError> {
     let canonical_rows = Value::Array(rows.iter().map(canonicalize_value).collect());
     hash_json_value(&canonical_rows)
@@ -781,6 +799,63 @@ mod tests {
 
         let error = descriptor.normalize().expect_err("should fail");
         assert_eq!(error, QueryError::InvalidTimeWindow);
+    }
+
+    #[test]
+    fn normalizes_time_filter_to_canonical_rfc3339() {
+        let descriptor = QueryDescriptor {
+            query_id: Some("q-1".into()),
+            version: Some(1),
+            scope: vec!["record/app/http".into()],
+            filter: QueryFilter {
+                subject_id: None,
+                event_type: None,
+                time: TimeFilter {
+                    from: Some(" 2025-11-18T12:00:00Z ".into()),
+                    to: Some("2025-11-19T01:00:00Z".into()),
+                },
+            },
+            projection: vec!["subject_id".into()],
+            aggregate: None,
+            evidence: EvidencePolicy::default(),
+            meta: None,
+        };
+
+        let normalized = descriptor.normalize().expect("normalize");
+
+        assert_eq!(
+            normalized.filter.time.from.as_deref(),
+            Some("2025-11-18T12:00:00Z")
+        );
+        assert_eq!(
+            normalized.filter.time.to.as_deref(),
+            Some("2025-11-19T01:00:00Z")
+        );
+    }
+
+    #[test]
+    fn rejects_non_utc_timestamps_in_time_filter() {
+        let descriptor = QueryDescriptor {
+            query_id: Some("q-1".into()),
+            version: Some(1),
+            scope: vec!["record/app/http".into()],
+            filter: QueryFilter {
+                subject_id: None,
+                event_type: None,
+                time: TimeFilter {
+                    from: Some("2025-11-18T12:00:00+02:00".into()),
+                    to: None,
+                },
+            },
+            projection: vec!["subject_id".into()],
+            aggregate: None,
+            evidence: EvidencePolicy::default(),
+            meta: None,
+        };
+
+        let error = descriptor.normalize().expect_err("should fail");
+
+        assert_eq!(error, QueryError::InvalidTimestamp);
     }
 
     #[test]
