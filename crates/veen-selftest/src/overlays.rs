@@ -65,6 +65,7 @@ pub async fn run_overlays(subset: Option<&str>, reporter: &mut SelftestReporter<
             "MMR roots converge after replication".into(),
         ],
         evidence: vec!["fed-auth scenario executed with bridge and hubs".into()],
+        perf: None,
     });
     Ok(())
 }

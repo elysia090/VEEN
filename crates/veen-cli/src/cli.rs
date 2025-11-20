@@ -72,6 +72,7 @@ use veen_hub::storage::{
     HUB_PID_FILE, MESSAGES_DIR, PAYLOADS_FILE, RECEIPTS_FILE, REVOCATIONS_FILE, STATE_DIR,
     STREAMS_DIR, TLS_INFO_FILE,
 };
+use veen_selftest::metrics::{HistogramSnapshot, HubMetricsSnapshot};
 
 #[cfg(unix)]
 use nix::errno::Errno;
@@ -2427,66 +2428,13 @@ impl HubRuntimeState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct HubMetricsSnapshot {
-    submit_ok_total: u64,
-    submit_err_total: BTreeMap<String, u64>,
-    verify_latency_ms: HistogramSnapshot,
-    commit_latency_ms: HistogramSnapshot,
-    end_to_end_latency_ms: HistogramSnapshot,
-}
-
 impl HubMetricsSnapshot {
     fn from_remote(report: &RemoteObservabilityReport) -> Self {
         Self {
             submit_ok_total: report.submit_ok_total,
             submit_err_total: report.submit_err_total.clone(),
-            verify_latency_ms: HistogramSnapshot::default(),
-            commit_latency_ms: HistogramSnapshot::default(),
-            end_to_end_latency_ms: HistogramSnapshot::default(),
+            ..Self::default()
         }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct HistogramSnapshot {
-    count: u64,
-    sum: f64,
-    min: Option<f64>,
-    max: Option<f64>,
-}
-
-impl Default for HistogramSnapshot {
-    fn default() -> Self {
-        Self {
-            count: 0,
-            sum: 0.0,
-            min: None,
-            max: None,
-        }
-    }
-}
-
-impl HistogramSnapshot {
-    fn average(&self) -> Option<f64> {
-        if self.count == 0 {
-            None
-        } else {
-            Some(self.sum / self.count as f64)
-        }
-    }
-
-    fn record(&mut self, value: f64) {
-        self.count = self.count.saturating_add(1);
-        self.sum += value;
-        self.min = Some(match self.min {
-            Some(current) => current.min(value),
-            None => value,
-        });
-        self.max = Some(match self.max {
-            Some(current) => current.max(value),
-            None => value,
-        });
     }
 }
 
@@ -12384,12 +12332,20 @@ fn format_histogram(hist: &HistogramSnapshot) -> String {
     }
 
     let avg = hist.average().unwrap_or(0.0);
-    let min = hist.min.unwrap_or(avg);
-    let max = hist.max.unwrap_or(avg);
-    format!(
-        "count={} min={min:.2} max={max:.2} avg={avg:.2}",
-        hist.count
-    )
+    let mut parts = vec![format!("count={}", hist.count), format!("avg={avg:.2}")];
+    if let Some(min) = hist.min {
+        parts.push(format!("min={min:.2}"));
+    }
+    if let Some(max) = hist.max {
+        parts.push(format!("max={max:.2}"));
+    }
+    if let Some(p95) = hist.p95 {
+        parts.push(format!("p95={p95:.2}"));
+    }
+    if let Some(p99) = hist.p99 {
+        parts.push(format!("p99={p99:.2}"));
+    }
+    parts.join(" ")
 }
 
 fn parse_hex_key<const N: usize>(input: &str) -> Result<[u8; N]> {
