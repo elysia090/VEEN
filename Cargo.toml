@@ -57,6 +57,8 @@ serde_path_to_error = "0.1"
 dashmap = "5"
 humantime-serde = "1"
 humantime = "2"
+bloomfilter = "3"
+lru = "0.12"
 k8s-openapi = { version = "0.21", features = ["v1_29"] }
 kube = { version = "0.88", default-features = false, features = ["client", "rustls-tls"] }
 tokio-stream = "0.1"

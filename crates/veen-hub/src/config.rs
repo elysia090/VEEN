@@ -14,6 +14,7 @@ pub struct HubRuntimeConfig {
     pub profile_id: Option<String>,
     pub anchors: AnchorConfig,
     pub observability: ObservabilityConfig,
+    pub dedup: DedupConfig,
     pub admission: AdmissionConfig,
     pub federation: FederationConfig,
     pub config_path: Option<PathBuf>,
@@ -35,6 +36,23 @@ pub struct AnchorConfig {
 pub struct ObservabilityConfig {
     pub enable_metrics: bool,
     pub enable_logs: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DedupConfig {
+    pub bloom_capacity: usize,
+    pub bloom_false_positive_rate: f64,
+    pub lru_capacity: usize,
+}
+
+impl Default for DedupConfig {
+    fn default() -> Self {
+        Self {
+            bloom_capacity: 10_000,
+            bloom_false_positive_rate: 0.01,
+            lru_capacity: 4096,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -61,13 +79,16 @@ pub struct FederationConfig {
     pub replica_targets: Vec<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct HubConfigOverrides {
     pub profile_id: Option<String>,
     pub anchors_enabled: Option<bool>,
     pub anchor_backend: Option<String>,
     pub enable_metrics: Option<bool>,
     pub enable_logs: Option<bool>,
+    pub bloom_capacity: Option<usize>,
+    pub bloom_false_positive_rate: Option<f64>,
+    pub lru_capacity: Option<usize>,
     pub capability_gating_enabled: Option<bool>,
     pub max_client_id_lifetime_sec: Option<u64>,
     pub max_msgs_per_client_id_per_label: Option<u64>,
@@ -84,6 +105,8 @@ struct FileConfig {
     #[serde(default)]
     observability: ObservabilitySection,
     #[serde(default)]
+    dedup: DedupSection,
+    #[serde(default)]
     admission: AdmissionSection,
     #[serde(default)]
     federation: FederationSection,
@@ -99,6 +122,13 @@ struct AnchorSection {
 struct ObservabilitySection {
     enable_metrics: Option<bool>,
     enable_logs: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct DedupSection {
+    bloom_capacity: Option<usize>,
+    bloom_false_positive_rate: Option<f64>,
+    lru_capacity: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -147,6 +177,20 @@ impl HubRuntimeConfig {
                 .enable_logs
                 .unwrap_or_else(|| file_cfg.observability.enable_logs.unwrap_or(true)),
         };
+        let dedup = DedupConfig {
+            bloom_capacity: overrides
+                .bloom_capacity
+                .or(file_cfg.dedup.bloom_capacity)
+                .unwrap_or_else(|| DedupConfig::default().bloom_capacity),
+            bloom_false_positive_rate: overrides
+                .bloom_false_positive_rate
+                .or(file_cfg.dedup.bloom_false_positive_rate)
+                .unwrap_or_else(|| DedupConfig::default().bloom_false_positive_rate),
+            lru_capacity: overrides
+                .lru_capacity
+                .or(file_cfg.dedup.lru_capacity)
+                .unwrap_or_else(|| DedupConfig::default().lru_capacity),
+        };
         let admission = AdmissionConfig {
             capability_gating_enabled: overrides
                 .capability_gating_enabled
@@ -179,6 +223,7 @@ impl HubRuntimeConfig {
             profile_id,
             anchors,
             observability,
+            dedup,
             admission,
             federation,
             config_path,
