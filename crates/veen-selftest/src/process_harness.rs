@@ -1016,7 +1016,7 @@ impl IntegrationHarness {
         verify_stream_proofs(&recovery_sample, &replay_checkpoint.mmr_root)
             .context("verifying recorder proofs after restart")?;
 
-        let _ = self
+        self
             .stop_hub_gracefully(restarted)
             .await
             .context("stopping recorder hub after recovery")?;
