@@ -215,10 +215,7 @@ impl QueryDescriptor {
     /// * Fills a missing `version` with `1`.
     /// * Generates a `query_id` when absent using the provided generator.
     /// * Validates required fields and evidence constraints.
-    pub fn normalize_with<F>(
-        self,
-        query_id_gen: F,
-    ) -> Result<NormalizedQueryDescriptor, QueryError>
+    pub fn normalize_with<F>(self, query_id_gen: F) -> Result<NormalizedQueryDescriptor, QueryError>
     where
         F: FnMut() -> String,
     {
@@ -361,6 +358,11 @@ impl ResultDigest {
     {
         evidence_policy.normalize()?;
 
+        let query_id = query_id.into().trim().to_string();
+        if query_id.is_empty() {
+            return Err(QueryError::InvalidQueryId);
+        }
+
         let executed_at = context.executed_at;
         validate_timestamp(&executed_at)?;
 
@@ -372,11 +374,31 @@ impl ResultDigest {
             return Err(QueryError::MissingResultId);
         }
 
+        validate_rows(rows)?;
+        validate_evidence_summary(evidence_summary, &evidence_policy, &query_id, &result_id)?;
+
+        let hub_id = context.hub_id.trim().to_string();
+        if hub_id.is_empty() {
+            return Err(QueryError::InvalidHubId);
+        }
+
+        let profile_id = context
+            .profile_id
+            .map(|value| {
+                let trimmed = value.trim().to_string();
+                if trimmed.is_empty() {
+                    Err(QueryError::InvalidProfileId)
+                } else {
+                    Ok(trimmed)
+                }
+            })
+            .transpose()?;
+
         let rows_hash = hash_rows(rows)?;
         let evidence_hash = hash_evidence_summary(evidence_summary)?;
 
         Ok(Self {
-            query_id: query_id.into(),
+            query_id,
             result_id,
             version: 1,
             row_count: rows.len(),
@@ -384,8 +406,8 @@ impl ResultDigest {
             rows_hash,
             evidence_hash,
             executed_at,
-            hub_id: context.hub_id,
-            profile_id: context.profile_id,
+            hub_id,
+            profile_id,
         })
     }
 
@@ -426,6 +448,8 @@ pub enum QueryError {
     InvalidSubjectId,
     #[error("query_id must be provided or generated")]
     MissingQueryId,
+    #[error("query_id must be a non-empty string")]
+    InvalidQueryId,
     #[error("result_id must be provided or generated")]
     MissingResultId,
     #[error("evidence.sample_rate is required for spot mode")]
@@ -450,6 +474,20 @@ pub enum QueryError {
     UnsupportedVersion(u64),
     #[error("failed to produce canonical JSON for hashing: {0}")]
     CanonicalJson(String),
+    #[error("result rows must be JSON objects")]
+    InvalidResultRow,
+    #[error("hub_id must be a non-empty string")]
+    InvalidHubId,
+    #[error("profile_id must be non-empty when provided")]
+    InvalidProfileId,
+    #[error("evidence summary must be a JSON object with a mode matching the evidence policy")]
+    InvalidEvidenceSummary,
+    #[error("evidence summary mode must match evidence policy")]
+    EvidenceModeMismatch,
+    #[error("evidence summary identifiers must match query_id and result_id")]
+    EvidenceIdentifierMismatch,
+    #[error("evidence summary sample_rate must match evidence policy")]
+    EvidenceSampleRateMismatch,
 }
 
 fn generate_query_id() -> String {
@@ -494,6 +532,88 @@ fn hash_json_value(value: &Value) -> Result<String, QueryError> {
         serde_json::to_vec(value).map_err(|err| QueryError::CanonicalJson(err.to_string()))?;
     let digest = Sha256::digest(bytes);
     Ok(hex::encode(digest))
+}
+
+fn validate_rows(rows: &[Value]) -> Result<(), QueryError> {
+    if rows.iter().all(|row| matches!(row, Value::Object(_))) {
+        Ok(())
+    } else {
+        Err(QueryError::InvalidResultRow)
+    }
+}
+
+fn validate_evidence_summary(
+    summary: &Value,
+    policy: &EvidencePolicy,
+    query_id: &str,
+    result_id: &str,
+) -> Result<(), QueryError> {
+    let summary_obj = summary
+        .as_object()
+        .ok_or(QueryError::InvalidEvidenceSummary)?;
+
+    let mode = summary_obj
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or(QueryError::InvalidEvidenceSummary)?;
+
+    let expected_mode = match policy.mode {
+        EvidenceMode::None => "none",
+        EvidenceMode::Spot => "spot",
+        EvidenceMode::Full => "full",
+    };
+
+    if mode != expected_mode {
+        return Err(QueryError::EvidenceModeMismatch);
+    }
+
+    if let Some(value) = summary_obj.get("query_id").and_then(Value::as_str) {
+        if value.trim() != query_id {
+            return Err(QueryError::EvidenceIdentifierMismatch);
+        }
+    }
+
+    if let Some(value) = summary_obj.get("result_id").and_then(Value::as_str) {
+        if value.trim() != result_id {
+            return Err(QueryError::EvidenceIdentifierMismatch);
+        }
+    }
+
+    match policy.mode {
+        EvidenceMode::None => {
+            if summary_obj.contains_key("sample_rate") {
+                return Err(QueryError::UnexpectedSampleRate);
+            }
+        }
+        EvidenceMode::Spot => {
+            let expected = policy.sample_rate.ok_or(QueryError::MissingSampleRate)?;
+            let sample_rate = summary_obj
+                .get("sample_rate")
+                .and_then(Value::as_f64)
+                .ok_or(QueryError::MissingSampleRate)?;
+
+            if (sample_rate - expected).abs() > f64::EPSILON {
+                return Err(QueryError::EvidenceSampleRateMismatch);
+            }
+        }
+        EvidenceMode::Full => {
+            if summary_obj.contains_key("sample_rate") {
+                return Err(QueryError::UnexpectedSampleRate);
+            }
+        }
+    }
+
+    if let Some(verified) = summary_obj.get("verified") {
+        let entries = verified
+            .as_array()
+            .ok_or(QueryError::InvalidEvidenceSummary)?;
+
+        if entries.iter().any(|entry| !entry.is_object()) {
+            return Err(QueryError::InvalidEvidenceSummary);
+        }
+    }
+
+    Ok(())
 }
 
 fn canonicalize_value(value: &Value) -> Value {
@@ -709,5 +829,146 @@ mod tests {
         assert_eq!(digest.result_id, "r-1");
         assert_eq!(digest.query_id, "q-1");
         assert_eq!(digest.version, 1);
+    }
+
+    #[test]
+    fn rejects_non_object_rows() {
+        let rows = vec![serde_json::json!("not-an-object")];
+        let evidence_policy = EvidencePolicy::default();
+        let summary = serde_json::json!({ "mode": "none" });
+
+        let error = ResultDigest::from_rows_and_evidence(
+            "q-1",
+            Some("r-1".into()),
+            &rows,
+            evidence_policy,
+            &summary,
+            ResultContext::new("2025-11-19T03:20:00Z", "hub-1", None),
+            || "r-1".into(),
+        )
+        .expect_err("should fail");
+
+        assert_eq!(error, QueryError::InvalidResultRow);
+    }
+
+    #[test]
+    fn rejects_blank_hub_and_profile_ids() {
+        let rows = vec![serde_json::json!({ "subject_id": "user:123" })];
+        let evidence_policy = EvidencePolicy::default();
+        let summary = serde_json::json!({ "mode": "none" });
+
+        let error = ResultDigest::from_rows_and_evidence(
+            "q-1",
+            Some("r-1".into()),
+            &rows,
+            evidence_policy.clone(),
+            &summary,
+            ResultContext::new("2025-11-19T03:20:00Z", "   ", None),
+            || "r-1".into(),
+        )
+        .expect_err("should fail");
+
+        assert_eq!(error, QueryError::InvalidHubId);
+
+        let error = ResultDigest::from_rows_and_evidence(
+            "q-1",
+            Some("r-1".into()),
+            &rows,
+            evidence_policy,
+            &summary,
+            ResultContext::new("2025-11-19T03:20:00Z", "hub-1", Some("   ".into())),
+            || "r-1".into(),
+        )
+        .expect_err("should fail");
+
+        assert_eq!(error, QueryError::InvalidProfileId);
+    }
+
+    #[test]
+    fn rejects_blank_query_id_in_digest() {
+        let rows = vec![serde_json::json!({ "subject_id": "user:123" })];
+        let summary = serde_json::json!({ "mode": "none" });
+
+        let error = ResultDigest::from_rows_and_evidence(
+            "   ",
+            Some("r-1".into()),
+            &rows,
+            EvidencePolicy::default(),
+            &summary,
+            ResultContext::new("2025-11-19T03:20:00Z", "hub-1", None),
+            || "r-1".into(),
+        )
+        .expect_err("should fail");
+
+        assert_eq!(error, QueryError::InvalidQueryId);
+    }
+
+    #[test]
+    fn validates_evidence_summary_mode_and_identifiers() {
+        let rows = vec![serde_json::json!({ "subject_id": "user:123" })];
+        let evidence_policy = EvidencePolicy {
+            mode: EvidenceMode::Spot,
+            sample_rate: Some(0.5),
+        };
+
+        let wrong_mode = serde_json::json!({
+            "mode": "full",
+            "sample_rate": 0.5,
+            "query_id": "q-1",
+            "result_id": "r-1",
+        });
+
+        let error = ResultDigest::from_rows_and_evidence(
+            "q-1",
+            Some("r-1".into()),
+            &rows,
+            evidence_policy.clone(),
+            &wrong_mode,
+            ResultContext::new("2025-11-19T03:20:00Z", "hub-1", None),
+            || "r-1".into(),
+        )
+        .expect_err("should fail");
+
+        assert_eq!(error, QueryError::EvidenceModeMismatch);
+
+        let mismatched_ids = serde_json::json!({
+            "mode": "spot",
+            "sample_rate": 0.5,
+            "query_id": "other",
+            "result_id": "r-1",
+        });
+
+        let error = ResultDigest::from_rows_and_evidence(
+            "q-1",
+            Some("r-1".into()),
+            &rows,
+            evidence_policy.clone(),
+            &mismatched_ids,
+            ResultContext::new("2025-11-19T03:20:00Z", "hub-1", None),
+            || "r-1".into(),
+        )
+        .expect_err("should fail");
+
+        assert_eq!(error, QueryError::EvidenceIdentifierMismatch);
+
+        let mismatched_sample_rate = serde_json::json!({
+            "mode": "spot",
+            "sample_rate": 0.7,
+            "query_id": "q-1",
+            "result_id": "r-1",
+        });
+
+        let error = ResultDigest::from_rows_and_evidence(
+            "q-1",
+            Some("r-1".into()),
+            &rows,
+            evidence_policy,
+            &mismatched_sample_rate,
+            ResultContext::new("2025-11-19T03:20:00Z", "hub-1", None),
+            || "r-1".into(),
+        )
+        .expect_err("should fail");
+
+        assert_eq!(error, QueryError::EvidenceSampleRateMismatch);
     }
 }
