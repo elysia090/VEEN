@@ -217,7 +217,7 @@ impl QueryDescriptor {
     /// * Validates required fields and evidence constraints.
     pub fn normalize_with<F>(
         self,
-        mut query_id_gen: F,
+        query_id_gen: F,
     ) -> Result<NormalizedQueryDescriptor, QueryError>
     where
         F: FnMut() -> String,
@@ -267,7 +267,7 @@ impl QueryDescriptor {
 
         let query_id = self
             .query_id
-            .unwrap_or_else(|| query_id_gen())
+            .unwrap_or_else(query_id_gen)
             .trim()
             .to_string();
 
@@ -324,6 +324,27 @@ pub struct ResultDigest {
     pub profile_id: Option<String>,
 }
 
+/// Context needed to build a result digest.
+pub struct ResultContext {
+    pub executed_at: String,
+    pub hub_id: String,
+    pub profile_id: Option<String>,
+}
+
+impl ResultContext {
+    pub fn new(
+        executed_at: impl Into<String>,
+        hub_id: impl Into<String>,
+        profile_id: Option<String>,
+    ) -> Self {
+        Self {
+            executed_at: executed_at.into(),
+            hub_id: hub_id.into(),
+            profile_id,
+        }
+    }
+}
+
 impl ResultDigest {
     /// Builds a digest for the provided result set and evidence summary.
     pub fn from_rows_and_evidence<G>(
@@ -332,9 +353,7 @@ impl ResultDigest {
         rows: &[Value],
         mut evidence_policy: EvidencePolicy,
         evidence_summary: &Value,
-        executed_at: impl Into<String>,
-        hub_id: impl Into<String>,
-        profile_id: Option<String>,
+        context: ResultContext,
         mut result_id_gen: G,
     ) -> Result<Self, QueryError>
     where
@@ -342,11 +361,11 @@ impl ResultDigest {
     {
         evidence_policy.normalize()?;
 
-        let executed_at = executed_at.into();
+        let executed_at = context.executed_at;
         validate_timestamp(&executed_at)?;
 
         let result_id = result_id
-            .unwrap_or_else(|| result_id_gen())
+            .unwrap_or_else(&mut result_id_gen)
             .trim()
             .to_string();
         if result_id.is_empty() {
@@ -365,8 +384,8 @@ impl ResultDigest {
             rows_hash,
             evidence_hash,
             executed_at,
-            hub_id: hub_id.into(),
-            profile_id,
+            hub_id: context.hub_id,
+            profile_id: context.profile_id,
         })
     }
 
@@ -386,9 +405,7 @@ impl ResultDigest {
             rows,
             evidence_policy,
             evidence_summary,
-            executed_at,
-            hub_id,
-            profile_id,
+            ResultContext::new(executed_at, hub_id, profile_id),
             generate_result_id,
         )
     }
@@ -683,9 +700,7 @@ mod tests {
             &rows,
             evidence_policy,
             &summary,
-            "2025-11-19T03:20:00Z",
-            "hub-1",
-            Some("profile-1".into()),
+            ResultContext::new("2025-11-19T03:20:00Z", "hub-1", Some("profile-1".into())),
             || "r-1".into(),
         )
         .expect("digest");
