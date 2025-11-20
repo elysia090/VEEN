@@ -34,7 +34,7 @@ impl Default for Profile {
             dh: "x25519",
             hpke_suite: "X25519-HKDF-SHA256-CHACHA20POLY1305",
             epoch_sec: 60,
-            pad_block: 0,
+            pad_block: 256,
             mmr_hash: "sha256",
         }
     }
@@ -70,7 +70,7 @@ mod tests {
         let as_hex = id.encode_hex::<String>();
         assert_eq!(
             as_hex,
-            "f5a9c1afdd0a8771f8d599ff8ba8146f407455ae6abf451a3e99363577a12d20"
+            "d70369a2b28de76cfc9be41353b5f9c7c398d4135cc937074f3617dafd1209f5"
         );
     }
 
