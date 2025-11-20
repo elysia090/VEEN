@@ -19,7 +19,7 @@ use hex;
 
 use crate::pipeline::{
     AnchorRequest, BridgeIngestRequest, CapabilityError, HubPipeline, HubProfileDescriptor,
-    HubRoleDescriptor, ObservabilityReport, SubmitRequest,
+    HubRoleDescriptor, ObservabilityReport, SubmitError, SubmitRequest,
 };
 use std::str::FromStr;
 use veen_core::label::{Label, StreamId};
@@ -187,6 +187,19 @@ async fn handle_submit(
                     }
                 }
                 response
+            } else if let Some(submit_err) = err.downcast_ref::<SubmitError>() {
+                tracing::warn!(error = ?submit_err, "submit failed");
+                let code = submit_err.code();
+                pipeline.observability().record_submit_err(code);
+                pipeline
+                    .record_admission_failure(
+                        &stream_label,
+                        &client_id,
+                        code,
+                        &submit_err.to_string(),
+                    )
+                    .await;
+                (StatusCode::CONFLICT, submit_err.to_string()).into_response()
             } else {
                 tracing::warn!(error = ?err, "submit failed");
                 (StatusCode::BAD_REQUEST, err.to_string()).into_response()

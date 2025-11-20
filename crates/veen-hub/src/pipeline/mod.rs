@@ -1,6 +1,7 @@
 use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::convert::TryInto;
 use std::io::{Cursor, ErrorKind};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -8,8 +9,10 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use bloomfilter::Bloom;
 use ciborium::de::from_reader;
 use hex;
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use serde_json::Value as JsonValue;
@@ -40,7 +43,7 @@ use veen_core::{
 
 use thiserror::Error;
 
-use crate::config::{AdmissionConfig, FederationConfig, HubRole, HubRuntimeConfig};
+use crate::config::{AdmissionConfig, DedupConfig, FederationConfig, HubRole, HubRuntimeConfig};
 use crate::observability::{HubObservability, ObservabilitySnapshot};
 use crate::storage::{
     attachments,
@@ -61,6 +64,7 @@ pub struct HubPipeline {
     admission: AdmissionConfig,
     federation: FederationConfig,
     identity: HubIdentity,
+    dedup: Arc<Mutex<DuplicateDetector>>,
 }
 
 struct HubState {
@@ -111,6 +115,46 @@ impl StreamRuntime {
     }
 }
 
+struct DuplicateDetector {
+    bloom: Bloom<[u8; 32]>,
+    recent: LruCache<LeafHash, ()>,
+}
+
+impl DuplicateDetector {
+    fn new(config: &DedupConfig) -> Self {
+        let bloom_capacity = config.bloom_capacity.max(1);
+        let lru_capacity = NonZeroUsize::new(config.lru_capacity.max(1)).unwrap();
+        Self {
+            bloom: Bloom::new_for_fp_rate(bloom_capacity, config.bloom_false_positive_rate)
+                .expect("valid bloom filter configuration"),
+            recent: LruCache::new(lru_capacity),
+        }
+    }
+
+    fn seed<I: IntoIterator<Item = LeafHash>>(&mut self, hashes: I) {
+        for hash in hashes {
+            self.insert(&hash);
+        }
+    }
+
+    fn insert(&mut self, hash: &LeafHash) {
+        self.bloom.set(hash.as_bytes());
+        self.recent.put(*hash, ());
+    }
+
+    fn check_and_insert(&mut self, hash: &LeafHash) -> bool {
+        if self.recent.get(hash).is_some() {
+            return true;
+        }
+        if self.bloom.check(hash.as_bytes()) {
+            self.recent.put(*hash, ());
+            return true;
+        }
+        self.insert(hash);
+        false
+    }
+}
+
 const MAX_ADMISSION_EVENTS: usize = 512;
 
 impl HubPipeline {
@@ -131,6 +175,9 @@ impl HubPipeline {
         let schema_descriptors = load_schema_descriptors(storage).await?;
         let schema_registry = build_schema_registry(&schema_descriptors);
         let identity = load_hub_identity(storage).await?;
+        let mut dedup_detector = DuplicateDetector::new(&config.dedup);
+        let recent_hashes = collect_recent_leaf_hashes(&streams, &config.dedup)?;
+        dedup_detector.seed(recent_hashes);
         let state = HubState {
             streams,
             capabilities,
@@ -160,6 +207,7 @@ impl HubPipeline {
             admission: config.admission.clone(),
             federation: config.federation.clone(),
             identity,
+            dedup: Arc::new(Mutex::new(dedup_detector)),
         })
     }
 
@@ -451,10 +499,28 @@ impl HubPipeline {
         };
 
         let leaf = leaf_hash_for(&stored_message)?;
+        let leaf_hex = hex::encode(leaf.as_bytes());
+        {
+            let mut dedup = self.dedup.lock().await;
+            if dedup.check_and_insert(&leaf) {
+                tracing::warn!(
+                    stream = %stream,
+                    client_id = %client_id,
+                    leaf_hash = %leaf_hex,
+                    "dropping duplicate message by leaf hash"
+                );
+                drop(guard);
+                self.observability.record_submit_err("E.DUP");
+                self.record_admission_failure(&stream, &client_id, "E.DUP", "duplicate leaf hash")
+                    .await;
+                return Err(anyhow::Error::new(SubmitError::Duplicate {
+                    leaf_hash: leaf_hex,
+                }));
+            }
+        }
         let (computed_seq, mmr_root, proof) = stream_runtime.mmr.append_with_proof(leaf);
         debug_assert_eq!(computed_seq, seq, "stream mmr seq must match message seq");
         stream_runtime.state.messages.push(stored_message.clone());
-        let leaf_hex = hex::encode(leaf.as_bytes());
         let mmr_root_hex = hex::encode(mmr_root.as_bytes());
         let receipt = StreamReceipt {
             seq,
@@ -1491,7 +1557,7 @@ impl HubPipeline {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PowCookieEnvelope {
     #[serde(with = "serde_bytes")]
     pub challenge: ByteBuf,
@@ -1517,7 +1583,7 @@ impl PowCookieEnvelope {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SubmitRequest {
     pub stream: String,
     pub client_id: String,
@@ -1902,6 +1968,20 @@ impl CapabilityError {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum SubmitError {
+    #[error("E.DUP duplicate leaf hash {leaf_hash}")]
+    Duplicate { leaf_hash: String },
+}
+
+impl SubmitError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Duplicate { .. } => "E.DUP",
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthorizeResponse {
     pub auth_ref: AuthRef,
@@ -2238,6 +2318,33 @@ async fn load_existing_streams(storage: &HubStorage) -> Result<HashMap<String, S
         }
     }
     Ok(map)
+}
+
+fn collect_recent_leaf_hashes(
+    streams: &HashMap<String, StreamRuntime>,
+    config: &DedupConfig,
+) -> Result<Vec<LeafHash>> {
+    let limit = config.bloom_capacity.max(config.lru_capacity);
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut entries: Vec<(u64, u64, LeafHash)> = Vec::new();
+
+    for runtime in streams.values() {
+        let len = runtime.state.messages.len();
+        let start = len.saturating_sub(limit);
+        for message in runtime.state.messages.iter().skip(start) {
+            let leaf = leaf_hash_for(message)?;
+            entries.push((message.sent_at, message.seq, leaf));
+        }
+    }
+
+    entries.sort_by_key(|(ts, seq, _)| (*ts, *seq));
+    if entries.len() > limit {
+        entries.drain(0..entries.len().saturating_sub(limit));
+    }
+
+    Ok(entries.into_iter().map(|(_, _, leaf)| leaf).collect())
 }
 
 async fn rebuild_attachment_ref_counts(
@@ -3557,6 +3664,110 @@ mod tests {
             };
 
             pipeline.submit(request).await.expect("submit to succeed");
+        });
+    }
+
+    #[test]
+    fn submit_rejects_duplicate_leaf_hash() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let overrides = HubConfigOverrides {
+                capability_gating_enabled: Some(false),
+                ..HubConfigOverrides::default()
+            };
+            let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
+            allow_stream_for_hub(&pipeline, "core/dup", "dup").await;
+
+            let request = SubmitRequest {
+                stream: "core/dup".to_string(),
+                client_id: hex::encode([0x33; 32]),
+                payload: serde_json::json!({"text": "deduplicate"}),
+                attachments: None,
+                auth_ref: None,
+                expires_at: None,
+                schema: None,
+                idem: None,
+                pow_cookie: None,
+            };
+
+            pipeline.submit(request.clone()).await.unwrap();
+            {
+                let mut guard = pipeline.inner.write().await;
+                let runtime = guard
+                    .streams
+                    .get_mut("core/dup")
+                    .expect("stream runtime present");
+                runtime.state.messages.clear();
+                runtime.proven_messages.clear();
+                runtime.mmr = Mmr::new();
+            }
+            let err = pipeline
+                .submit(request)
+                .await
+                .expect_err("duplicate submit should fail");
+            let submit_err = err.downcast::<SubmitError>().expect("submit error");
+            match submit_err {
+                SubmitError::Duplicate { leaf_hash } => {
+                    assert!(!leaf_hash.is_empty());
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn duplicate_detector_is_seeded_from_persisted_messages() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let overrides = HubConfigOverrides {
+                capability_gating_enabled: Some(false),
+                ..HubConfigOverrides::default()
+            };
+            let pipeline = init_pipeline_with_overrides(temp.path(), overrides.clone()).await;
+            allow_stream_for_hub(&pipeline, "core/dup-seed", "dup-seed").await;
+
+            let request = SubmitRequest {
+                stream: "core/dup-seed".to_string(),
+                client_id: hex::encode([0x44; 32]),
+                payload: serde_json::json!({"text": "persisted"}),
+                attachments: None,
+                auth_ref: None,
+                expires_at: None,
+                schema: None,
+                idem: None,
+                pow_cookie: None,
+            };
+
+            pipeline.submit(request.clone()).await.unwrap();
+            let authority_path = pipeline.storage.authority_store_path();
+            pipeline.storage.flush().await.unwrap();
+            drop(pipeline);
+
+            let pid_path = temp.path().join(crate::storage::HUB_PID_FILE);
+            if pid_path.exists() {
+                fs::remove_file(&pid_path).await.unwrap();
+            }
+            if authority_path.exists() {
+                fs::remove_file(&authority_path).await.unwrap();
+            }
+
+            let restarted = init_pipeline_with_overrides(temp.path(), overrides).await;
+            {
+                let mut guard = restarted.inner.write().await;
+                let runtime = guard
+                    .streams
+                    .get_mut("core/dup-seed")
+                    .expect("stream runtime present");
+                runtime.state.messages.clear();
+                runtime.proven_messages.clear();
+                runtime.mmr = Mmr::new();
+            }
+            let err = restarted
+                .submit(request)
+                .await
+                .expect_err("duplicate submit should fail after restart");
+            assert!(err.downcast_ref::<SubmitError>().is_some());
         });
     }
 
