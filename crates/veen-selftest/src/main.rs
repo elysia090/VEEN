@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use veen_selftest::{SelftestReport, SelftestReporter};
+use veen_selftest::{PerfConfig, PerfMode, SelftestReport, SelftestReporter};
 
 #[derive(Parser)]
 #[command(name = "veen-selftest", version, about = "Integration harness for VEEN", long_about = None)]
@@ -39,6 +39,8 @@ enum Suite {
     Plus,
     /// Execute overlay integration scenarios.
     Overlays(OverlaysArgs),
+    /// Execute the performance harness against a disposable hub.
+    Perf(PerfArgs),
 }
 
 #[derive(Args)]
@@ -46,6 +48,34 @@ struct OverlaysArgs {
     /// Limit execution to a specific overlay subset.
     #[arg(long)]
     subset: Option<String>,
+}
+
+#[derive(Args)]
+struct PerfArgs {
+    /// Number of submit requests to issue during the run.
+    #[arg(long, default_value_t = 256)]
+    requests: usize,
+    /// Maximum number of concurrent in-flight submissions.
+    #[arg(long, default_value_t = 32)]
+    concurrency: usize,
+    /// Transport mode used to reach the hub.
+    #[arg(long, value_enum, default_value_t = PerfModeArg::InProcess)]
+    mode: PerfModeArg,
+}
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum PerfModeArg {
+    InProcess,
+    Http,
+}
+
+impl From<PerfModeArg> for PerfMode {
+    fn from(value: PerfModeArg) -> Self {
+        match value {
+            PerfModeArg::InProcess => PerfMode::InProcess,
+            PerfModeArg::Http => PerfMode::Http,
+        }
+    }
 }
 
 #[tokio::main]
@@ -72,6 +102,16 @@ async fn main() -> Result<()> {
         Suite::Plus => veen_selftest::run_plus(&mut reporter).await,
         Suite::Overlays(args) => {
             veen_selftest::run_overlays(args.subset.as_deref(), &mut reporter).await
+        }
+        Suite::Perf(args) => {
+            let config = PerfConfig {
+                requests: args.requests,
+                concurrency: args.concurrency,
+                mode: args.mode.into(),
+            };
+            veen_selftest::run_perf(config, &mut reporter)
+                .await
+                .map(|_| ())
         }
     };
 

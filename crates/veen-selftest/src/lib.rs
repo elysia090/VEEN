@@ -20,10 +20,14 @@ use veen_core::{
     TRANSFER_ID_LEN, WALLET_ID_LEN,
 };
 
+pub mod metrics;
 mod overlays;
+mod perf;
 mod process_harness;
 
+pub use metrics::{HistogramSnapshot, HubMetricsSnapshot};
 pub use overlays::run_overlays;
+pub use perf::{run_perf, PerfConfig, PerfMode, PerfSummary};
 
 #[derive(Default, serde::Serialize)]
 pub struct SelftestReport {
@@ -67,6 +71,32 @@ impl fmt::Display for SelftestReport {
                     writeln!(f, "    - {ev}")?;
                 }
             }
+            if let Some(perf) = &entry.perf {
+                writeln!(f, "  Performance:")?;
+                writeln!(
+                    f,
+                    "    - throughput_rps={:.2} (requests={}, concurrency={}, mode={})",
+                    perf.throughput_rps,
+                    perf.workload.requests,
+                    perf.workload.concurrency,
+                    perf.workload.mode.as_str()
+                )?;
+                writeln!(
+                    f,
+                    "    - verify p95/p99 ms: {:.2}/{:.2}",
+                    perf.verify_p95_ms, perf.verify_p99_ms
+                )?;
+                writeln!(
+                    f,
+                    "    - commit p95/p99 ms: {:.2}/{:.2}",
+                    perf.commit_p95_ms, perf.commit_p99_ms
+                )?;
+                writeln!(
+                    f,
+                    "    - end-to-end p95/p99 ms: {:.2}/{:.2}",
+                    perf.end_to_end_p95_ms, perf.end_to_end_p99_ms
+                )?;
+            }
             if idx + 1 < self.entries.len() {
                 writeln!(f)?;
             }
@@ -82,6 +112,7 @@ pub struct SelftestGoalReport {
     pub environment: Vec<String>,
     pub invariants: Vec<String>,
     pub evidence: Vec<String>,
+    pub perf: Option<PerfSummary>,
 }
 
 impl SelftestGoalReport {
@@ -91,6 +122,7 @@ impl SelftestGoalReport {
             environment: Vec::new(),
             invariants: Vec::new(),
             evidence: Vec::new(),
+            perf: None,
         }
     }
 }
@@ -398,6 +430,7 @@ pub async fn run_core(reporter: &mut SelftestReporter<'_>) -> Result<()> {
             format!("mmr_root={}", hex::encode(data.mmr_root.as_bytes())),
             format!("att_root={}", hex::encode(data.att_root.as_bytes())),
         ],
+        perf: None,
     };
     reporter.record(entry);
 
@@ -432,6 +465,7 @@ pub fn run_props(reporter: &mut SelftestReporter<'_>) -> Result<()> {
             "overlay wallet scenario executed".into(),
             "multiple deterministic harness passes".into(),
         ],
+        perf: None,
     };
     reporter.record(entry);
     Ok(())
@@ -462,6 +496,7 @@ pub fn run_fuzz(reporter: &mut SelftestReporter<'_>) -> Result<()> {
                 hex::encode(data.receipt.mmr_root.as_bytes())
             ),
         ],
+        perf: None,
     };
     reporter.record(entry);
     Ok(())
@@ -493,6 +528,7 @@ pub async fn run_kex1(reporter: &mut SelftestReporter<'_>) -> Result<()> {
         environment: vec!["scenario=placeholder".into()],
         invariants: vec!["reserved for lifecycle self-tests".into()],
         evidence: vec!["no execution (placeholder)".into()],
+        perf: None,
     });
     Ok(())
 }
@@ -505,6 +541,7 @@ pub async fn run_hardened(reporter: &mut SelftestReporter<'_>) -> Result<()> {
         environment: vec!["scenario=placeholder".into()],
         invariants: vec!["reserved for hardened profile tests".into()],
         evidence: vec!["no execution (placeholder)".into()],
+        perf: None,
     });
     Ok(())
 }
@@ -517,6 +554,7 @@ pub async fn run_meta(reporter: &mut SelftestReporter<'_>) -> Result<()> {
         environment: vec!["scenario=placeholder".into()],
         invariants: vec!["reserved for meta overlay tests".into()],
         evidence: vec!["no execution (placeholder)".into()],
+        perf: None,
     });
     Ok(())
 }

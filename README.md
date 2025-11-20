@@ -411,6 +411,14 @@ The workspace adheres to standard Rust tooling conventions. Formatting is
 enforced by `rustfmt`, linting by `clippy`, and integration tests are executed
 via `cargo test`.
 
+The disposable performance harness can be launched with:
+
+```shell
+just perf -- "--requests 512 --concurrency 64"
+```
+By default it exercises an in-process hub; pass `--mode http` to measure
+end-to-end HTTP request latencies.
+
 ## Testing and verification
 
 - Run the Rust unit tests for the entire workspace:

@@ -29,6 +29,9 @@ cli args="-- help":
 selftest suite="core":
     cargo run -p veen-selftest -- {{suite}}
 
+perf args="":
+    cargo run -p veen-selftest -- perf {{args}}
+
 test:
     cargo test --workspace
 
