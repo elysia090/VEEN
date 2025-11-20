@@ -24,11 +24,13 @@ pub mod metrics;
 mod overlays;
 mod perf;
 mod process_harness;
+mod query;
 mod recorder;
 
 pub use metrics::{HistogramSnapshot, HubMetricsSnapshot};
 pub use overlays::run_overlays;
 pub use perf::{run_perf, PerfConfig, PerfMode, PerfSummary};
+pub use query::run_query_overlays;
 pub use recorder::run_recorder;
 
 #[derive(Default, serde::Serialize)]
