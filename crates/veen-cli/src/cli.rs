@@ -2428,13 +2428,11 @@ impl HubRuntimeState {
     }
 }
 
-impl HubMetricsSnapshot {
-    fn from_remote(report: &RemoteObservabilityReport) -> Self {
-        Self {
-            submit_ok_total: report.submit_ok_total,
-            submit_err_total: report.submit_err_total.clone(),
-            ..Self::default()
-        }
+fn hub_metrics_from_remote(report: &RemoteObservabilityReport) -> HubMetricsSnapshot {
+    HubMetricsSnapshot {
+        submit_ok_total: report.submit_ok_total,
+        submit_err_total: report.submit_err_total.clone(),
+        ..HubMetricsSnapshot::default()
     }
 }
 
@@ -3739,7 +3737,7 @@ async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
         }
         HubReference::Remote(client) => {
             let report: RemoteObservabilityReport = client.get_json("/metrics", &[]).await?;
-            let metrics = HubMetricsSnapshot::from_remote(&report);
+            let metrics = hub_metrics_from_remote(&report);
             if args.raw {
                 print_metrics_raw(&metrics);
             } else {
