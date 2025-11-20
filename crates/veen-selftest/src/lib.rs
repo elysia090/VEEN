@@ -24,10 +24,12 @@ pub mod metrics;
 mod overlays;
 mod perf;
 mod process_harness;
+mod recorder;
 
 pub use metrics::{HistogramSnapshot, HubMetricsSnapshot};
 pub use overlays::run_overlays;
 pub use perf::{run_perf, PerfConfig, PerfMode, PerfSummary};
+pub use recorder::run_recorder;
 
 #[derive(Default, serde::Serialize)]
 pub struct SelftestReport {
@@ -641,6 +643,7 @@ pub async fn run_plus(reporter: &mut SelftestReporter<'_>) -> Result<()> {
     run_props(reporter)?;
     run_fuzz(reporter)?;
     run_federated(reporter).await?;
+    run_recorder(reporter).await?;
     run_kex1(reporter).await?;
     run_hardened(reporter).await?;
     run_meta(reporter).await?;
