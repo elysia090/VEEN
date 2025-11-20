@@ -1,4 +1,5 @@
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -13,7 +14,8 @@ use veen_core::cap_stream_id_from_label;
 use veen_core::profile::Profile;
 use veen_core::wire::types::ClientId;
 use veen_hub::config::{
-    AdmissionConfig, AnchorConfig, FederationConfig, HubRole, HubRuntimeConfig, ObservabilityConfig,
+    AdmissionConfig, AnchorConfig, DedupConfig, FederationConfig, HubRole, HubRuntimeConfig,
+    ObservabilityConfig,
 };
 use veen_hub::pipeline::{HubPipeline, SubmitRequest, SubmitResponse};
 use veen_hub::storage::HubStorage;
@@ -87,20 +89,7 @@ impl PerfHarness {
         let listen = SocketAddr::from((Ipv4Addr::LOCALHOST, pick_port()?));
         let tempdir = TempDir::new().context("creating perf workspace")?;
         let data_dir = tempdir.path().to_path_buf();
-        let config = HubRuntimeConfig {
-            listen,
-            data_dir: data_dir.clone(),
-            role: HubRole::Primary,
-            profile_id: Some(Profile::default().id()?.to_string()),
-            anchors: AnchorConfig::default(),
-            observability: ObservabilityConfig::default(),
-            admission: AdmissionConfig {
-                capability_gating_enabled: false,
-                ..AdmissionConfig::default()
-            },
-            federation: FederationConfig::default(),
-            config_path: None,
-        };
+        let config = build_runtime_config(listen, data_dir.clone())?;
 
         let storage = HubStorage::bootstrap(&config).await?;
         let pipeline = HubPipeline::initialise(&config, &storage).await?;
@@ -215,6 +204,24 @@ impl PerfHarness {
             metrics,
         })
     }
+}
+
+fn build_runtime_config(listen: SocketAddr, data_dir: PathBuf) -> Result<HubRuntimeConfig> {
+    Ok(HubRuntimeConfig {
+        listen,
+        data_dir,
+        role: HubRole::Primary,
+        profile_id: Some(Profile::default().id()?.to_string()),
+        anchors: AnchorConfig::default(),
+        observability: ObservabilityConfig::default(),
+        dedup: DedupConfig::default(),
+        admission: AdmissionConfig {
+            capability_gating_enabled: false,
+            ..AdmissionConfig::default()
+        },
+        federation: FederationConfig::default(),
+        config_path: None,
+    })
 }
 
 #[derive(Clone)]
