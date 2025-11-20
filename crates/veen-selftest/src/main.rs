@@ -37,6 +37,8 @@ enum Suite {
     Meta,
     /// Execute the aggregated v0.0.1+ suite.
     Plus,
+    /// Execute recorder and checkpoint scenarios.
+    Recorder,
     /// Execute overlay integration scenarios.
     Overlays(OverlaysArgs),
     /// Execute the performance harness against a disposable hub.
@@ -100,6 +102,7 @@ async fn main() -> Result<()> {
         Suite::Hardened => veen_selftest::run_hardened(&mut reporter).await,
         Suite::Meta => veen_selftest::run_meta(&mut reporter).await,
         Suite::Plus => veen_selftest::run_plus(&mut reporter).await,
+        Suite::Recorder => veen_selftest::run_recorder(&mut reporter).await,
         Suite::Overlays(args) => {
             veen_selftest::run_overlays(args.subset.as_deref(), &mut reporter).await
         }

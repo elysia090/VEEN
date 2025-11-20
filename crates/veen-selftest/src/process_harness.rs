@@ -12,6 +12,7 @@ use rand::rngs::OsRng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
+use serde_json::json;
 use sha2::Digest;
 use tempfile::TempDir;
 use tokio::fs::{self, File, OpenOptions};
@@ -25,8 +26,8 @@ use veen_core::label::Label;
 use veen_core::wire::checkpoint::{Checkpoint, CHECKPOINT_VERSION};
 use veen_core::wire::mmr::Mmr;
 use veen_core::wire::types::{LeafHash, MmrRoot, Signature64};
-use veen_hub::pipeline::{HubStreamState, StoredMessage, StreamMessageWithProof};
-use veen_hub::storage::HUB_PID_FILE;
+use veen_hub::pipeline::{HubStreamState, StoredMessage, StreamMessageWithProof, SubmitRequest};
+use veen_hub::storage::{CHECKPOINTS_FILE, HUB_PID_FILE};
 
 #[cfg(unix)]
 use nix::sys::signal::{kill, Signal};
@@ -70,6 +71,22 @@ pub struct VersionSkewResult {
     pub replayed_root: String,
     pub last_seq: u64,
     pub checkpoint_path: PathBuf,
+}
+
+pub struct RecorderCaptureResult {
+    pub stream: String,
+    pub total_events: usize,
+    pub mmr_root: String,
+    pub checkpoint_root: String,
+    pub checkpoint_path: PathBuf,
+    pub sampled_seqs: Vec<u64>,
+}
+
+pub struct RecorderRecoveryResult {
+    pub stream: String,
+    pub checkpoint_root: String,
+    pub replay_from_seq: u64,
+    pub validated_seqs: Vec<u64>,
 }
 
 impl BinaryPaths {
@@ -824,6 +841,206 @@ impl IntegrationHarness {
             last_seq,
             checkpoint_path: replay_dir.join("checkpoints.cborseq"),
         })
+    }
+
+    pub async fn run_recorder_suite(
+        &mut self,
+    ) -> Result<(RecorderCaptureResult, RecorderRecoveryResult)> {
+        const STREAM: &str = "record/app/http";
+
+        let hub = self
+            .spawn_hub("recorder-hub", HubRole::Primary, &[])
+            .await
+            .context("spawning recorder hub")?;
+        self.wait_for_health(hub.listen)
+            .await
+            .context("waiting for recorder hub health")?;
+
+        let hub_url = format!("http://{}", hub.listen);
+        let client_dir = self.base_dir().join("recorder-client");
+        fs::create_dir_all(&client_dir)
+            .await
+            .context("creating recorder client directory")?;
+        self.run_cli_success(
+            vec![
+                OsString::from("keygen"),
+                OsString::from("--out"),
+                client_dir.as_os_str().to_os_string(),
+            ],
+            "creating recorder client identity",
+        )
+        .await?;
+
+        let cli_events = vec![
+            (
+                "cli-login",
+                json!({
+                    "subject_id": "user-123",
+                    "principal_id": "principal-cli-1",
+                    "event_type": "login",
+                    "event_time": current_unix_timestamp()? - 1,
+                }),
+            ),
+            (
+                "cli-download",
+                json!({
+                    "subject_id": "user-123",
+                    "principal_id": "principal-cli-1",
+                    "event_type": "download",
+                    "event_time": current_unix_timestamp()?,
+                }),
+            ),
+        ];
+
+        for (label, body) in &cli_events {
+            let body_text = serde_json::to_string(body)
+                .with_context(|| format!("serialising CLI event body {label}"))?;
+            self.send_test_message(&hub_url, &client_dir, STREAM, &body_text)
+                .await
+                .with_context(|| format!("sending recorder CLI event {label}"))?;
+        }
+
+        let http_payload = json!({
+            "subject_id": "server-01",
+            "principal_id": "principal-http",
+            "event_type": "health_check",
+            "event_time": current_unix_timestamp()? + 1,
+        });
+        let submit_request = SubmitRequest {
+            stream: STREAM.to_string(),
+            client_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            payload: http_payload,
+            attachments: None,
+            auth_ref: None,
+            expires_at: None,
+            schema: None,
+            idem: None,
+            pow_cookie: None,
+        };
+        self.http
+            .post(format!("{hub_url}/submit"))
+            .json(&submit_request)
+            .send()
+            .await
+            .context("submitting HTTP recorder event")?
+            .error_for_status()
+            .context("hub rejected HTTP recorder submission")?;
+
+        let messages = self
+            .fetch_stream_with_proofs(&hub_url, STREAM)
+            .await
+            .context("fetching recorder stream with proofs")?;
+        ensure!(!messages.is_empty(), "recorder stream emitted no messages");
+
+        for entry in &messages {
+            validate_recorder_fields(entry).context("validating recorded event fields")?;
+        }
+
+        let metrics = self.fetch_metrics(&hub_url).await?;
+        let mmr_root_hex = extract_mmr_root(&metrics, STREAM)
+            .context("recorder hub missing mmr_root for record/app/http")?;
+        let mmr_root = parse_mmr_root_hex(&mmr_root_hex)?;
+
+        let last_seq = messages
+            .last()
+            .map(|msg| msg.message.seq)
+            .unwrap_or_default();
+        let checkpoint = create_checkpoint_for_stream(&hub.data_dir, STREAM, last_seq, mmr_root)
+            .await
+            .context("creating recorder checkpoint")?;
+        append_checkpoint(&hub.data_dir, &checkpoint)
+            .await
+            .context("appending recorder checkpoint")?;
+
+        let sample: Vec<StreamMessageWithProof> = messages.iter().take(2).cloned().collect();
+        verify_stream_proofs(&sample, &checkpoint.mmr_root)
+            .context("verifying proofs against checkpoint root")?;
+
+        #[cfg(unix)]
+        let _ = hub
+            .handle
+            .signal_and_wait(Signal::SIGKILL)
+            .await
+            .context("killing recorder hub after checkpointing")?;
+        #[cfg(not(unix))]
+        let _ = hub.handle.terminate().await?;
+
+        let pid_path = hub.data_dir.join(HUB_PID_FILE);
+        if fs::try_exists(&pid_path)
+            .await
+            .with_context(|| format!("checking PID file {}", pid_path.display()))?
+        {
+            fs::remove_file(&pid_path)
+                .await
+                .with_context(|| format!("removing stale PID file {}", pid_path.display()))?;
+        }
+
+        let restarted = self
+            .spawn_hub_at_dir(
+                "recorder-hub-restart",
+                hub.data_dir.clone(),
+                HubRole::Primary,
+                &[],
+            )
+            .await
+            .context("restarting recorder hub")?;
+        self.wait_for_health(restarted.listen)
+            .await
+            .context("waiting for recorder hub restart health")?;
+
+        let restart_url = format!("http://{}", restarted.listen);
+        let replay_checkpoint = self
+            .fetch_latest_checkpoint(&restart_url)
+            .await
+            .context("fetching replay checkpoint")?;
+        ensure!(
+            replay_checkpoint.mmr_root == checkpoint.mmr_root,
+            "restarted hub returned different checkpoint root",
+        );
+        ensure!(
+            replay_checkpoint.upto_seq == checkpoint.upto_seq,
+            "restarted hub returned different upto_seq",
+        );
+
+        let replay_messages = self
+            .fetch_stream_with_proofs(&restart_url, STREAM)
+            .await
+            .context("streaming recorder events after restart")?;
+        ensure!(
+            replay_messages.len() == messages.len(),
+            "restarted hub returned different message count",
+        );
+
+        let recovery_sample: Vec<StreamMessageWithProof> =
+            replay_messages.iter().take(2).cloned().collect();
+        verify_stream_proofs(&recovery_sample, &replay_checkpoint.mmr_root)
+            .context("verifying recorder proofs after restart")?;
+
+        let _ = self
+            .stop_hub_gracefully(restarted)
+            .await
+            .context("stopping recorder hub after recovery")?;
+
+        let capture = RecorderCaptureResult {
+            stream: STREAM.to_string(),
+            total_events: messages.len(),
+            mmr_root: mmr_root_hex,
+            checkpoint_root: hex::encode(checkpoint.mmr_root.as_bytes()),
+            checkpoint_path: hub.data_dir.join(CHECKPOINTS_FILE),
+            sampled_seqs: sample.into_iter().map(|msg| msg.message.seq).collect(),
+        };
+
+        let recovery = RecorderRecoveryResult {
+            stream: STREAM.to_string(),
+            checkpoint_root: hex::encode(replay_checkpoint.mmr_root.as_bytes()),
+            replay_from_seq: replay_checkpoint.upto_seq + 1,
+            validated_seqs: recovery_sample
+                .into_iter()
+                .map(|msg| msg.message.seq)
+                .collect(),
+        };
+
+        Ok((capture, recovery))
     }
 
     #[allow(dead_code)]
@@ -1714,6 +1931,43 @@ where
             .await
             .with_context(|| format!("writing message bundle to {}", bundle_path.display()))?;
     }
+    Ok(())
+}
+
+fn validate_recorder_fields(entry: &StreamMessageWithProof) -> Result<()> {
+    let body_text = entry
+        .message
+        .body
+        .as_deref()
+        .ok_or_else(|| anyhow!("recorder message missing body"))?;
+    let body: serde_json::Value =
+        serde_json::from_str(body_text).context("decoding recorder body as JSON")?;
+
+    let subject_id = body
+        .get("subject_id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("recorder body missing subject_id"))?;
+    let principal_id = body
+        .get("principal_id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("recorder body missing principal_id"))?;
+    let event_type = body
+        .get("event_type")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("recorder body missing event_type"))?;
+    let event_time = body
+        .get("event_time")
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| anyhow!("recorder body missing numeric event_time"))?;
+
+    ensure!(!subject_id.is_empty(), "subject_id must not be empty");
+    ensure!(
+        !principal_id.is_empty() && !entry.message.client_id.is_empty(),
+        "principal identifier fields must be present"
+    );
+    ensure!(!event_type.is_empty(), "event_type must not be empty");
+    ensure!(event_time > 0, "event_time must be positive");
+
     Ok(())
 }
 
