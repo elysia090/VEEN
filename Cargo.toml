@@ -65,3 +65,4 @@ kube = { version = "0.88", default-features = false, features = ["client", "rust
 tokio-stream = "0.1"
 hdrhistogram = "7"
 getrandom = "0.2"
+nix = { version = "0.28", default-features = false, features = ["signal"] }

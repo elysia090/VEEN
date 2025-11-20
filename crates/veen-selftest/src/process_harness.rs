@@ -28,6 +28,11 @@ use veen_core::wire::types::{LeafHash, MmrRoot, Signature64};
 use veen_hub::pipeline::{HubStreamState, StoredMessage, StreamMessageWithProof};
 use veen_hub::storage::HUB_PID_FILE;
 
+#[cfg(unix)]
+use nix::sys::signal::{kill, Signal};
+#[cfg(unix)]
+use nix::unistd::Pid;
+
 const HUB_HEALTH_MAX_ATTEMPTS: usize = 120;
 const HUB_HEALTH_RETRY_DELAY_MS: u64 = 250;
 #[allow(dead_code)]
@@ -42,6 +47,29 @@ struct BinaryPaths {
     hub: PathBuf,
     cli: PathBuf,
     bridge: PathBuf,
+}
+
+pub struct RestartResult {
+    pub stream: String,
+    pub seq_before_restart: u64,
+    pub seq_after_restart: u64,
+    pub mmr_before: String,
+    pub mmr_after_restart: String,
+    pub mmr_after_new_message: String,
+}
+
+pub struct FailstartResult {
+    pub exit_code: i32,
+    pub stderr_excerpt: String,
+    pub config_path: PathBuf,
+}
+
+pub struct VersionSkewResult {
+    pub stream: String,
+    pub legacy_root: String,
+    pub replayed_root: String,
+    pub last_seq: u64,
+    pub checkpoint_path: PathBuf,
 }
 
 impl BinaryPaths {
@@ -107,7 +135,25 @@ impl ManagedProcess {
             self.child.start_kill()?;
             forced = true;
         }
+        let status = self.wait_for_exit().await?;
+        if !status.success() && !forced {
+            bail!(
+                "process {} exited with status {status:?}; see {} and {}",
+                self.name,
+                self.stdout_log.display(),
+                self.stderr_log.display()
+            );
+        }
+        Ok(())
+    }
+
+    async fn wait_for_exit(&mut self) -> Result<std::process::ExitStatus> {
         let status = self.child.wait().await.context("awaiting process exit")?;
+        self.join_output_tasks().await?;
+        Ok(status)
+    }
+
+    async fn join_output_tasks(&mut self) -> Result<()> {
         if let Some(task) = self.stdout_task.take() {
             task.await
                 .context("joining stdout task")?
@@ -118,15 +164,23 @@ impl ManagedProcess {
                 .context("joining stderr task")?
                 .context("propagating stderr task error")?;
         }
-        if !status.success() && !forced {
-            bail!(
-                "process {} exited with status {status:?}; see {} and {}",
-                self.name,
-                self.stdout_log.display(),
-                self.stderr_log.display()
-            );
-        }
         Ok(())
+    }
+
+    #[cfg(unix)]
+    async fn signal_and_wait(mut self, signal: Signal) -> Result<std::process::ExitStatus> {
+        let pid = self
+            .child
+            .id()
+            .ok_or_else(|| anyhow!("process {} missing PID", self.name))?;
+        kill(Pid::from_raw(pid as i32), signal)
+            .with_context(|| format!("sending {signal:?} to {}", self.name))?;
+        self.wait_for_exit().await
+    }
+
+    #[cfg(not(unix))]
+    async fn signal_and_wait(self, _signal: i32) -> Result<std::process::ExitStatus> {
+        bail!("signal-driven termination unsupported on this platform");
     }
 }
 
@@ -438,6 +492,338 @@ impl IntegrationHarness {
 
         hub.handle.terminate().await?;
         Ok(())
+    }
+
+    pub async fn run_restart_suite(&mut self) -> Result<RestartResult> {
+        const STREAM: &str = "lifecycle/restart";
+
+        let hub = self
+            .spawn_hub("restart-hub", HubRole::Primary, &[])
+            .await
+            .context("spawning lifecycle hub")?;
+        self.wait_for_health(hub.listen)
+            .await
+            .context("waiting for lifecycle hub health")?;
+
+        let hub_url = format!("http://{}", hub.listen);
+        let client_dir = self.base_dir().join("restart-client");
+        fs::create_dir_all(&client_dir)
+            .await
+            .context("creating lifecycle client directory")?;
+        self.run_cli_success(
+            vec![
+                OsString::from("keygen"),
+                OsString::from("--out"),
+                client_dir.as_os_str().to_os_string(),
+            ],
+            "creating lifecycle client identity",
+        )
+        .await?;
+
+        for idx in 0..3 {
+            let body = format!(r#"{{\"text\":\"before-restart-{idx}\"}}"#);
+            self.send_test_message(&hub_url, &client_dir, STREAM, &body)
+                .await
+                .with_context(|| format!("sending lifecycle message {idx}"))?;
+        }
+
+        let messages_before = self
+            .fetch_stream_with_proofs(&hub_url, STREAM)
+            .await
+            .context("fetching lifecycle stream before restart")?;
+        ensure!(
+            !messages_before.is_empty(),
+            "lifecycle stream missing messages before restart",
+        );
+        let seq_before_restart = messages_before
+            .last()
+            .map(|msg| msg.message.seq)
+            .unwrap_or_default();
+
+        let metrics_before = self.fetch_metrics(&hub_url).await?;
+        let mmr_before = extract_mmr_root(&metrics_before, STREAM)
+            .context("lifecycle stream missing mmr_root before restart")?;
+        let mmr_before_root = parse_mmr_root_hex(&mmr_before)?;
+        verify_stream_proofs(&messages_before, &mmr_before_root)?;
+
+        let hub_dir = hub.data_dir.clone();
+        let hub_name = hub.name.clone();
+        self.stop_hub_gracefully(hub)
+            .await
+            .context("gracefully stopping lifecycle hub")?;
+
+        let restarted = self
+            .spawn_hub_at_dir(&hub_name, hub_dir, HubRole::Primary, &[])
+            .await
+            .context("restarting lifecycle hub")?;
+        self.wait_for_health(restarted.listen)
+            .await
+            .context("waiting for restarted hub health")?;
+        let restart_url = format!("http://{}", restarted.listen);
+
+        let metrics_after = self.fetch_metrics(&restart_url).await?;
+        let mmr_after_restart = extract_mmr_root(&metrics_after, STREAM)
+            .context("lifecycle stream missing mmr_root after restart")?;
+        ensure!(
+            mmr_after_restart == mmr_before,
+            "mmr_root changed across hub restart",
+        );
+        let mmr_after_root = parse_mmr_root_hex(&mmr_after_restart)?;
+
+        let messages_after = self
+            .fetch_stream_with_proofs(&restart_url, STREAM)
+            .await
+            .context("streaming lifecycle data after restart")?;
+        ensure!(
+            messages_after
+                .last()
+                .map(|msg| msg.message.seq)
+                .unwrap_or_default()
+                == seq_before_restart,
+            "restart changed last observed sequence",
+        );
+        verify_stream_proofs(&messages_after, &mmr_after_root)?;
+
+        self.send_test_message(
+            &restart_url,
+            &client_dir,
+            STREAM,
+            r#"{"text":"after-restart"}"#,
+        )
+        .await
+        .context("sending lifecycle message after restart")?;
+        let messages_final = self
+            .fetch_stream_with_proofs(&restart_url, STREAM)
+            .await
+            .context("streaming lifecycle data after new message")?;
+        let seq_after_restart = messages_final
+            .last()
+            .map(|msg| msg.message.seq)
+            .unwrap_or_default();
+        ensure!(
+            seq_after_restart == seq_before_restart + 1,
+            "sequence continuity failed after restart",
+        );
+
+        let metrics_final = self.fetch_metrics(&restart_url).await?;
+        let mmr_after_new_message = extract_mmr_root(&metrics_final, STREAM)
+            .context("lifecycle stream missing mmr_root after new message")?;
+        let mmr_after_new_message_root = parse_mmr_root_hex(&mmr_after_new_message)?;
+        verify_stream_proofs(&messages_final, &mmr_after_new_message_root)?;
+
+        self.stop_hub_gracefully(restarted)
+            .await
+            .context("stopping restarted hub")?;
+
+        Ok(RestartResult {
+            stream: STREAM.to_string(),
+            seq_before_restart,
+            seq_after_restart,
+            mmr_before,
+            mmr_after_restart,
+            mmr_after_new_message,
+        })
+    }
+
+    pub async fn run_failstart_suite(&self) -> Result<FailstartResult> {
+        let data_dir = self.base_dir().join("failstart-hub");
+        fs::create_dir_all(&data_dir)
+            .await
+            .context("creating failstart data directory")?;
+        let config_path = self.base_dir().join("invalid-hub-config.toml");
+        fs::write(&config_path, "invalid = [this is not valid toml]")
+            .await
+            .context("writing invalid hub configuration")?;
+
+        let listen = next_listen_addr()?;
+        let output = TokioCommand::new(&self.bins.hub)
+            .arg("run")
+            .arg("--listen")
+            .arg(listen.to_string())
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("--config")
+            .arg(&config_path)
+            .output()
+            .await
+            .context("executing hub with invalid configuration")?;
+
+        let exit_code = output.status.code().unwrap_or_default();
+        ensure!(
+            exit_code == 1,
+            "expected usage exit code 1 for invalid configuration (CLI-GOALS), got {exit_code}",
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        ensure!(
+            stderr.contains("parsing hub configuration"),
+            "hub stderr did not describe configuration failure",
+        );
+        let excerpt = stderr.lines().take(4).collect::<Vec<&str>>().join("\n");
+
+        Ok(FailstartResult {
+            exit_code,
+            stderr_excerpt: excerpt,
+            config_path,
+        })
+    }
+
+    pub async fn run_version_skew_suite(&mut self) -> Result<VersionSkewResult> {
+        const STREAM: &str = "lifecycle/version-skew";
+        let legacy_hub = self
+            .spawn_hub("version-skew-legacy", HubRole::Primary, &[])
+            .await
+            .context("spawning legacy hub for version skew scenario")?;
+        self.wait_for_health(legacy_hub.listen)
+            .await
+            .context("waiting for legacy hub health")?;
+
+        let client_dir = self.base_dir().join("version-skew-client");
+        fs::create_dir_all(&client_dir)
+            .await
+            .context("creating version skew client dir")?;
+        self.run_cli_success(
+            vec![
+                OsString::from("keygen"),
+                OsString::from("--out"),
+                client_dir.as_os_str().to_os_string(),
+            ],
+            "creating version skew client",
+        )
+        .await?;
+
+        let legacy_url = format!("http://{}", legacy_hub.listen);
+        for idx in 0..5 {
+            let body = format!(r#"{{\"text\":\"legacy-{idx}\"}}"#);
+            self.send_test_message(&legacy_url, &client_dir, STREAM, &body)
+                .await
+                .with_context(|| format!("sending legacy message {idx}"))?;
+        }
+
+        let legacy_messages = self
+            .fetch_stream_with_proofs(&legacy_url, STREAM)
+            .await
+            .context("streaming legacy messages")?;
+        ensure!(
+            !legacy_messages.is_empty(),
+            "expected legacy hub to emit messages",
+        );
+        let last_seq = legacy_messages
+            .last()
+            .map(|msg| msg.message.seq)
+            .unwrap_or_default();
+        let legacy_metrics = self.fetch_metrics(&legacy_url).await?;
+        let legacy_root_hex = extract_mmr_root(&legacy_metrics, STREAM)
+            .context("legacy hub missing mmr_root for version skew stream")?;
+        let legacy_root = parse_mmr_root_hex(&legacy_root_hex)?;
+        verify_stream_proofs(&legacy_messages, &legacy_root)?;
+
+        let checkpoint =
+            create_checkpoint_for_stream(&legacy_hub.data_dir, STREAM, last_seq, legacy_root)
+                .await
+                .context("creating legacy checkpoint")?;
+        append_checkpoint(&legacy_hub.data_dir, &checkpoint)
+            .await
+            .context("appending legacy checkpoint")?;
+
+        self.stop_hub_gracefully(legacy_hub)
+            .await
+            .context("stopping legacy hub for version skew scenario")?;
+
+        let replay_dir = self.base_dir().join("version-skew-replay");
+        if fs::try_exists(&replay_dir)
+            .await
+            .with_context(|| format!("checking replay directory {}", replay_dir.display()))?
+        {
+            fs::remove_dir_all(&replay_dir)
+                .await
+                .with_context(|| format!("clearing replay directory {}", replay_dir.display()))?;
+        }
+        fs::create_dir_all(&replay_dir)
+            .await
+            .context("creating replay directory")?;
+
+        let hub_key_src = self
+            .base_dir()
+            .join("version-skew-legacy")
+            .join("hub_key.cbor");
+        let hub_key_dst = replay_dir.join("hub_key.cbor");
+        fs::copy(&hub_key_src, &hub_key_dst)
+            .await
+            .with_context(|| format!("copying hub key from {}", hub_key_src.display()))?;
+
+        persist_recovered_stream_state(
+            &replay_dir,
+            STREAM,
+            legacy_messages.iter().map(|msg| msg.message.clone()),
+        )
+        .await
+        .context("persisting replayed stream state")?;
+
+        let checkpoints_src = self
+            .base_dir()
+            .join("version-skew-legacy")
+            .join("checkpoints.cborseq");
+        if fs::try_exists(&checkpoints_src)
+            .await
+            .with_context(|| format!("checking checkpoint log {}", checkpoints_src.display()))?
+        {
+            fs::copy(&checkpoints_src, replay_dir.join("checkpoints.cborseq"))
+                .await
+                .context("copying legacy checkpoint log")?;
+        }
+
+        let replay_hub = self
+            .spawn_hub_at_dir(
+                "version-skew-new",
+                replay_dir.clone(),
+                HubRole::Primary,
+                &[],
+            )
+            .await
+            .context("starting replay hub with legacy artefacts")?;
+        self.wait_for_health(replay_hub.listen)
+            .await
+            .context("waiting for replay hub health")?;
+        let replay_url = format!("http://{}", replay_hub.listen);
+
+        let replay_metrics = self.fetch_metrics(&replay_url).await?;
+        let replay_root_hex =
+            extract_mmr_root(&replay_metrics, STREAM).context("replay hub missing mmr_root")?;
+        ensure!(
+            replay_root_hex == legacy_root_hex,
+            "replay hub diverged from legacy mmr_root",
+        );
+        let replay_root = parse_mmr_root_hex(&replay_root_hex)?;
+        let replay_messages = self
+            .fetch_stream_with_proofs(&replay_url, STREAM)
+            .await
+            .context("streaming replay hub messages")?;
+        verify_stream_proofs(&replay_messages, &replay_root)?;
+
+        let replay_checkpoint = self
+            .fetch_latest_checkpoint(&replay_url)
+            .await
+            .context("fetching replay checkpoint")?;
+        ensure!(
+            replay_checkpoint.mmr_root == checkpoint.mmr_root,
+            "replay hub checkpoint root mismatch",
+        );
+        ensure!(
+            replay_checkpoint.upto_seq == checkpoint.upto_seq,
+            "replay hub checkpoint sequence mismatch",
+        );
+
+        self.stop_hub_gracefully(replay_hub)
+            .await
+            .context("stopping replay hub")?;
+
+        Ok(VersionSkewResult {
+            stream: STREAM.to_string(),
+            legacy_root: legacy_root_hex,
+            replayed_root: replay_root_hex,
+            last_seq,
+            checkpoint_path: replay_dir.join("checkpoints.cborseq"),
+        })
     }
 
     #[allow(dead_code)]
@@ -804,8 +1190,19 @@ impl IntegrationHarness {
         role: HubRole,
         replica_targets: &[String],
     ) -> Result<HubProcess> {
-        let listen = next_listen_addr()?;
         let data_dir = self.base_dir().join(name);
+        self.spawn_hub_at_dir(name, data_dir, role, replica_targets)
+            .await
+    }
+
+    async fn spawn_hub_at_dir(
+        &self,
+        name: &str,
+        data_dir: PathBuf,
+        role: HubRole,
+        replica_targets: &[String],
+    ) -> Result<HubProcess> {
+        let listen = next_listen_addr()?;
         fs::create_dir_all(&data_dir)
             .await
             .with_context(|| format!("creating hub data dir {}", data_dir.display()))?;
@@ -836,6 +1233,7 @@ impl IntegrationHarness {
             .context("spawning hub process")?;
 
         Ok(HubProcess {
+            name: name.to_string(),
             handle,
             listen,
             data_dir,
@@ -911,6 +1309,39 @@ impl IntegrationHarness {
             stdout_task: Some(stdout_task),
             stderr_task: Some(stderr_task),
         })
+    }
+
+    async fn stop_hub_gracefully(&self, hub: HubProcess) -> Result<()> {
+        #[cfg(unix)]
+        {
+            let stdout_log = hub.handle.stdout_log.clone();
+            let stderr_log = hub.handle.stderr_log.clone();
+            let status = hub
+                .handle
+                .signal_and_wait(Signal::SIGINT)
+                .await
+                .with_context(|| format!("sending SIGINT to {}", hub.name))?;
+            if !status.success() {
+                let stdout = fs::read_to_string(&stdout_log)
+                    .await
+                    .unwrap_or_else(|_| "<unavailable>".into());
+                let stderr = fs::read_to_string(&stderr_log)
+                    .await
+                    .unwrap_or_else(|_| "<unavailable>".into());
+                bail!(
+                    "hub {} did not exit cleanly with SIGINT: status {status:?}\nstdout:{}\nstderr:{}",
+                    hub.name,
+                    stdout,
+                    stderr
+                );
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = hub;
+            bail!("graceful hub shutdown is unsupported on this platform");
+        }
     }
 
     async fn wait_for_health(&self, listen: SocketAddr) -> Result<()> {
@@ -1030,6 +1461,7 @@ impl IntegrationHarness {
 }
 
 pub struct HubProcess {
+    name: String,
     handle: ManagedProcess,
     listen: SocketAddr,
     data_dir: PathBuf,
@@ -1297,6 +1729,30 @@ fn message_leaf_hash(message: &StoredMessage) -> Result<LeafHash> {
 fn parse_mmr_root_hex(value: &str) -> Result<MmrRoot> {
     let bytes = hex::decode(value).with_context(|| format!("decoding mmr_root {}", value))?;
     MmrRoot::from_slice(&bytes).with_context(|| format!("parsing mmr_root {}", value))
+}
+
+fn verify_stream_proofs(
+    messages: &[StreamMessageWithProof],
+    expected_root: &MmrRoot,
+) -> Result<()> {
+    for entry in messages {
+        let proof = entry
+            .proof
+            .clone()
+            .try_into_mmr()
+            .context("decoding stream proof")?;
+        ensure!(
+            proof.leaf_hash == message_leaf_hash(&entry.message)?,
+            "proof leaf hash mismatch for seq {}",
+            entry.message.seq,
+        );
+        ensure!(
+            proof.verify(expected_root),
+            "proof verification failed for seq {}",
+            entry.message.seq,
+        );
+    }
+    Ok(())
 }
 
 async fn append_checkpoint(data_dir: &Path, checkpoint: &Checkpoint) -> Result<()> {

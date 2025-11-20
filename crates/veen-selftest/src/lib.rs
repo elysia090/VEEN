@@ -522,14 +522,90 @@ pub async fn run_federated(reporter: &mut SelftestReporter<'_>) -> Result<()> {
 
 /// Placeholder for lifecycle and revocation (KEX1+) self-tests.
 pub async fn run_kex1(reporter: &mut SelftestReporter<'_>) -> Result<()> {
-    tracing::info!("kex1+ lifecycle self-tests completed (placeholder)");
+    let mut harness = process_harness::IntegrationHarness::new()
+        .await
+        .context("initialising lifecycle harness")?;
+
+    let restart = harness
+        .run_restart_suite()
+        .await
+        .context("running restart lifecycle suite")?;
+    let failstart = harness
+        .run_failstart_suite()
+        .await
+        .context("running failstart lifecycle suite")?;
+    let version_skew = harness
+        .run_version_skew_suite()
+        .await
+        .context("running version-skew lifecycle suite")?;
+
     reporter.record(SelftestGoalReport {
-        goal: "SELFTEST.KEX1".into(),
-        environment: vec!["scenario=placeholder".into()],
-        invariants: vec!["reserved for lifecycle self-tests".into()],
-        evidence: vec!["no execution (placeholder)".into()],
+        goal: "SELFTEST.LIFECYCLE.RESTART".into(),
+        environment: vec![
+            format!("stream={}", restart.stream),
+            format!("seq_before_restart={}", restart.seq_before_restart),
+        ],
+        invariants: vec![
+            "MMR root stable across graceful restart".into(),
+            "stream proofs verify before and after restart".into(),
+            "sequence continuity preserved after restart send".into(),
+        ],
+        evidence: vec![
+            format!("mmr_before={}", restart.mmr_before),
+            format!("mmr_after_restart={}", restart.mmr_after_restart),
+            format!("mmr_after_new_message={}", restart.mmr_after_new_message),
+            format!("seq_after_restart={}", restart.seq_after_restart),
+        ],
         perf: None,
     });
+
+    reporter.record(SelftestGoalReport {
+        goal: "SELFTEST.LIFECYCLE.FAILSTART".into(),
+        environment: vec![format!("config_path={}", failstart.config_path.display())],
+        invariants: vec![
+            "invalid configuration exits with CLI usage code".into(),
+            "stderr describes configuration parse failure".into(),
+        ],
+        evidence: vec![
+            format!("exit_code={}", failstart.exit_code),
+            format!("stderr_excerpt={}", failstart.stderr_excerpt),
+        ],
+        perf: None,
+    });
+
+    reporter.record(SelftestGoalReport {
+        goal: "SELFTEST.LIFECYCLE.VERSION_SKEW".into(),
+        environment: vec![format!("stream={}", version_skew.stream)],
+        invariants: vec![
+            "legacy receipts and proofs validate under new binary".into(),
+            "checkpoint_latest aligns with legacy upto_seq and root".into(),
+            "replayed stream maintains legacy mmr_root".into(),
+        ],
+        evidence: vec![
+            format!("legacy_root={}", version_skew.legacy_root),
+            format!("replayed_root={}", version_skew.replayed_root),
+            format!("last_seq={}", version_skew.last_seq),
+            format!("checkpoint_path={}", version_skew.checkpoint_path.display()),
+        ],
+        perf: None,
+    });
+
+    reporter.record(SelftestGoalReport {
+        goal: "SELFTEST.KEX1".into(),
+        environment: vec!["suite=lifecycle".into()],
+        invariants: vec![
+            "hub restart, failstart, and version-skew lifecycle scenarios executed".into(),
+        ],
+        evidence: vec![
+            format!("restart_stream={}", restart.stream),
+            format!("failstart_exit_code={}", failstart.exit_code),
+            format!("version_skew_stream={}", version_skew.stream),
+            format!("checkpoint={}", version_skew.checkpoint_path.display()),
+        ],
+        perf: None,
+    });
+
+    tracing::info!("kex1+ lifecycle self-tests completed");
     Ok(())
 }
 
