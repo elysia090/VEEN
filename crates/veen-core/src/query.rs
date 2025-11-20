@@ -50,7 +50,7 @@ impl EvidencePolicy {
             }
             EvidenceMode::Spot => {
                 let sample = self.sample_rate.ok_or(QueryError::MissingSampleRate)?;
-                if !(sample.is_sign_positive() && sample <= 1.0) {
+                if !(sample > 0.0 && sample <= 1.0) {
                     return Err(QueryError::InvalidSampleRate(sample));
                 }
             }
@@ -105,16 +105,47 @@ impl TimeFilter {
 }
 
 impl QueryFilter {
-    fn validate(&self) -> Result<(), QueryError> {
-        if let Some(event_types) = &self.event_type {
+    fn normalize(mut self) -> Result<Self, QueryError> {
+        if let Some(subject_id) = &self.subject_id {
+            let trimmed = subject_id.trim();
+            if trimmed.is_empty() {
+                return Err(QueryError::InvalidSubjectId);
+            }
+            self.subject_id = Some(trimmed.to_string());
+        }
+
+        if let Some(event_types) = self.event_type {
             if event_types.is_empty() {
                 return Err(QueryError::InvalidEventTypes);
             }
-            if event_types.iter().any(|value| value.trim().is_empty()) {
-                return Err(QueryError::InvalidEventTypes);
+
+            let mut normalized = Vec::with_capacity(event_types.len());
+            for value in event_types {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    return Err(QueryError::InvalidEventTypes);
+                }
+                normalized.push(trimmed.to_string());
+            }
+
+            self.event_type = Some(normalized);
+        }
+
+        if let Some(from) = self.time.from.as_ref() {
+            if from.trim().is_empty() {
+                return Err(QueryError::InvalidTimestamp);
             }
         }
-        self.time.validate()
+
+        if let Some(to) = self.time.to.as_ref() {
+            if to.trim().is_empty() {
+                return Err(QueryError::InvalidTimestamp);
+            }
+        }
+
+        self.time.validate()?;
+
+        Ok(self)
     }
 }
 
@@ -127,11 +158,33 @@ pub struct Aggregate {
 }
 
 impl Aggregate {
-    fn validate(&self) -> Result<(), QueryError> {
+    fn normalize(mut self) -> Result<Self, QueryError> {
         if self.metrics.is_empty() {
             return Err(QueryError::MissingMetrics);
         }
-        Ok(())
+
+        let mut normalized_group_by = Vec::with_capacity(self.group_by.len());
+        for value in self.group_by.into_iter() {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(QueryError::InvalidAggregateGroupBy);
+            }
+            normalized_group_by.push(trimmed.to_string());
+        }
+
+        let mut normalized_metrics = Vec::with_capacity(self.metrics.len());
+        for value in self.metrics.into_iter() {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(QueryError::InvalidAggregateMetrics);
+            }
+            normalized_metrics.push(trimmed.to_string());
+        }
+
+        self.group_by = normalized_group_by;
+        self.metrics = normalized_metrics;
+
+        Ok(self)
     }
 }
 
@@ -182,14 +235,35 @@ impl QueryDescriptor {
             return Err(QueryError::EmptyProjection);
         }
 
+        let scope: Vec<String> = self
+            .scope
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .collect();
+
+        if scope.iter().any(|value| value.is_empty()) {
+            return Err(QueryError::InvalidScope);
+        }
+
+        let projection: Vec<String> = self
+            .projection
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .collect();
+
+        if projection.iter().any(|value| value.is_empty()) {
+            return Err(QueryError::InvalidProjection);
+        }
+
         let mut evidence = self.evidence;
         evidence.normalize()?;
 
-        self.filter.validate()?;
+        let filter = self.filter.normalize()?;
 
-        if let Some(aggregate) = &self.aggregate {
-            aggregate.validate()?;
-        }
+        let aggregate = match self.aggregate {
+            Some(aggregate) => Some(aggregate.normalize()?),
+            None => None,
+        };
 
         let query_id = self
             .query_id
@@ -204,10 +278,10 @@ impl QueryDescriptor {
         Ok(NormalizedQueryDescriptor {
             query_id,
             version,
-            scope: self.scope,
-            filter: self.filter,
-            projection: self.projection,
-            aggregate: self.aggregate,
+            scope,
+            filter,
+            projection,
+            aggregate,
             evidence,
             meta: self.meta,
         })
@@ -327,6 +401,12 @@ pub enum QueryError {
     EmptyScope,
     #[error("projection must contain at least one field")]
     EmptyProjection,
+    #[error("scope entries must be non-empty strings")]
+    InvalidScope,
+    #[error("projection fields must be non-empty strings")]
+    InvalidProjection,
+    #[error("subject_id must be non-empty when provided")]
+    InvalidSubjectId,
     #[error("query_id must be provided or generated")]
     MissingQueryId,
     #[error("result_id must be provided or generated")]
@@ -341,6 +421,10 @@ pub enum QueryError {
     InvalidEventTypes,
     #[error("aggregate metrics must not be empty")]
     MissingMetrics,
+    #[error("aggregate metrics must be non-empty strings")]
+    InvalidAggregateMetrics,
+    #[error("aggregate group_by entries must be non-empty strings")]
+    InvalidAggregateGroupBy,
     #[error("timestamps must follow RFC3339 UTC (example 2025-11-19T03:20:00Z)")]
     InvalidTimestamp,
     #[error("time.from must not be after time.to")]
@@ -458,6 +542,82 @@ mod tests {
 
         let error = descriptor.normalize().expect_err("should fail");
         assert_eq!(error, QueryError::MissingSampleRate);
+    }
+
+    #[test]
+    fn rejects_zero_sample_rate() {
+        let descriptor = QueryDescriptor {
+            query_id: Some("q-1".into()),
+            version: Some(1),
+            scope: vec!["record/app/http".into()],
+            filter: QueryFilter::default(),
+            projection: vec!["subject_id".into()],
+            aggregate: None,
+            evidence: EvidencePolicy {
+                mode: EvidenceMode::Spot,
+                sample_rate: Some(0.0),
+            },
+            meta: None,
+        };
+
+        let error = descriptor.normalize().expect_err("should fail");
+        assert_eq!(error, QueryError::InvalidSampleRate(0.0));
+    }
+
+    #[test]
+    fn rejects_blank_scope_entries() {
+        let descriptor = QueryDescriptor {
+            query_id: None,
+            version: None,
+            scope: vec!["   ".into()],
+            filter: QueryFilter::default(),
+            projection: vec!["subject_id".into()],
+            aggregate: None,
+            evidence: EvidencePolicy::default(),
+            meta: None,
+        };
+
+        let error = descriptor.normalize().expect_err("should fail");
+        assert_eq!(error, QueryError::InvalidScope);
+    }
+
+    #[test]
+    fn rejects_blank_projection_entries() {
+        let descriptor = QueryDescriptor {
+            query_id: None,
+            version: None,
+            scope: vec!["record/app/http".into()],
+            filter: QueryFilter::default(),
+            projection: vec!["".into()],
+            aggregate: None,
+            evidence: EvidencePolicy::default(),
+            meta: None,
+        };
+
+        let error = descriptor.normalize().expect_err("should fail");
+        assert_eq!(error, QueryError::InvalidProjection);
+    }
+
+    #[test]
+    fn rejects_blank_aggregate_fields() {
+        let aggregate = Aggregate {
+            group_by: vec!["".into()],
+            metrics: vec!["   ".into()],
+        };
+
+        let descriptor = QueryDescriptor {
+            query_id: Some("q-1".into()),
+            version: Some(1),
+            scope: vec!["record/app/http".into()],
+            filter: QueryFilter::default(),
+            projection: vec!["subject_id".into()],
+            aggregate: Some(aggregate),
+            evidence: EvidencePolicy::default(),
+            meta: None,
+        };
+
+        let error = descriptor.normalize().expect_err("should fail");
+        assert_eq!(error, QueryError::InvalidAggregateGroupBy);
     }
 
     #[test]
