@@ -21,6 +21,7 @@ pub mod meta;
 pub mod operation;
 pub mod pow;
 pub mod profile;
+pub mod query;
 pub mod realm;
 pub mod revocation;
 pub mod wallet;
