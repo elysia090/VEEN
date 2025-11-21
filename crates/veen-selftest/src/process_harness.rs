@@ -262,6 +262,10 @@ impl IntegrationHarness {
         self.scratch.path()
     }
 
+    pub(crate) fn http_client(&self) -> &Client {
+        &self.http
+    }
+
     pub async fn run_core_suite(&mut self) -> Result<()> {
         let hub = self
             .spawn_hub("core-hub", HubRole::Primary, &[])
@@ -1549,7 +1553,11 @@ impl IntegrationHarness {
         Ok(())
     }
 
-    async fn run_cli_success(&self, args: Vec<OsString>, context: &str) -> Result<CommandOutput> {
+    pub(crate) async fn run_cli_success(
+        &self,
+        args: Vec<OsString>,
+        context: &str,
+    ) -> Result<CommandOutput> {
         let output = self.run_cli(args).await?;
         if !output.status.success() {
             bail!(
@@ -1562,7 +1570,7 @@ impl IntegrationHarness {
         Ok(output)
     }
 
-    async fn send_test_message(
+    pub(crate) async fn send_test_message(
         &self,
         hub_url: &str,
         client_dir: &Path,
@@ -1587,7 +1595,7 @@ impl IntegrationHarness {
         Ok(())
     }
 
-    async fn fetch_stream_with_proofs(
+    pub(crate) async fn fetch_stream_with_proofs(
         &self,
         hub_url: &str,
         stream: &str,
@@ -1714,7 +1722,7 @@ impl IntegrationHarness {
         })
     }
 
-    async fn spawn_hub(
+    pub(crate) async fn spawn_hub(
         &self,
         name: &str,
         role: HubRole,
@@ -1874,7 +1882,7 @@ impl IntegrationHarness {
         }
     }
 
-    async fn wait_for_health(&self, listen: SocketAddr) -> Result<()> {
+    pub(crate) async fn wait_for_health(&self, listen: SocketAddr) -> Result<()> {
         let url = format!("http://{listen}/healthz");
         for attempt in 0..HUB_HEALTH_MAX_ATTEMPTS {
             match self.http.get(&url).send().await {
@@ -1997,6 +2005,12 @@ pub struct HubProcess {
     data_dir: PathBuf,
 }
 
+impl HubProcess {
+    pub(crate) fn listen_addr(&self) -> SocketAddr {
+        self.listen
+    }
+}
+
 #[allow(dead_code)]
 pub struct BridgeProcess {
     handle: ManagedProcess,
@@ -2008,7 +2022,7 @@ pub enum HubRole {
     Replica,
 }
 
-struct CommandOutput {
+pub(crate) struct CommandOutput {
     status: std::process::ExitStatus,
     stdout: String,
     stderr: String,
