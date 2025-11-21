@@ -584,6 +584,7 @@ async fn run_kex1_overlay() -> Result<KexOverlayResult> {
         .context("querying revocation list")?
         .json()
         .await?;
+    ensure!(revocations.ok, "revocation list returned failure");
     ensure!(
         revocations
             .revocations
@@ -654,6 +655,14 @@ async fn run_label_class_overlay() -> Result<LabelClassOverlayResult> {
         descriptor.class.as_deref() == Some(&record.class),
         "class mismatch"
     );
+    ensure!(
+        descriptor.sensitivity.as_deref() == record.sensitivity.as_deref(),
+        "sensitivity mismatch",
+    );
+    ensure!(
+        descriptor.retention_hint == record.retention_hint,
+        "retention hint mismatch",
+    );
 
     let list: LabelClassList = http
         .get(format!("{hub_base}/label-class"))
@@ -664,6 +673,7 @@ async fn run_label_class_overlay() -> Result<LabelClassOverlayResult> {
         .context("listing label class records")?
         .json()
         .await?;
+    ensure!(list.ok, "label class list returned failure");
     ensure!(
         list.entries
             .iter()

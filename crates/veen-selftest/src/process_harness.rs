@@ -1192,7 +1192,11 @@ impl IntegrationHarness {
             .context("submitting hardened rate-limit probe")?;
 
         let replica = self
-            .spawn_hub("hardened-replica", HubRole::Replica, &[hub_base.clone()])
+            .spawn_hub(
+                "hardened-replica",
+                HubRole::Replica,
+                std::slice::from_ref(&hub_base),
+            )
             .await
             .context("spawning hardened replica")?;
         self.wait_for_health(replica.listen).await?;
@@ -2496,7 +2500,7 @@ fn solve_pow_cookie_with_limit(
     for nonce in 0..limit {
         let mut hasher = Sha256::new();
         hasher.update(&challenge);
-        hasher.update(&nonce.to_le_bytes());
+        hasher.update(nonce.to_le_bytes());
         let digest = hasher.finalize();
         if digest
             .iter()
