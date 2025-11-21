@@ -22,7 +22,6 @@ used to drive end-to-end workflows.
 ## Table of contents
 
 - [Architecture overview](#architecture-overview)
-- [Purpose and guaranteed properties](#purpose-and-guaranteed-properties)
 - [Project status](#project-status)
 - [Positioning and common use cases](#positioning-and-common-use-cases)
 - [Security and audit properties](#security-and-audit-properties)
@@ -253,7 +252,7 @@ to reuse a nonce received out-of-band from another system.
 
 ### Containerised deployment
 
-The repository ships with a Docker packaging that exposes the hub runtime via
+This repository ships with Docker packaging that exposes the hub runtime via
 `docker compose`. The image builds the audited binaries, runs the hub as an
 unprivileged user, and persists receipts, payloads, checkpoints, and state in a
 named volume so the event history remains available for inspection.
