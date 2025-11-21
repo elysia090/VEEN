@@ -32,6 +32,8 @@ toolchain versions are pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
 
 - [Architecture overview](#architecture-overview)
 - [Project status](#project-status)
+- [Positioning and common use cases](#positioning-and-common-use-cases)
+- [Security and audit properties](#security-and-audit-properties)
 - [Getting started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Build the workspace](#build-the-workspace)
@@ -68,6 +70,39 @@ The v0.0.1 protocol release focuses on verifiable message delivery and overlay
 support. Experimental features and incubating overlays are added behind feature
 flags or scoped subcommands in the CLI. See [`doc/Design-Philosophy.txt`](doc/Design-Philosophy.txt)
 for the guiding principles that shape stability decisions.
+
+## Positioning and common use cases
+
+- Serves as a verifiable alternative to ad-hoc queues or REST/RPC links when
+  regulators and auditors need proofs of delivery rather than best-effort logs
+  from brokers (Kafka/SQS/NATS) or application servers.
+- Fits multi-tenant overlays where each stream must retain cryptographic
+  provenance without sharing secrets across tenants, replacing bespoke
+  message-wrapping layers.
+- Provides a deterministic control surface for Kubernetes and containerised
+  deployments so operators can reconstruct overlay state without relying on
+  mutable control planes.
+- Useful for compliance-sensitive workflows such as ledger replication,
+  regulated data exchange between business units, and tamper-evident audit
+  trails that span multiple organisations.
+
+## Security and audit properties
+
+- **Provenance and integrity** – every message is signed by the sender, folded
+  into a Merkle Mountain Range, and acknowledged with receipts and checkpoints
+  so auditors can replay and independently verify the stream history.
+- **Capability-based authorisation** – access to overlays, streams, and schema
+  operations is mediated by capabilities with deterministic identifiers and
+  expiry/issuer metadata rather than mutable ACLs.
+- **Tenant isolation** – hubs keep per-tenant namespaces and overlay schemas
+  deterministic, making cross-tenant access visible in receipts while avoiding
+  shared secrets across tenants.
+- **Tamper evidence** – snapshot verification and state checkpoints expose any
+  divergence between on-disk state and signed history, allowing third parties to
+  detect manipulation without trusting hub operators.
+- **Operational safeguards** – optional proof-of-work challenges, TLS support,
+  and reproducible deployments (including Kubernetes manifests) reduce replay
+  abuse, enforce transport security, and keep runtime configurations auditable.
 
 ## Getting started
 
