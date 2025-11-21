@@ -302,6 +302,17 @@ pub struct NormalizedQueryDescriptor {
     pub meta: Option<JsonMap<String, Value>>,
 }
 
+impl NormalizedQueryDescriptor {
+    /// Serializes the normalized descriptor using canonical JSON ordering.
+    pub fn to_canonical_json(&self) -> Result<String, QueryError> {
+        let value = serde_json::to_value(self)
+            .map_err(|err| QueryError::CanonicalJson(err.to_string()))?;
+        let canonical = canonicalize_value(&value);
+        serde_json::to_string(&canonical)
+            .map_err(|err| QueryError::CanonicalJson(err.to_string()))
+    }
+}
+
 /// Result digest committed alongside query results.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResultDigest {
@@ -427,6 +438,15 @@ impl ResultDigest {
             ResultContext::new(executed_at, hub_id, profile_id),
             generate_result_id,
         )
+    }
+
+    /// Serializes the digest using canonical JSON ordering.
+    pub fn to_canonical_json(&self) -> Result<String, QueryError> {
+        let value = serde_json::to_value(self)
+            .map_err(|err| QueryError::CanonicalJson(err.to_string()))?;
+        let canonical = canonicalize_value(&value);
+        serde_json::to_string(&canonical)
+            .map_err(|err| QueryError::CanonicalJson(err.to_string()))
     }
 }
 
@@ -923,6 +943,51 @@ mod tests {
         let hash_b = hash_rows(&[row_b]).expect("hash b");
 
         assert_eq!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn descriptor_to_canonical_json_sorts_keys() {
+        let descriptor = NormalizedQueryDescriptor {
+            query_id: "q-1".into(),
+            version: 1,
+            scope: vec!["record/app/http".into()],
+            filter: QueryFilter::default(),
+            projection: vec!["subject_id".into(), "event_time".into()],
+            aggregate: None,
+            evidence: EvidencePolicy::default(),
+            meta: Some(JsonMap::from_iter([
+                ("z_key".into(), Value::from(9)),
+                ("a_key".into(), Value::from("first")),
+            ])),
+        };
+
+        let encoded = descriptor.to_canonical_json().expect("canonical json");
+        assert_eq!(
+            encoded,
+            "{\"evidence\":{\"mode\":\"none\"},\"filter\":{},\"meta\":{\"a_key\":\"first\",\"z_key\":9},\"projection\":[\"subject_id\",\"event_time\"],\"query_id\":\"q-1\",\"scope\":[\"record/app/http\"],\"version\":1}"
+        );
+    }
+
+    #[test]
+    fn digest_to_canonical_json_sorts_keys() {
+        let digest = ResultDigest {
+            query_id: "q-1".into(),
+            result_id: "r-1".into(),
+            version: 1,
+            row_count: 2,
+            evidence_policy: EvidencePolicy::default(),
+            rows_hash: "aa".into(),
+            evidence_hash: "bb".into(),
+            executed_at: "2025-11-19T03:20:00Z".into(),
+            hub_id: "hub-1".into(),
+            profile_id: Some("profile-1".into()),
+        };
+
+        let encoded = digest.to_canonical_json().expect("canonical json");
+        assert_eq!(
+            encoded,
+            "{\"evidence_hash\":\"bb\",\"evidence_policy\":{\"mode\":\"none\"},\"executed_at\":\"2025-11-19T03:20:00Z\",\"hub_id\":\"hub-1\",\"profile_id\":\"profile-1\",\"query_id\":\"q-1\",\"result_id\":\"r-1\",\"row_count\":2,\"rows_hash\":\"aa\",\"version\":1}"
+        );
     }
 
     #[test]
