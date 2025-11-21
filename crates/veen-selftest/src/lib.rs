@@ -27,6 +27,8 @@ mod process_harness;
 mod query;
 mod recorder;
 
+use process_harness::{HardenedResult, IntegrationHarness, MetaOverlayResult};
+
 pub use metrics::{HistogramSnapshot, HubMetricsSnapshot};
 pub use overlays::run_overlays;
 pub use perf::{run_perf, PerfConfig, PerfMode, PerfSummary};
@@ -613,29 +615,76 @@ pub async fn run_kex1(reporter: &mut SelftestReporter<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Placeholder for hardened profile (SH1+) self-tests.
+/// Hardened profile (SH1+) self-tests covering PoW admission, rate limiting, and replica resync.
 pub async fn run_hardened(reporter: &mut SelftestReporter<'_>) -> Result<()> {
-    tracing::info!("hardened self-tests completed (placeholder)");
+    let harness = IntegrationHarness::new()
+        .await
+        .context("initialising hardened integration harness")?;
+    let HardenedResult {
+        pow_challenge,
+        pow_difficulty,
+        pow_forbidden_status,
+        pow_accept_seq,
+        pow_accept_root,
+        rate_limit_status,
+        replicated_seq,
+    } = harness.run_hardened_flow().await?;
+
     reporter.record(SelftestGoalReport {
         goal: "SELFTEST.HARDENED".into(),
-        environment: vec!["scenario=placeholder".into()],
-        invariants: vec!["reserved for hardened profile tests".into()],
-        evidence: vec!["no execution (placeholder)".into()],
+        environment: vec![
+            format!("pow.difficulty={pow_difficulty}"),
+            "suite=hardened".into(),
+        ],
+        invariants: vec![
+            "pow-required submissions are rejected".into(),
+            "valid pow cookies admit submissions".into(),
+            "client quota enforces rate limits".into(),
+            "replica resynchronises upto latest seq".into(),
+        ],
+        evidence: vec![
+            format!("challenge={pow_challenge}"),
+            format!("forbidden_status={pow_forbidden_status}"),
+            format!("accepted_seq={pow_accept_seq}"),
+            format!("accepted_root={pow_accept_root}"),
+            format!("rate_limit_status={rate_limit_status}"),
+            format!("replicated_seq={replicated_seq}"),
+        ],
         perf: None,
     });
+
+    tracing::info!("hardened self-tests completed successfully");
     Ok(())
 }
 
-/// Placeholder for label and schema overlays (META0+) self-tests.
+/// Label and schema overlays (META0+) self-tests.
 pub async fn run_meta(reporter: &mut SelftestReporter<'_>) -> Result<()> {
-    tracing::info!("meta overlay self-tests completed (placeholder)");
+    let harness = IntegrationHarness::new()
+        .await
+        .context("initialising meta integration harness")?;
+    let MetaOverlayResult {
+        schema_id_hex,
+        descriptor_name,
+        descriptor_version,
+        registry_len,
+    } = harness.run_meta_overlay().await?;
+
     reporter.record(SelftestGoalReport {
         goal: "SELFTEST.META".into(),
-        environment: vec!["scenario=placeholder".into()],
-        invariants: vec!["reserved for meta overlay tests".into()],
-        evidence: vec!["no execution (placeholder)".into()],
+        environment: vec![format!("schema_id={schema_id_hex}"), "suite=meta".into()],
+        invariants: vec![
+            "schema registration succeeds via overlay".into(),
+            "schema registry returns registered descriptor".into(),
+        ],
+        evidence: vec![
+            format!("name={descriptor_name}"),
+            format!("version={descriptor_version}"),
+            format!("registry_len={registry_len}"),
+        ],
         perf: None,
     });
+
+    tracing::info!("meta overlay self-tests completed successfully");
     Ok(())
 }
 

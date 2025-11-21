@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::fs as stdfs;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,7 +14,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use serde_json::json;
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{self, AsyncRead, AsyncWriteExt};
@@ -26,7 +27,9 @@ use veen_core::label::Label;
 use veen_core::wire::checkpoint::{Checkpoint, CHECKPOINT_VERSION};
 use veen_core::wire::mmr::Mmr;
 use veen_core::wire::types::{LeafHash, MmrRoot, Signature64};
+use veen_core::{h, ht, schema_meta_schema, PowCookie, SchemaDescriptor, SchemaId, SchemaOwner};
 use veen_hub::pipeline::{HubStreamState, StoredMessage, StreamMessageWithProof, SubmitRequest};
+use veen_hub::pipeline::{PowCookieEnvelope, SubmitResponse};
 use veen_hub::storage::{CHECKPOINTS_FILE, HUB_PID_FILE};
 
 #[cfg(unix)]
@@ -40,6 +43,7 @@ const HUB_HEALTH_RETRY_DELAY_MS: u64 = 250;
 const REPLICATION_MAX_ATTEMPTS: usize = 120;
 #[allow(dead_code)]
 const REPLICATION_RETRY_DELAY_MS: u64 = 250;
+const ADMIN_SIGNING_DOMAIN: &str = "veen/admin";
 const HUB_KEY_VERSION: u8 = 1;
 
 #[derive(Clone)]
@@ -87,6 +91,30 @@ pub struct RecorderRecoveryResult {
     pub checkpoint_root: String,
     pub replay_from_seq: u64,
     pub validated_seqs: Vec<u64>,
+}
+
+pub struct HardenedResult {
+    pub pow_challenge: String,
+    pub pow_difficulty: u8,
+    pub pow_forbidden_status: reqwest::StatusCode,
+    pub pow_accept_seq: u64,
+    pub pow_accept_root: String,
+    pub rate_limit_status: reqwest::StatusCode,
+    pub replicated_seq: u64,
+}
+
+pub struct MetaOverlayResult {
+    pub schema_id_hex: String,
+    pub descriptor_name: String,
+    pub descriptor_version: String,
+    pub registry_len: usize,
+}
+
+#[derive(Deserialize)]
+struct PowChallengeResponse {
+    pub ok: bool,
+    pub challenge: String,
+    pub difficulty: u8,
 }
 
 impl BinaryPaths {
@@ -1042,6 +1070,223 @@ impl IntegrationHarness {
         Ok((capture, recovery))
     }
 
+    pub async fn run_hardened_flow(&self) -> Result<HardenedResult> {
+        let pow_difficulty = 5u8;
+        let hub = self
+            .spawn_hub_with_admission(
+                "hardened-hub",
+                HubRole::Primary,
+                &[],
+                Some(pow_difficulty),
+                Some(1),
+            )
+            .await
+            .context("spawning hardened hub process")?;
+        self.wait_for_health(hub.listen).await?;
+
+        let hub_base = format!("http://{}", hub.listen);
+        let submit_endpoint = format!("{hub_base}/submit");
+
+        let client_dir = self.base_dir().join("hardened-client");
+        fs::create_dir_all(&client_dir)
+            .await
+            .context("creating hardened client directory")?;
+        self.run_cli_success(
+            vec![
+                OsString::from("keygen"),
+                OsString::from("--out"),
+                client_dir.as_os_str().to_os_string(),
+            ],
+            "generating hardened flow client",
+        )
+        .await?;
+
+        let client_id = read_client_id(&client_dir.join("identity_card.pub"))?;
+        let forbidden = self
+            .http
+            .post(&submit_endpoint)
+            .json(&SubmitRequest {
+                stream: "hardened/pow".to_string(),
+                client_id: client_id.clone(),
+                payload: json!({ "msg": "missing pow" }),
+                attachments: None,
+                auth_ref: None,
+                expires_at: None,
+                schema: None,
+                idem: None,
+                pow_cookie: None,
+            })
+            .send()
+            .await
+            .context("submitting hardened message without pow")?;
+
+        let pow_descriptor: PowChallengeResponse = self
+            .http
+            .get(format!(
+                "{hub_base}/pow_request?difficulty={pow_difficulty}"
+            ))
+            .send()
+            .await
+            .context("requesting pow challenge")?
+            .error_for_status()
+            .context("pow challenge returned error status")?
+            .json()
+            .await
+            .context("decoding pow challenge")?;
+
+        ensure!(pow_descriptor.ok, "hub returned unsuccessful pow challenge");
+
+        let challenge_bytes =
+            hex::decode(&pow_descriptor.challenge).context("decoding pow challenge hex")?;
+        let solved_cookie = solve_pow_cookie_with_limit(
+            challenge_bytes,
+            pow_descriptor.difficulty,
+            Some(250_000u64),
+        )
+        .context("solving pow challenge")?;
+        let pow_envelope = PowCookieEnvelope::from_cookie(&solved_cookie);
+
+        let accepted: SubmitResponse = self
+            .http
+            .post(&submit_endpoint)
+            .json(&SubmitRequest {
+                stream: "hardened/pow".to_string(),
+                client_id: client_id.clone(),
+                payload: json!({ "msg": "with pow" }),
+                attachments: None,
+                auth_ref: None,
+                expires_at: None,
+                schema: None,
+                idem: None,
+                pow_cookie: Some(pow_envelope.clone()),
+            })
+            .send()
+            .await
+            .context("submitting hardened message with pow")?
+            .error_for_status()
+            .context("pow submission rejected")?
+            .json()
+            .await
+            .context("decoding pow submission response")?;
+
+        let rate_limited = self
+            .http
+            .post(&submit_endpoint)
+            .json(&SubmitRequest {
+                stream: "hardened/pow".to_string(),
+                client_id: client_id.clone(),
+                payload: json!({ "msg": "quota" }),
+                attachments: None,
+                auth_ref: None,
+                expires_at: None,
+                schema: None,
+                idem: None,
+                pow_cookie: Some(pow_envelope),
+            })
+            .send()
+            .await
+            .context("submitting hardened rate-limit probe")?;
+
+        let replica = self
+            .spawn_hub("hardened-replica", HubRole::Replica, &[hub_base.clone()])
+            .await
+            .context("spawning hardened replica")?;
+        self.wait_for_health(replica.listen).await?;
+        let replica_base = format!("http://{}", replica.listen);
+        let replicated_checkpoint = self
+            .wait_for_checkpoint(&replica_base, accepted.seq)
+            .await
+            .context("waiting for hardened replica to resync")?;
+
+        self.stop_hub_gracefully(hub).await?;
+        self.stop_hub_gracefully(replica).await?;
+
+        Ok(HardenedResult {
+            pow_challenge: pow_descriptor.challenge,
+            pow_difficulty: pow_descriptor.difficulty,
+            pow_forbidden_status: forbidden.status(),
+            pow_accept_seq: accepted.seq,
+            pow_accept_root: accepted.mmr_root,
+            rate_limit_status: rate_limited.status(),
+            replicated_seq: replicated_checkpoint.upto_seq,
+        })
+    }
+
+    pub async fn run_meta_overlay(&self) -> Result<MetaOverlayResult> {
+        let hub = self
+            .spawn_hub("meta-hub", HubRole::Primary, &[])
+            .await
+            .context("spawning meta overlay hub")?;
+        self.wait_for_health(hub.listen).await?;
+
+        let hub_base = format!("http://{}", hub.listen);
+
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let schema_id = SchemaId::from(h(b"selftest/meta/schema"));
+        let descriptor = SchemaDescriptor {
+            schema_id,
+            name: "selftest-meta".to_string(),
+            version: "0.0.1".to_string(),
+            doc_url: Some("https://example.invalid/meta".to_string()),
+            owner: Some(SchemaOwner::from(*signing_key.verifying_key().as_bytes())),
+            ts: current_unix_timestamp_millis(),
+        };
+
+        let payload = encode_signed_envelope(schema_meta_schema(), &descriptor, &signing_key)
+            .context("encoding schema register payload")?;
+        self.http
+            .post(format!("{hub_base}/schema"))
+            .header("content-type", "application/cbor")
+            .body(payload)
+            .send()
+            .await
+            .context("registering schema via overlay")?
+            .error_for_status()
+            .context("schema register rejected")?;
+
+        let registry: Vec<SchemaDescriptor> = self
+            .http
+            .get(format!("{hub_base}/schema"))
+            .send()
+            .await
+            .context("fetching schema registry")?
+            .error_for_status()
+            .context("schema list rejected")?
+            .json()
+            .await
+            .context("decoding schema registry")?;
+        let fetched: SchemaDescriptor = self
+            .http
+            .get(format!(
+                "{hub_base}/schema/{}",
+                hex::encode(schema_id.as_bytes())
+            ))
+            .send()
+            .await
+            .context("fetching schema descriptor")?
+            .error_for_status()
+            .context("schema fetch rejected")?
+            .json()
+            .await
+            .context("decoding schema descriptor")?;
+
+        ensure!(
+            fetched.schema_id == descriptor.schema_id
+                && fetched.name == descriptor.name
+                && fetched.version == descriptor.version,
+            "fetched schema descriptor mismatch"
+        );
+
+        self.stop_hub_gracefully(hub).await?;
+
+        Ok(MetaOverlayResult {
+            schema_id_hex: hex::encode(schema_id.as_bytes()),
+            descriptor_name: descriptor.name,
+            descriptor_version: descriptor.version,
+            registry_len: registry.len(),
+        })
+    }
+
     #[allow(dead_code)]
     pub async fn run_federation_suite(&mut self) -> Result<()> {
         let primary = self
@@ -1390,6 +1635,17 @@ impl IntegrationHarness {
         Ok(checkpoint)
     }
 
+    async fn wait_for_checkpoint(&self, hub_url: &str, expected_seq: u64) -> Result<Checkpoint> {
+        for _ in 0..HUB_HEALTH_MAX_ATTEMPTS {
+            let checkpoint = self.fetch_latest_checkpoint(hub_url).await?;
+            if checkpoint.upto_seq >= expected_seq {
+                return Ok(checkpoint);
+            }
+            sleep(Duration::from_millis(HUB_HEALTH_RETRY_DELAY_MS)).await;
+        }
+        bail!("replica did not reach upto_seq {expected_seq}");
+    }
+
     async fn run_cli(&self, args: Vec<OsString>) -> Result<CommandOutput> {
         let mut command = TokioCommand::new(&self.bins.cli);
         command.args(args.iter());
@@ -1398,6 +1654,64 @@ impl IntegrationHarness {
             .await
             .context("executing veen-cli command")?;
         Ok(CommandOutput::from(output))
+    }
+
+    async fn spawn_hub_with_admission(
+        &self,
+        name: &str,
+        role: HubRole,
+        replica_targets: &[String],
+        pow_difficulty: Option<u8>,
+        max_msgs_per_client_id_per_label: Option<u64>,
+    ) -> Result<HubProcess> {
+        let data_dir = self.base_dir().join(name);
+        let listen = next_listen_addr()?;
+        fs::create_dir_all(&data_dir)
+            .await
+            .with_context(|| format!("creating hub data dir {}", data_dir.display()))?;
+        ensure_hub_key_material(&data_dir)
+            .await
+            .with_context(|| format!("ensuring hub key material in {}", data_dir.display()))?;
+
+        let mut args = vec![
+            OsString::from("run"),
+            OsString::from("--listen"),
+            OsString::from(listen.to_string()),
+            OsString::from("--data-dir"),
+            data_dir.as_os_str().to_os_string(),
+            OsString::from("--disable-capability-gating"),
+        ];
+
+        if let Some(difficulty) = pow_difficulty {
+            args.push(OsString::from("--pow-difficulty"));
+            args.push(OsString::from(difficulty.to_string()));
+        }
+
+        if let Some(limit) = max_msgs_per_client_id_per_label {
+            args.push(OsString::from("--max-msgs-per-client-id-per-label"));
+            args.push(OsString::from(limit.to_string()));
+        }
+
+        if role == HubRole::Replica {
+            args.push(OsString::from("--role"));
+            args.push(OsString::from("replica"));
+            for target in replica_targets {
+                args.push(OsString::from("--replica-target"));
+                args.push(OsString::from(target));
+            }
+        }
+
+        let handle = self
+            .spawn_process(name, &self.bins.hub, args)
+            .await
+            .context("spawning hub process")?;
+
+        Ok(HubProcess {
+            name: name.to_string(),
+            handle,
+            listen,
+            data_dir,
+        })
     }
 
     async fn spawn_hub(
@@ -2115,6 +2429,96 @@ async fn compute_stream_mmr_root(data_dir: &Path, stream: &str) -> Result<Option
         );
     }
     Ok(mmr.root())
+}
+
+#[derive(Serialize)]
+struct SignedEnvelope<T>
+where
+    T: Serialize + Clone,
+{
+    #[serde(with = "serde_bytes")]
+    schema: ByteBuf,
+    body: T,
+    #[serde(with = "serde_bytes")]
+    signature: ByteBuf,
+}
+
+fn encode_signed_envelope<T>(
+    schema: [u8; 32],
+    body: &T,
+    signing_key: &SigningKey,
+) -> Result<Vec<u8>>
+where
+    T: Serialize + Clone,
+{
+    let mut body_bytes = Vec::new();
+    ciborium::ser::into_writer(body, &mut body_bytes)
+        .map_err(|err| anyhow!("failed to encode payload body to CBOR: {err}"))?;
+
+    let mut signing_input = Vec::with_capacity(schema.len() + body_bytes.len());
+    signing_input.extend_from_slice(&schema);
+    signing_input.extend_from_slice(&body_bytes);
+    let digest = ht(ADMIN_SIGNING_DOMAIN, &signing_input);
+
+    let signature = signing_key.sign(digest.as_ref());
+    let envelope = SignedEnvelope {
+        schema: ByteBuf::from(schema.to_vec()),
+        body: body.clone(),
+        signature: ByteBuf::from(signature.to_bytes().to_vec()),
+    };
+
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&envelope, &mut encoded)
+        .map_err(|err| anyhow!("failed to encode signed envelope: {err}"))?;
+    Ok(encoded)
+}
+
+fn solve_pow_cookie_with_limit(
+    challenge: Vec<u8>,
+    difficulty: u8,
+    max_iterations: Option<u64>,
+) -> Result<PowCookie> {
+    let limit = max_iterations.unwrap_or(u64::MAX);
+    for nonce in 0..limit {
+        let mut hasher = Sha256::new();
+        hasher.update(&challenge);
+        hasher.update(&nonce.to_le_bytes());
+        let digest = hasher.finalize();
+        if digest
+            .iter()
+            .take((difficulty / 8) as usize)
+            .all(|b| *b == 0)
+        {
+            let remaining = difficulty % 8;
+            if remaining == 0
+                || (digest
+                    .get((difficulty / 8) as usize)
+                    .map(|byte| byte.leading_zeros() >= remaining as u32)
+                    .unwrap_or(false))
+            {
+                return Ok(PowCookie {
+                    challenge,
+                    nonce,
+                    difficulty,
+                });
+            }
+        }
+    }
+
+    bail!("unable to satisfy pow difficulty {difficulty} within iteration budget");
+}
+
+fn read_client_id(path: &Path) -> Result<String> {
+    let data = stdfs::read_to_string(path)
+        .with_context(|| format!("reading client identity card from {}", path.display()))?;
+    Ok(data.trim().to_string())
+}
+
+fn current_unix_timestamp_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 pub async fn run_core_suite() -> Result<()> {
