@@ -8,27 +8,6 @@ multi-tenant environments. This repository hosts the full reference workspace,
 including the core protocol primitives, the disposable hub runtime, and the CLI
 used to drive end-to-end workflows.
 
-### Purpose and guaranteed properties
-
-Use VEEN when you need an exchange surface that is cryptographically auditable
-end-to-end, not merely log-based or broker-trusted. The stack is designed for
-tenanted overlays where regulators or counterparties must reproduce state
-independently. The implementation guarantees:
-
-- **Deterministic reconstruction** – every overlay operation, schema change,
-  and capability grant is encoded with deterministic identifiers so state can be
-  replayed from receipts and checkpoints without access to the original hubs.
-- **Cryptographic delivery proof** – messages are signed, folded into Merkle
-  Mountain Ranges, and acknowledged with verifiable receipts, allowing third
-  parties to assert that specific content was delivered (or detect its
-  absence) without trusting operators.
-- **Scoped blast radius** – disposable hubs, per-tenant namespaces, and
-  capability-bound authorisation keep failures or key compromises isolated to
-  the affected overlay, while keeping audit evidence portable.
-- **Reproducible deployment** – pinned toolchains, container images, and
-  Kubernetes manifests ensure operators can attest to the exact bits running in
-  production when presenting compliance evidence.
-
 ### Key capabilities
 
 - Cryptographic accountability for message delivery via receipts, checkpoints,
@@ -39,15 +18,6 @@ independently. The implementation guarantees:
   provisioning, overlay control (RPC, CRDT, wallet, schema), and self-testing.
 - Deterministic schema and capability tooling to keep tenants, overlays, and
   ledger state auditable.
-
-### Reference specifications
-
-The current release targets the v0.0.1 protocol suite described in
-[`doc/spec-1.txt`](doc/spec-1.txt) through [`doc/spec-3.txt`](doc/spec-3.txt),
-along with the operational requirements recorded in
-[`doc/CLI-GOALS.txt`](doc/CLI-GOALS.txt) and
-[`doc/OS-GOALS.txt`](doc/OS-GOALS.txt). Compatibility and minimum supported
-toolchain versions are pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
 
 ## Table of contents
 
@@ -86,6 +56,36 @@ the VEEN protocol stack:
 - [`Justfile`](Justfile) – convenience recipes for formatting, linting, and
   running common developer commands.
 
+### Reference specifications
+
+The current release targets the v0.0.1 protocol suite described in
+[`doc/spec-1.txt`](doc/spec-1.txt) through [`doc/spec-3.txt`](doc/spec-3.txt),
+along with the operational requirements recorded in
+[`doc/CLI-GOALS.txt`](doc/CLI-GOALS.txt) and
+[`doc/OS-GOALS.txt`](doc/OS-GOALS.txt). Compatibility and minimum supported
+toolchain versions are pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
+
+## Purpose and guaranteed properties
+
+Use VEEN when you need a messaging surface that is cryptographically auditable
+end-to-end, not merely log-based or broker-trusted. The stack is designed for
+multi-tenant overlays where regulators or counterparties must reproduce state
+independently. The implementation guarantees:
+
+- **Deterministic reconstruction** – every overlay operation, schema change,
+  and capability grant is encoded with deterministic identifiers so state can be
+  replayed from receipts and checkpoints without access to the original hubs.
+- **Cryptographic delivery proof** – messages are signed, folded into Merkle
+  Mountain Ranges, and acknowledged with verifiable receipts, allowing third
+  parties to assert that specific content was delivered (or detect its
+  absence) without trusting operators.
+- **Scoped blast radius** – disposable hubs, per-tenant namespaces, and
+  capability-bound authorization keep failures or key compromises isolated to
+  the affected overlay, while keeping audit evidence portable.
+- **Reproducible deployment** – pinned toolchains, container images, and
+  Kubernetes manifests ensure operators can attest to the exact bits running in
+  production when presenting compliance evidence.
+
 ## Project status
 
 The v0.0.1 protocol release focuses on verifiable message delivery and overlay
@@ -105,15 +105,15 @@ for the guiding principles that shape stability decisions.
   deployments so operators can reconstruct overlay state without relying on
   mutable control planes.
 - Useful for compliance-sensitive workflows such as ledger replication,
-  regulated data exchange between business units, and tamper-evident audit
-  trails that span multiple organisations.
+  regulated data exchange between business units, and cross-organisation
+  settlement and reporting flows.
 
 ## Security and audit properties
 
 - **Provenance and integrity** – every message is signed by the sender, folded
   into a Merkle Mountain Range, and acknowledged with receipts and checkpoints
   so auditors can replay and independently verify the stream history.
-- **Capability-based authorisation** – access to overlays, streams, and schema
+- **Capability-based authorization** – access to overlays, streams, and schema
   operations is mediated by capabilities with deterministic identifiers and
   expiry/issuer metadata rather than mutable ACLs.
 - **Tenant isolation** – hubs keep per-tenant namespaces and overlay schemas
@@ -211,7 +211,7 @@ exchange messages locally:
    target/release/veen hub stop --data-dir /tmp/veen-hub
    ```
 
-The same CLI also covers capability issuance/authorisation, attachment
+The same CLI also covers capability issuance/authorization, attachment
 verification, resynchronisation, overlay management (RPC, CRDT, wallet,
 revocation, schema), and TLS inspection. Run `veen --help` for the complete
 command tree.
