@@ -2,19 +2,36 @@
 
 Verifiable End-to-End Network (VEEN) is a Rust implementation of a privacy-
 preserving messaging fabric with cryptographically enforced delivery
-semantics. This repository contains the full reference workspace, including the
-core protocol primitives, the disposable hub runtime, and the CLI used to drive
-end-to-end workflows.
+semantics. It enables auditable messaging streams, capability-based
+authorization, and deterministic overlay schemas suitable for regulated and
+multi-tenant environments. This repository hosts the full reference workspace,
+including the core protocol primitives, the disposable hub runtime, and the CLI
+used to drive end-to-end workflows.
+
+### Key capabilities
+
+- Cryptographic accountability for message delivery via receipts, checkpoints,
+  and Merkle Mountain Range proofs.
+- Disposable hubs that can be run locally, inside containers, or under
+  Kubernetes with reproducible manifests.
+- A single CLI (`veen`) that covers hub lifecycle management, client identity
+  provisioning, overlay control (RPC, CRDT, wallet, schema), and self-testing.
+- Deterministic schema and capability tooling to keep tenants, overlays, and
+  ledger state auditable.
+
+### Reference specifications
 
 The current release targets the v0.0.1 protocol suite described in
 [`doc/spec-1.txt`](doc/spec-1.txt) through [`doc/spec-3.txt`](doc/spec-3.txt),
 along with the operational requirements recorded in
 [`doc/CLI-GOALS.txt`](doc/CLI-GOALS.txt) and
-[`doc/OS-GOALS.txt`](doc/OS-GOALS.txt).
+[`doc/OS-GOALS.txt`](doc/OS-GOALS.txt). Compatibility and minimum supported
+toolchain versions are pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
 
 ## Table of contents
 
 - [Architecture overview](#architecture-overview)
+- [Project status](#project-status)
 - [Getting started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Build the workspace](#build-the-workspace)
@@ -44,6 +61,13 @@ the VEEN protocol stack:
   scenarios and integration adapters.
 - [`Justfile`](Justfile) – convenience recipes for formatting, linting, and
   running common developer commands.
+
+## Project status
+
+The v0.0.1 protocol release focuses on verifiable message delivery and overlay
+support. Experimental features and incubating overlays are added behind feature
+flags or scoped subcommands in the CLI. See [`doc/Design-Philosophy.txt`](doc/Design-Philosophy.txt)
+for the guiding principles that shape stability decisions.
 
 ## Getting started
 
