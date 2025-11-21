@@ -137,7 +137,7 @@ async fn validate_canonical_hashes(harness: &mut IntegrationHarness) -> Result<D
         .iter()
         .map(|entry| {
             serde_json::from_str(
-                &entry
+                entry
                     .message
                     .body
                     .as_deref()
