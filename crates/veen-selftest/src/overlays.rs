@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use veen_bridge::{run_bridge, BridgeConfig, EndpointConfig};
+use veen_core::ht;
 use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::pipeline::{
     BridgeIngestRequest, HubStreamState, StoredMessage, StreamReceipt, SubmitRequest,
@@ -35,6 +36,7 @@ const ONLINE_AUDIT_STREAM: &str = "bridge/online/log";
 const OFFLINE_AUDIT_STREAM: &str = "bridge/offline/log";
 
 const HUB_KEY_VERSION: u8 = 1;
+const ADMIN_SIGNING_DOMAIN: &str = "veen/admin";
 
 #[derive(Deserialize)]
 struct MetricsSnapshot {
@@ -82,6 +84,99 @@ pub async fn run_overlays(subset: Option<&str>, reporter: &mut SelftestReporter<
         executed.push("query");
     }
 
+    if subset.is_none() || subset == Some("kex1") {
+        let result = run_kex1_overlay().await?;
+        executed.push("kex1");
+        reporter.record(SelftestGoalReport {
+            goal: "SELFTEST.OVERLAYS.kex1".into(),
+            environment: vec![
+                "subset=kex1".into(),
+                format!("realm={}", result.realm_id),
+                format!("stream={}", result.stream_id),
+            ],
+            invariants: vec![
+                "authority records accept signed publication".into(),
+                "revocations are persisted and queryable".into(),
+                "active authority exposes primary hub".into(),
+            ],
+            evidence: vec![
+                format!("primary_hub={}", result.primary_hub),
+                format!("revocation_target={}", result.revocation_target),
+                format!("revocation_count={}", result.revocation_count),
+            ],
+            perf: None,
+        });
+    }
+
+    if subset.is_none() || subset == Some("sh1") {
+        let result = run_hardened_overlay().await?;
+        executed.push("sh1");
+        reporter.record(SelftestGoalReport {
+            goal: "SELFTEST.OVERLAYS.sh1".into(),
+            environment: vec![
+                "subset=sh1".into(),
+                format!("pow.difficulty={}", result.pow_difficulty),
+            ],
+            invariants: vec![
+                "pow-required submissions are rejected until solved".into(),
+                "valid pow cookies admit submissions".into(),
+                "rate limits trigger under quota pressure".into(),
+                "replicas resynchronise to accepted sequence".into(),
+            ],
+            evidence: vec![
+                format!("challenge={}", result.pow_challenge),
+                format!("forbidden_status={}", result.pow_forbidden_status),
+                format!("accepted_seq={}", result.pow_accept_seq),
+                format!("replicated_seq={}", result.replicated_seq),
+            ],
+            perf: None,
+        });
+    }
+
+    if subset.is_none() || subset == Some("lclass0") {
+        let result = run_label_class_overlay().await?;
+        executed.push("lclass0");
+        reporter.record(SelftestGoalReport {
+            goal: "SELFTEST.OVERLAYS.lclass0".into(),
+            environment: vec!["subset=lclass0".into(), format!("class={}", result.class)],
+            invariants: vec![
+                "label classification envelopes are accepted".into(),
+                "label descriptors echo persisted classification".into(),
+                "classification listings return matching entries".into(),
+            ],
+            evidence: vec![
+                format!("label={}", result.label),
+                format!("sensitivity={}", result.sensitivity.unwrap_or_default()),
+                format!("retention_hint={}", result.retention_hint.unwrap_or(0)),
+                format!("listed_entries={}", result.list_count),
+            ],
+            perf: None,
+        });
+    }
+
+    if subset.is_none() || subset == Some("meta0") {
+        let result = run_meta_overlay().await?;
+        executed.push("meta0");
+        reporter.record(SelftestGoalReport {
+            goal: "SELFTEST.OVERLAYS.meta0".into(),
+            environment: vec![
+                "subset=meta0".into(),
+                format!("schema_id={}", result.schema_id_hex),
+            ],
+            invariants: vec![
+                "schema registry accepts signed descriptors".into(),
+                "registry lookup returns stored descriptor".into(),
+                "registry list includes registered schema".into(),
+            ],
+            evidence: vec![
+                format!("name={}", result.descriptor_name),
+                format!("version={}", result.descriptor_version),
+                format!("registry_len={}", result.registry_len),
+            ],
+            perf: None,
+        });
+    }
+
     if subset.is_none() || subset == Some("agb0") {
         run_airgap_bridge()
             .await
@@ -112,6 +207,58 @@ pub async fn run_overlays(subset: Option<&str>, reporter: &mut SelftestReporter<
         bail!("unknown overlay subset {}", subset.unwrap_or("<none>"));
     }
     Ok(())
+}
+
+struct KexOverlayResult {
+    realm_id: String,
+    stream_id: String,
+    primary_hub: String,
+    revocation_target: String,
+    revocation_count: usize,
+}
+
+struct LabelClassOverlayResult {
+    label: String,
+    class: String,
+    sensitivity: Option<String>,
+    retention_hint: Option<u64>,
+    list_count: usize,
+}
+
+#[derive(Deserialize)]
+struct AuthorityDescriptor {
+    ok: bool,
+    primary_hub: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RevocationListResponse {
+    ok: bool,
+    revocations: Vec<RevocationEntry>,
+}
+
+#[derive(Deserialize)]
+struct RevocationEntry {
+    target: String,
+}
+
+#[derive(Deserialize)]
+struct LabelClassDescriptor {
+    ok: bool,
+    class: Option<String>,
+    sensitivity: Option<String>,
+    retention_hint: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct LabelClassList {
+    ok: bool,
+    entries: Vec<LabelClassListEntry>,
+}
+
+#[derive(Deserialize)]
+struct LabelClassListEntry {
+    label: String,
 }
 
 async fn run_fed_auth() -> Result<()> {
@@ -354,6 +501,237 @@ async fn run_airgap_bridge() -> Result<()> {
     offline_runtime.shutdown().await?;
 
     Ok(())
+}
+
+async fn run_kex1_overlay() -> Result<KexOverlayResult> {
+    let dir = TempDir::new().context("creating kex1 overlay dir")?;
+    ensure_hub_key(dir.path()).await?;
+    let runtime = start_overlay_hub(dir.path(), HubRole::Primary).await?;
+
+    let hub_base = format!("http://{}", runtime.listen_addr());
+    let http = Client::new();
+    let signing_key = SigningKey::generate(&mut OsRng);
+
+    let realm_id = veen_core::realm::RealmId::derive("selftest/kex1");
+    let stream_id = veen_core::label::StreamId::from(veen_core::h(b"selftest/kex1/stream"));
+    let primary_hub = veen_core::hub::HubId::from(veen_core::h(b"selftest/kex1/hub"));
+
+    let authority = veen_core::federation::AuthorityRecord {
+        realm_id,
+        stream_id,
+        primary_hub,
+        replica_hubs: Vec::new(),
+        policy: veen_core::federation::AuthorityPolicy::SinglePrimary,
+        ts: current_unix_timestamp(),
+        ttl: 900,
+    };
+    let authority_body =
+        encode_signed_envelope(veen_core::schema_fed_authority(), &authority, &signing_key)?;
+    http.post(format!("{hub_base}/authority"))
+        .header("content-type", "application/cbor")
+        .body(authority_body)
+        .send()
+        .await?
+        .error_for_status()
+        .context("publishing authority record")?;
+
+    let revocation = veen_core::revocation::RevocationRecord {
+        kind: veen_core::revocation::RevocationKind::ClientId,
+        target: veen_core::revocation::RevocationTarget::from(veen_core::h(
+            b"selftest/kex1/revocation",
+        )),
+        reason: Some("overlay lifecycle".into()),
+        ts: current_unix_timestamp(),
+        ttl: Some(300),
+    };
+    let revocation_body =
+        encode_signed_envelope(veen_core::schema_revocation(), &revocation, &signing_key)?;
+    http.post(format!("{hub_base}/revoke"))
+        .header("content-type", "application/cbor")
+        .body(revocation_body)
+        .send()
+        .await?
+        .error_for_status()
+        .context("publishing revocation record")?;
+
+    let authority_descriptor: AuthorityDescriptor = http
+        .get(format!("{hub_base}/authority"))
+        .query(&[
+            ("realm_id", hex::encode(authority.realm_id.as_bytes())),
+            ("stream_id", hex::encode(authority.stream_id.as_bytes())),
+        ])
+        .send()
+        .await?
+        .error_for_status()
+        .context("querying authority view")?
+        .json()
+        .await?;
+    ensure!(
+        authority_descriptor.ok,
+        "authority descriptor marked failure"
+    );
+    ensure!(
+        authority_descriptor.primary_hub.as_deref() == Some(&hex::encode(primary_hub.as_ref())),
+        "authority descriptor missing primary hub",
+    );
+
+    let revocations: RevocationListResponse = http
+        .get(format!("{hub_base}/revocations"))
+        .query(&[("kind", "client-id")])
+        .send()
+        .await?
+        .error_for_status()
+        .context("querying revocation list")?
+        .json()
+        .await?;
+    ensure!(
+        revocations
+            .revocations
+            .iter()
+            .any(|entry| entry.target == hex::encode(revocation.target.as_ref())),
+        "revocation list did not include target",
+    );
+
+    runtime.shutdown().await?;
+
+    Ok(KexOverlayResult {
+        realm_id: hex::encode(authority.realm_id.as_bytes()),
+        stream_id: hex::encode(authority.stream_id.as_bytes()),
+        primary_hub: hex::encode(primary_hub.as_ref()),
+        revocation_target: hex::encode(revocation.target.as_ref()),
+        revocation_count: revocations.revocations.len(),
+    })
+}
+
+async fn run_hardened_overlay() -> Result<crate::process_harness::HardenedResult> {
+    let harness = crate::process_harness::IntegrationHarness::new()
+        .await
+        .context("initialising hardened overlay harness")?;
+    harness
+        .run_hardened_flow()
+        .await
+        .context("executing hardened overlay flow")
+}
+
+async fn run_label_class_overlay() -> Result<LabelClassOverlayResult> {
+    let dir = TempDir::new().context("creating label-class overlay dir")?;
+    ensure_hub_key(dir.path()).await?;
+    let runtime = start_overlay_hub(dir.path(), HubRole::Primary).await?;
+    let hub_base = format!("http://{}", runtime.listen_addr());
+    let http = Client::new();
+    let signing_key = SigningKey::generate(&mut OsRng);
+
+    let stream_id = veen_core::label::StreamId::from(veen_core::h(b"selftest/lclass/stream"));
+    let label = veen_core::label::Label::derive([], stream_id, 0);
+    let record = veen_core::label_class::LabelClassRecord {
+        label,
+        class: "selftest".into(),
+        sensitivity: Some("internal".into()),
+        retention_hint: Some(86_400),
+    };
+    let payload = encode_signed_envelope(veen_core::schema_label_class(), &record, &signing_key)?;
+    http.post(format!("{hub_base}/label-class"))
+        .header("content-type", "application/cbor")
+        .body(payload)
+        .send()
+        .await?
+        .error_for_status()
+        .context("publishing label classification")?;
+
+    let descriptor: LabelClassDescriptor = http
+        .get(format!(
+            "{hub_base}/label-class/{}",
+            hex::encode(label.as_ref())
+        ))
+        .send()
+        .await?
+        .error_for_status()
+        .context("fetching label class descriptor")?
+        .json()
+        .await?;
+    ensure!(descriptor.ok, "label class descriptor returned failure");
+    ensure!(
+        descriptor.class.as_deref() == Some(&record.class),
+        "class mismatch"
+    );
+
+    let list: LabelClassList = http
+        .get(format!("{hub_base}/label-class"))
+        .query(&[("class", record.class.clone())])
+        .send()
+        .await?
+        .error_for_status()
+        .context("listing label class records")?
+        .json()
+        .await?;
+    ensure!(
+        list.entries
+            .iter()
+            .any(|entry| entry.label == hex::encode(label.as_ref())),
+        "label class list did not include entry",
+    );
+
+    runtime.shutdown().await?;
+
+    Ok(LabelClassOverlayResult {
+        label: hex::encode(label.as_ref()),
+        class: record.class,
+        sensitivity: record.sensitivity,
+        retention_hint: record.retention_hint,
+        list_count: list.entries.len(),
+    })
+}
+
+async fn run_meta_overlay() -> Result<crate::process_harness::MetaOverlayResult> {
+    let harness = crate::process_harness::IntegrationHarness::new()
+        .await
+        .context("initialising meta overlay harness")?;
+    harness
+        .run_meta_overlay()
+        .await
+        .context("executing meta overlay flow")
+}
+
+#[derive(Serialize)]
+struct SignedEnvelope<T>
+where
+    T: Serialize + Clone,
+{
+    #[serde(with = "serde_bytes")]
+    schema: ByteBuf,
+    body: T,
+    #[serde(with = "serde_bytes")]
+    signature: ByteBuf,
+}
+
+fn encode_signed_envelope<T>(
+    schema: [u8; 32],
+    body: &T,
+    signing_key: &SigningKey,
+) -> Result<Vec<u8>>
+where
+    T: Serialize + Clone,
+{
+    let mut body_bytes = Vec::new();
+    ciborium::ser::into_writer(body, &mut body_bytes)
+        .map_err(|err| anyhow!("failed to encode payload body to CBOR: {err}"))?;
+
+    let mut signing_input = Vec::with_capacity(schema.len() + body_bytes.len());
+    signing_input.extend_from_slice(&schema);
+    signing_input.extend_from_slice(&body_bytes);
+    let digest = ht(ADMIN_SIGNING_DOMAIN, &signing_input);
+
+    let signature = signing_key.sign(digest.as_ref());
+    let envelope = SignedEnvelope {
+        schema: ByteBuf::from(schema.to_vec()),
+        body: body.clone(),
+        signature: ByteBuf::from(signature.to_bytes().to_vec()),
+    };
+
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&envelope, &mut encoded)
+        .map_err(|err| anyhow!("failed to encode signed envelope: {err}"))?;
+    Ok(encoded)
 }
 
 async fn ensure_hub_key(dir: &Path) -> Result<()> {
