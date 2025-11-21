@@ -305,11 +305,10 @@ pub struct NormalizedQueryDescriptor {
 impl NormalizedQueryDescriptor {
     /// Serializes the normalized descriptor using canonical JSON ordering.
     pub fn to_canonical_json(&self) -> Result<String, QueryError> {
-        let value = serde_json::to_value(self)
-            .map_err(|err| QueryError::CanonicalJson(err.to_string()))?;
+        let value =
+            serde_json::to_value(self).map_err(|err| QueryError::CanonicalJson(err.to_string()))?;
         let canonical = canonicalize_value(&value);
-        serde_json::to_string(&canonical)
-            .map_err(|err| QueryError::CanonicalJson(err.to_string()))
+        serde_json::to_string(&canonical).map_err(|err| QueryError::CanonicalJson(err.to_string()))
     }
 }
 
@@ -442,11 +441,10 @@ impl ResultDigest {
 
     /// Serializes the digest using canonical JSON ordering.
     pub fn to_canonical_json(&self) -> Result<String, QueryError> {
-        let value = serde_json::to_value(self)
-            .map_err(|err| QueryError::CanonicalJson(err.to_string()))?;
+        let value =
+            serde_json::to_value(self).map_err(|err| QueryError::CanonicalJson(err.to_string()))?;
         let canonical = canonicalize_value(&value);
-        serde_json::to_string(&canonical)
-            .map_err(|err| QueryError::CanonicalJson(err.to_string()))
+        serde_json::to_string(&canonical).map_err(|err| QueryError::CanonicalJson(err.to_string()))
     }
 }
 
