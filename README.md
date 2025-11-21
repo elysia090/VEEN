@@ -8,6 +8,27 @@ multi-tenant environments. This repository hosts the full reference workspace,
 including the core protocol primitives, the disposable hub runtime, and the CLI
 used to drive end-to-end workflows.
 
+### Purpose and guaranteed properties
+
+Use VEEN when you need an exchange surface that is cryptographically auditable
+end-to-end, not merely log-based or broker-trusted. The stack is designed for
+tenanted overlays where regulators or counterparties must reproduce state
+independently. The implementation guarantees:
+
+- **Deterministic reconstruction** – every overlay operation, schema change,
+  and capability grant is encoded with deterministic identifiers so state can be
+  replayed from receipts and checkpoints without access to the original hubs.
+- **Cryptographic delivery proof** – messages are signed, folded into Merkle
+  Mountain Ranges, and acknowledged with verifiable receipts, allowing third
+  parties to assert that specific content was delivered (or detect its
+  absence) without trusting operators.
+- **Scoped blast radius** – disposable hubs, per-tenant namespaces, and
+  capability-bound authorisation keep failures or key compromises isolated to
+  the affected overlay, while keeping audit evidence portable.
+- **Reproducible deployment** – pinned toolchains, container images, and
+  Kubernetes manifests ensure operators can attest to the exact bits running in
+  production when presenting compliance evidence.
+
 ### Key capabilities
 
 - Cryptographic accountability for message delivery via receipts, checkpoints,
@@ -31,6 +52,7 @@ toolchain versions are pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
 ## Table of contents
 
 - [Architecture overview](#architecture-overview)
+- [Purpose and guaranteed properties](#purpose-and-guaranteed-properties)
 - [Project status](#project-status)
 - [Positioning and common use cases](#positioning-and-common-use-cases)
 - [Security and audit properties](#security-and-audit-properties)
