@@ -2973,21 +2973,25 @@ struct RenderedRevocation {
 }
 
 pub async fn cli_main() {
-    let exit_code = match run_cli().await {
-        Ok(()) => 0,
-        Err(err) => {
-            let classification = classify_error(&err);
-            let detail = err.to_string();
-            let use_json = json_output_enabled(false);
-            emit_cli_error(classification.label(), Some(&detail), use_json);
-            classification.exit_code()
-        }
+    let args: Vec<_> = env::args_os().collect();
+    let exit_code = match Cli::try_parse_from(&args) {
+        Ok(cli) => match run_cli(cli).await {
+            Ok(()) => 0,
+            Err(err) => {
+                let classification = classify_error(&err);
+                let detail = err.to_string();
+                let use_json = json_output_enabled(false);
+                emit_cli_error(classification.label(), Some(&detail), use_json);
+                classification.exit_code()
+            }
+        },
+        Err(err) => handle_parse_error(err, &args),
     };
     process::exit(exit_code);
 }
 
-async fn run_cli() -> Result<()> {
-    let Cli { global, command } = Cli::parse();
+async fn run_cli(cli: Cli) -> Result<()> {
+    let Cli { global, command } = cli;
     set_global_options(global);
     init_tracing();
 
@@ -3147,6 +3151,25 @@ async fn run_cli() -> Result<()> {
             SelftestCommand::Plus => handle_selftest_plus().await,
         },
     }
+}
+
+fn handle_parse_error(err: clap::Error, args: &[std::ffi::OsString]) -> i32 {
+    match err.kind() {
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => {
+            let _ = err.print();
+            0
+        }
+        _ => {
+            let detail = err.to_string();
+            let use_json = args_request_json_output(args);
+            emit_cli_error(CliExitKind::Usage.label(), Some(detail.trim()), use_json);
+            CliExitKind::Usage.exit_code()
+        }
+    }
+}
+
+fn args_request_json_output(args: &[std::ffi::OsString]) -> bool {
+    args.iter().any(|arg| arg == std::ffi::OsStr::new("--json"))
 }
 
 struct ErrorClassification {
@@ -10285,6 +10308,7 @@ mod tests {
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
     use std::convert::Infallible;
+    use std::ffi::OsString;
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
     use std::sync::Arc;
     use std::time::Duration;
@@ -10310,6 +10334,19 @@ mod tests {
         let entries = vec!["alpha=one".to_string(), "alpha=two".to_string()];
         let err = super::parse_label_map_entries(&entries).unwrap_err();
         assert!(err.to_string().contains("duplicate --label-map entry"));
+    }
+
+    #[test]
+    fn args_request_json_output_detects_flag() {
+        let args = vec![
+            OsString::from("veen"),
+            OsString::from("--json"),
+            OsString::from("hub"),
+        ];
+        assert!(super::args_request_json_output(&args));
+
+        let no_flag = vec![OsString::from("veen"), OsString::from("hub")];
+        assert!(!super::args_request_json_output(&no_flag));
     }
 
     async fn write_test_hub_key(data_dir: &Path) -> anyhow::Result<()> {
