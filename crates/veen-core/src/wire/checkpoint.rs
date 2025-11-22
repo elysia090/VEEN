@@ -1,13 +1,15 @@
-use std::io;
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    hash::ht,
     label::Label,
-    wire::types::{MmrRoot, Signature64, SignatureVerifyError, HASH_LEN},
+    wire::{
+        types::{MmrRoot, Signature64, SignatureVerifyError, HASH_LEN},
+        CborError,
+    },
 };
+
+use super::signing::{serialize_signable, tagged_hash};
 
 /// Wire format version for `CHECKPOINT` objects.
 pub const CHECKPOINT_VERSION: u64 = 1;
@@ -26,8 +28,6 @@ pub struct Checkpoint {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub witness_sigs: Option<Vec<Signature64>>,
 }
-
-type CborError = ciborium::ser::Error<io::Error>;
 
 /// Errors returned when validating signatures on CHECKPOINT objects.
 #[derive(Debug, Error)]
@@ -76,16 +76,12 @@ impl Checkpoint {
 
     /// Serializes the checkpoint without the hub signature field.
     pub fn signing_bytes(&self) -> Result<Vec<u8>, CborError> {
-        let mut buf = Vec::new();
-        let view = CheckpointSignable::from(self);
-        ciborium::ser::into_writer(&view, &mut buf)?;
-        Ok(buf)
+        serialize_signable(&CheckpointSignable::from(self))
     }
 
     /// Computes the canonical `Ht("veen/sig", …)` digest for checkpoint signatures.
     pub fn signing_tagged_hash(&self) -> Result<[u8; 32], CborError> {
-        let bytes = self.signing_bytes()?;
-        Ok(ht("veen/sig", &bytes))
+        tagged_hash("veen/sig", &CheckpointSignable::from(self))
     }
 
     /// Verifies `hub_sig` using the provided hub Ed25519 public key bytes.

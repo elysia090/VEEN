@@ -1,13 +1,15 @@
-use std::io;
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    hash::ht,
     label::Label,
-    wire::types::{LeafHash, MmrRoot, Signature64, SignatureVerifyError, HASH_LEN},
+    wire::{
+        types::{LeafHash, MmrRoot, Signature64, SignatureVerifyError, HASH_LEN},
+        CborError,
+    },
 };
+
+use super::signing::{serialize_signable, tagged_hash};
 
 /// Wire format version for `RECEIPT` objects.
 pub const RECEIPT_VERSION: u64 = 1;
@@ -24,8 +26,6 @@ pub struct Receipt {
     pub hub_ts: u64,
     pub hub_sig: Signature64,
 }
-
-type CborError = ciborium::ser::Error<io::Error>;
 
 /// Errors produced when validating hub signatures on RECEIPT objects.
 #[derive(Debug, Error)]
@@ -71,16 +71,12 @@ impl Receipt {
 
     /// Serializes the receipt without the hub signature using deterministic CBOR.
     pub fn signing_bytes(&self) -> Result<Vec<u8>, CborError> {
-        let mut buf = Vec::new();
-        let view = ReceiptSignable::from(self);
-        ciborium::ser::into_writer(&view, &mut buf)?;
-        Ok(buf)
+        serialize_signable(&ReceiptSignable::from(self))
     }
 
     /// Computes the `Ht("veen/sig", …)` digest required by spec-1 for hub signatures.
     pub fn signing_tagged_hash(&self) -> Result<[u8; 32], CborError> {
-        let bytes = self.signing_bytes()?;
-        Ok(ht("veen/sig", &bytes))
+        tagged_hash("veen/sig", &ReceiptSignable::from(self))
     }
 
     /// Verifies `hub_sig` using the provided hub Ed25519 public key bytes.
