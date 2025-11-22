@@ -206,6 +206,27 @@ pub struct QueryDescriptor {
     pub meta: Option<JsonMap<String, Value>>,
 }
 
+fn normalize_required_list(
+    values: Vec<String>,
+    empty_error: QueryError,
+    invalid_error: QueryError,
+) -> Result<Vec<String>, QueryError> {
+    if values.is_empty() {
+        return Err(empty_error);
+    }
+
+    let normalized: Vec<String> = values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .collect();
+
+    if normalized.iter().any(|value| value.is_empty()) {
+        return Err(invalid_error);
+    }
+
+    Ok(normalized)
+}
+
 impl QueryDescriptor {
     /// Normalizes and validates the descriptor according to the specification.
     ///
@@ -221,33 +242,13 @@ impl QueryDescriptor {
             return Err(QueryError::UnsupportedVersion(version.into()));
         }
 
-        if self.scope.is_empty() {
-            return Err(QueryError::EmptyScope);
-        }
-
-        if self.projection.is_empty() {
-            return Err(QueryError::EmptyProjection);
-        }
-
-        let scope: Vec<String> = self
-            .scope
-            .into_iter()
-            .map(|value| value.trim().to_string())
-            .collect();
-
-        if scope.iter().any(|value| value.is_empty()) {
-            return Err(QueryError::InvalidScope);
-        }
-
-        let projection: Vec<String> = self
-            .projection
-            .into_iter()
-            .map(|value| value.trim().to_string())
-            .collect();
-
-        if projection.iter().any(|value| value.is_empty()) {
-            return Err(QueryError::InvalidProjection);
-        }
+        let scope =
+            normalize_required_list(self.scope, QueryError::EmptyScope, QueryError::InvalidScope)?;
+        let projection = normalize_required_list(
+            self.projection,
+            QueryError::EmptyProjection,
+            QueryError::InvalidProjection,
+        )?;
 
         let mut evidence = self.evidence;
         evidence.normalize()?;
