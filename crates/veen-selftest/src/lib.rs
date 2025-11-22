@@ -2,7 +2,7 @@ use std::{collections::HashSet, fmt};
 
 use anyhow::{anyhow, ensure, Context, Result};
 use ciborium::value::Value;
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::SigningKey;
 use rand::rngs::{OsRng, StdRng};
 use rand::{Rng, SeedableRng};
 use serde::de::DeserializeOwned;
@@ -10,14 +10,11 @@ use serde::Serialize;
 use serde_bytes::ByteBuf;
 
 use veen_core::meta::SchemaRegistry;
-use veen_core::wire::message::MSG_VERSION;
-use veen_core::wire::receipt::RECEIPT_VERSION;
 use veen_core::{
     h, AttachmentRoot, ClientId, ClientObservationIndex, ClientUsage, ClientUsageConfig, ContextId,
-    Label, LabelClassRecord, LeafHash, Mmr, MmrRoot, Msg, PayloadHeader, Profile, ProfileId,
-    RealmId, Receipt, SchemaDescriptor, SchemaId, SchemaOwner, StreamId, TransferId,
-    WalletDepositEvent, WalletId, WalletOpenEvent, WalletState, WalletTransferEvent, REALM_ID_LEN,
-    TRANSFER_ID_LEN, WALLET_ID_LEN,
+    Label, LabelClassRecord, LeafHash, Mmr, MmrRoot, Msg, PayloadHeader, RealmId, SchemaDescriptor,
+    SchemaId, SchemaOwner, TransferId, WalletDepositEvent, WalletId, WalletOpenEvent, WalletState,
+    WalletTransferEvent, REALM_ID_LEN, TRANSFER_ID_LEN, WALLET_ID_LEN,
 };
 
 pub mod metrics;
@@ -26,8 +23,10 @@ mod perf;
 mod process_harness;
 mod query;
 mod recorder;
+mod suites;
 
 use process_harness::{HardenedResult, IntegrationHarness, MetaOverlayResult};
+use suites::common::{SampleData, SequenceHarness};
 
 pub use metrics::{HistogramSnapshot, HubMetricsSnapshot};
 pub use overlays::run_overlays;
@@ -150,199 +149,6 @@ impl<'a> SelftestReporter<'a> {
         if let Some(report) = self.target.as_mut() {
             report.add_entry(entry);
         }
-    }
-}
-
-struct SampleData {
-    msg: Msg,
-    receipt: Receipt,
-    attachments: Vec<Vec<u8>>,
-    att_root: AttachmentRoot,
-    payload_header: PayloadHeader,
-    hub_public: [u8; 32],
-    mmr_root: MmrRoot,
-    stream_seq: u64,
-}
-
-impl SampleData {
-    fn generate() -> Result<Self> {
-        let mut rng = OsRng;
-        let client_signing = SigningKey::generate(&mut rng);
-        let hub_signing = SigningKey::generate(&mut rng);
-
-        let profile = Profile::default();
-        let profile_id = profile
-            .id()
-            .context("computing canonical profile identifier")?;
-
-        let stream_id = StreamId::from(h(b"selftest/core/stream"));
-        let label = Label::derive(b"selftest-routing", stream_id, 0);
-        let client_id = ClientId::from(*client_signing.verifying_key().as_bytes());
-
-        let ciphertext = b"selftest ciphertext payload".repeat(4);
-        let ct_hash = veen_core::CtHash::compute(&ciphertext);
-
-        let mut msg = Msg {
-            ver: MSG_VERSION,
-            profile_id,
-            label,
-            client_id,
-            client_seq: 1,
-            prev_ack: 0,
-            auth_ref: None,
-            ct_hash,
-            ciphertext,
-            sig: veen_core::Signature64::new([0u8; 64]),
-        };
-
-        let msg_digest = msg
-            .signing_tagged_hash()
-            .context("computing message signing digest")?;
-        let msg_signature = client_signing.sign(msg_digest.as_ref());
-        msg.sig = veen_core::Signature64::from(msg_signature.to_bytes());
-
-        let attachments: Vec<Vec<u8>> = vec![
-            b"attachment ciphertext 1".to_vec(),
-            b"attachment ciphertext 2".to_vec(),
-        ];
-        let att_root = AttachmentRoot::from_ciphertexts(attachments.iter().map(Vec::as_slice))
-            .ok_or_else(|| anyhow!("expected non-empty attachment set"))?;
-
-        let payload_header = PayloadHeader {
-            schema: SchemaId::from(veen_core::schema_wallet_transfer()),
-            parent_id: None,
-            att_root: Some(att_root),
-            cap_ref: None,
-            expires_at: None,
-        };
-
-        let mut mmr = Mmr::new();
-        let (stream_seq, mmr_root) = mmr.append(msg.leaf_hash());
-
-        let mut receipt = Receipt {
-            ver: RECEIPT_VERSION,
-            label,
-            stream_seq,
-            leaf_hash: msg.leaf_hash(),
-            mmr_root,
-            hub_ts: 1_700_000_000,
-            hub_sig: veen_core::Signature64::new([0u8; 64]),
-        };
-
-        let receipt_digest = receipt
-            .signing_tagged_hash()
-            .context("computing receipt signing digest")?;
-        let receipt_signature = hub_signing.sign(receipt_digest.as_ref());
-        receipt.hub_sig = veen_core::Signature64::from(receipt_signature.to_bytes());
-
-        Ok(Self {
-            msg,
-            receipt,
-            attachments,
-            att_root,
-            payload_header,
-            hub_public: *hub_signing.verifying_key().as_bytes(),
-            mmr_root,
-            stream_seq,
-        })
-    }
-}
-
-struct SequenceHarness {
-    client_signing: SigningKey,
-    hub_signing: SigningKey,
-    profile_id: ProfileId,
-    label: Label,
-    client_id: ClientId,
-    hub_public: [u8; 32],
-}
-
-impl SequenceHarness {
-    fn new() -> Result<Self> {
-        let mut rng = OsRng;
-        let client_signing = SigningKey::generate(&mut rng);
-        let hub_signing = SigningKey::generate(&mut rng);
-
-        let profile = Profile::default();
-        let profile_id = profile
-            .id()
-            .context("computing canonical profile identifier for sequence harness")?;
-
-        let stream_id = StreamId::from(h(b"selftest/core/sequence"));
-        let label = Label::derive(b"selftest-seq", stream_id, 0);
-        let client_id = ClientId::from(*client_signing.verifying_key().as_bytes());
-        let hub_public = *hub_signing.verifying_key().as_bytes();
-
-        Ok(Self {
-            client_signing,
-            hub_signing,
-            profile_id,
-            label,
-            client_id,
-            hub_public,
-        })
-    }
-
-    fn make_message(
-        &self,
-        mmr: &mut Mmr,
-        client_seq: u64,
-        prev_ack: u64,
-    ) -> Result<(Msg, Receipt, u64, MmrRoot)> {
-        let ciphertext = format!("selftest-seq-{client_seq}-ack-{prev_ack}").into_bytes();
-        let ct_hash = veen_core::CtHash::compute(&ciphertext);
-
-        let mut msg = Msg {
-            ver: veen_core::wire::message::MSG_VERSION,
-            profile_id: self.profile_id,
-            label: self.label,
-            client_id: self.client_id,
-            client_seq,
-            prev_ack,
-            auth_ref: None,
-            ct_hash,
-            ciphertext,
-            sig: veen_core::Signature64::new([0u8; 64]),
-        };
-
-        let msg_digest = msg
-            .signing_tagged_hash()
-            .context("computing signing digest for harness message")?;
-        let signature = self.client_signing.sign(msg_digest.as_ref());
-        msg.sig = veen_core::Signature64::from(signature.to_bytes());
-
-        let leaf = msg.leaf_hash();
-        let (stream_seq, mmr_root) = mmr.append(leaf);
-
-        let mut receipt = Receipt {
-            ver: veen_core::wire::receipt::RECEIPT_VERSION,
-            label: self.label,
-            stream_seq,
-            leaf_hash: leaf,
-            mmr_root,
-            hub_ts: 1_800_000_000,
-            hub_sig: veen_core::Signature64::new([0u8; 64]),
-        };
-
-        let receipt_digest = receipt
-            .signing_tagged_hash()
-            .context("computing signing digest for harness receipt")?;
-        let hub_signature = self.hub_signing.sign(receipt_digest.as_ref());
-        receipt.hub_sig = veen_core::Signature64::from(hub_signature.to_bytes());
-
-        Ok((msg, receipt, stream_seq, mmr_root))
-    }
-
-    fn hub_public(&self) -> &[u8; 32] {
-        &self.hub_public
-    }
-
-    fn label(&self) -> &Label {
-        &self.label
-    }
-
-    fn client_id(&self) -> ClientId {
-        self.client_id
     }
 }
 
