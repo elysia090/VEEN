@@ -1,5 +1,3 @@
-use std::io;
-
 use serde::{Deserialize, Serialize};
 use serde_bytes::Bytes;
 use thiserror::Error;
@@ -8,10 +6,15 @@ use crate::{
     hash::ht,
     label::Label,
     profile::ProfileId,
-    wire::types::{
-        AuthRef, ClientId, CtHash, LeafHash, Signature64, SignatureVerifyError, AEAD_NONCE_LEN,
+    wire::{
+        types::{
+            AuthRef, ClientId, CtHash, LeafHash, Signature64, SignatureVerifyError, AEAD_NONCE_LEN,
+        },
+        CborError,
     },
 };
+
+use super::signing::{serialize_signable, tagged_hash};
 
 /// Wire format version for `MSG` objects.
 pub const MSG_VERSION: u64 = 1;
@@ -33,8 +36,6 @@ pub struct Msg {
     pub ciphertext: Vec<u8>,
     pub sig: Signature64,
 }
-
-type CborError = ciborium::ser::Error<io::Error>;
 
 /// Errors produced when verifying `MSG.sig` against the embedded client_id.
 #[derive(Debug, Error)]
@@ -153,17 +154,13 @@ impl Msg {
     /// Serializes the message without the signature field using the canonical
     /// deterministic CBOR ordering required by spec-1.
     pub fn signing_bytes(&self) -> Result<Vec<u8>, CborError> {
-        let mut buf = Vec::new();
-        let view = MsgSignable::from(self);
-        ciborium::ser::into_writer(&view, &mut buf)?;
-        Ok(buf)
+        serialize_signable(&MsgSignable::from(self))
     }
 
     /// Computes the domain separated hash `Ht("veen/sig", …)` used for
     /// Ed25519 signatures over `MSG` objects.
     pub fn signing_tagged_hash(&self) -> Result<[u8; 32], CborError> {
-        let bytes = self.signing_bytes()?;
-        Ok(ht("veen/sig", &bytes))
+        tagged_hash("veen/sig", &MsgSignable::from(self))
     }
 
     /// Verifies `MSG.sig` using the embedded `client_id` and signing digest.
