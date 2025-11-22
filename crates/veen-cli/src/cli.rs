@@ -18,7 +18,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use rand::{rngs::OsRng, RngCore};
-use reqwest::{Client as HttpClient, Url};
+use reqwest::{Client as HttpClient, Response, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
@@ -11974,16 +11974,7 @@ impl HubHttpClient {
             .send()
             .await
             .context("performing hub GET request")?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to decode response>".to_string());
-            return Err(anyhow::Error::new(HubResponseError::new(
-                path, status, body,
-            )));
-        }
+        let response = Self::ensure_success(path, response).await?;
         response
             .json::<T>()
             .await
@@ -12005,16 +11996,7 @@ impl HubHttpClient {
             .send()
             .await
             .context("performing hub GET request")?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to decode response>".to_string());
-            return Err(anyhow::Error::new(HubResponseError::new(
-                path, status, body,
-            )));
-        }
+        let response = Self::ensure_success(path, response).await?;
         let bytes = response
             .bytes()
             .await
@@ -12036,16 +12018,7 @@ impl HubHttpClient {
             .send()
             .await
             .context("performing hub POST request")?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to decode response>".to_string());
-            return Err(anyhow::Error::new(HubResponseError::new(
-                path, status, body,
-            )));
-        }
+        let response = Self::ensure_success(path, response).await?;
         response
             .json::<R>()
             .await
@@ -12064,16 +12037,7 @@ impl HubHttpClient {
             .send()
             .await
             .context("performing hub POST request")?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to decode response>".to_string());
-            return Err(anyhow::Error::new(HubResponseError::new(
-                path, status, body,
-            )));
-        }
+        Self::ensure_success(path, response).await?;
         Ok(())
     }
 
@@ -12087,16 +12051,7 @@ impl HubHttpClient {
             .send()
             .await
             .context("performing hub POST request")?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to decode response>".to_string());
-            return Err(anyhow::Error::new(HubResponseError::new(
-                path, status, body,
-            )));
-        }
+        Self::ensure_success(path, response).await?;
         Ok(())
     }
 
@@ -12113,22 +12068,28 @@ impl HubHttpClient {
             .send()
             .await
             .context("performing hub POST request")?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to decode response>".to_string());
-            return Err(anyhow::Error::new(HubResponseError::new(
-                path, status, body,
-            )));
-        }
+        let response = Self::ensure_success(path, response).await?;
         let bytes = response
             .bytes()
             .await
             .context("reading hub response body")?;
         let mut cursor = Cursor::new(bytes.as_ref());
         ciborium::de::from_reader(&mut cursor).context("decoding hub response body")
+    }
+
+    async fn ensure_success(path: &str, response: Response) -> Result<Response> {
+        if response.status().is_success() {
+            Ok(response)
+        } else {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to decode response>".to_string());
+            Err(anyhow::Error::new(HubResponseError::new(
+                path, status, body,
+            )))
+        }
     }
 }
 
