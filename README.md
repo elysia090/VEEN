@@ -58,9 +58,12 @@ the VEEN protocol stack:
 ### Reference specifications
 
 The current release targets the v0.0.1 protocol suite described in
-[`doc/spec-1.txt`](doc/spec-1.txt) through [`doc/spec-3.txt`](doc/spec-3.txt),
-along with the operational requirements recorded in
-[`doc/CLI-GOALS.txt`](doc/CLI-GOALS.txt) and
+[`doc/spec-1.txt`](doc/spec-1.txt) through [`doc/spec-5.txt`](doc/spec-5.txt),
+along with overlay/application references such as
+[`doc/wallet-spec.txt`](doc/wallet-spec.txt) and
+[`doc/products-spec-1.txt`](doc/products-spec-1.txt). Operational goals are
+captured in [`doc/CLI-GOALS-1.txt`](doc/CLI-GOALS-1.txt) through
+[`doc/CLI-GOALS-3.txt`](doc/CLI-GOALS-3.txt) and
 [`doc/OS-GOALS.txt`](doc/OS-GOALS.txt). Compatibility and minimum supported
 toolchain versions are pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
 
@@ -173,7 +176,10 @@ exchange messages locally:
      --foreground
    ```
    Leave this terminal running. Logs include the generated hub identifier and
-   listen address. Use `Ctrl+C` to stop the hub when finished.
+   listen address. Use `Ctrl+C` to stop the hub when finished. Hub references
+   passed to other commands accept either local data directories
+   (`/tmp/veen-hub`, optionally prefixed with `file://`) or HTTP(S) endpoints
+   when talking to a remote service.
 2. **Generate a client identity** in a second terminal
    ```shell
    target/release/veen keygen --out /tmp/veen-client
@@ -248,7 +254,9 @@ The CLI exposes matching switches on `veen send` and `veen rpc call`:
   matching difficulty and challenge captured from the hub.
 
 This flow allows operators to either have the CLI solve a PoW automatically or
-to reuse a nonce received out-of-band from another system.
+to reuse a nonce received out-of-band from another system. Hub operators can
+enforce PoW on the service side with `veen hub start --pow-difficulty` (or
+`veen-hub run --pow-difficulty` when driving the runtime directly).
 
 ### Containerised deployment
 
@@ -357,6 +365,29 @@ is preferred.
   ```
   The CLI prints the effective namespace and `veen-hub-NAMESPACE` DNS entry
   after waiting for ready replicas.
+- **Dispatch disposable jobs** for ad-hoc messaging tasks inside the cluster
+  (using mounted client and capability material, see
+  [Disposable Jobs for client workflows](#disposable-jobs-for-client-workflows)):
+  ```shell
+  target/release/veen kube job send \
+    --cluster-context kind-veens \
+    --namespace veen-tenants \
+    --hub-service veen-hub-alpha \
+    --client-secret my-client-secret \
+    --cap-secret my-cap-secret \
+    --label core/main \
+    --body '{"text":"hello-veens"}'
+  target/release/veen kube job stream \
+    --cluster-context kind-veens \
+    --namespace veen-tenants \
+    --hub-service veen-hub-alpha \
+    --client-secret my-client-secret \
+    --cap-secret my-cap-secret \
+    --label core/main \
+    --from 0
+  ```
+  Jobs use the same deterministic naming as deployments, mount secrets for
+  client/cap state, and inherit the hub service DNS entry.
 - **Operate deployed hubs** using the shared naming scheme:
   - `veen kube delete --cluster-context kind-veens --namespace veen-tenants --name alpha --purge-pvcs`
     removes the Deployment, Service, Role, RoleBinding, ServiceAccount, and PVCs
@@ -370,7 +401,9 @@ is preferred.
     data directory, and scale back up.
 
 These commands keep hub manifests reproducible and remove the need for bespoke
-shell wrappers when managing Kubernetes-native deployments.
+shell wrappers when managing Kubernetes-native deployments. The rendered
+manifests listen on port `8080` inside the cluster by default, matching the
+probe and service configuration emitted by the CLI.
 
 ### Snapshot verification
 
