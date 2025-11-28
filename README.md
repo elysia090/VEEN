@@ -515,7 +515,7 @@ exits with status 0, as required by OS-GOALS.
 Use the [`Justfile`](Justfile) to run common development tasks:
 
 ```shell
-just ci            # fmt + clippy + cargo test --all
+just ci            # fmt + clippy + cargo test --workspace
 just fmt           # format the workspace in-place
 just cli -- --help # run the veen binary directly from cargo
 ```
@@ -536,13 +536,21 @@ end-to-end HTTP request latencies.
 
 - Run the Rust unit tests for the entire workspace:
   ```shell
-  cargo test --all
+  cargo test --workspace
   ```
 - Execute the core self-test suite (starts disposable hubs on random ports):
   ```shell
   target/release/veen selftest core
   ```
-- Execute the full battery (core + overlays + fuzz/property checks):
+- Run property-based checks directly:
+  ```shell
+  target/release/veen selftest props
+  ```
+- Exercise the wire-level fuzz tests:
+  ```shell
+  target/release/veen selftest fuzz
+  ```
+- Execute the aggregated core battery (core + props + fuzz):
   ```shell
   target/release/veen selftest all
   ```
@@ -553,7 +561,7 @@ end-to-end HTTP request latencies.
   target/release/veen selftest hardened
   target/release/veen selftest meta
   ```
-- Run the aggregated "plus" flow (core + overlays + lifecycle + meta):
+- Run the aggregated "plus" flow (core battery + overlays + lifecycle + meta):
   ```shell
   target/release/veen selftest plus
   ```
