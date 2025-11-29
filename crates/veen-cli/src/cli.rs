@@ -1154,6 +1154,9 @@ enum SelftestCommand {
     Meta,
     /// Run every v0.0.1+ suite sequentially with aggregated reporting.
     Plus,
+    /// Run the v0.0.1++ orchestration suite.
+    #[command(name = "plus-plus")]
+    PlusPlus,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -3149,6 +3152,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
             SelftestCommand::Hardened => handle_selftest_hardened().await,
             SelftestCommand::Meta => handle_selftest_meta().await,
             SelftestCommand::Plus => handle_selftest_plus().await,
+            SelftestCommand::PlusPlus => handle_selftest_plus_plus().await,
         },
     }
 }
@@ -8760,6 +8764,7 @@ enum SelftestSuite {
     Hardened,
     Meta,
     Plus,
+    PlusPlus,
 }
 
 impl SelftestSuite {
@@ -8774,6 +8779,7 @@ impl SelftestSuite {
             SelftestSuite::Hardened => "hardened",
             SelftestSuite::Meta => "meta",
             SelftestSuite::Plus => "plus",
+            SelftestSuite::PlusPlus => "plus-plus",
         }
     }
 }
@@ -9758,6 +9764,19 @@ async fn handle_selftest_plus() -> Result<()> {
         .join(", ");
     let err = anyhow!(format!("self-test suites failed: {joined}"));
     Err(anyhow::Error::new(SelftestFailure::new(err)))
+}
+
+async fn handle_selftest_plus_plus() -> Result<()> {
+    record_selftest_stub_marker(SelftestSuite::PlusPlus)?;
+    println!("running VEEN plus-plus self-tests...");
+
+    handle_selftest_plus()
+        .await
+        .map_err(|err| anyhow::Error::new(SelftestFailure::new(err)))?;
+
+    log_cli_goal("CLI.SELFTEST.PLUSPLUS");
+    println!("VEEN self-test plus-plus suites completed successfully");
+    Ok(())
 }
 
 async fn flush_hub_storage(data_dir: &Path) -> Result<()> {

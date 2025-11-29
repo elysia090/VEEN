@@ -87,3 +87,23 @@ fn selftest_plus_runs_all_suites_in_order() {
     .collect::<Vec<_>>();
     assert_eq!(suites, expected);
 }
+
+#[test]
+fn selftest_plus_plus_runs_plus_suite() {
+    let suites = run_stubbed_selftest(&["selftest", "plus-plus"]);
+    let expected = vec![
+        "plus-plus",
+        "plus",
+        "core",
+        "props",
+        "fuzz",
+        "federated",
+        "kex1",
+        "hardened",
+        "meta",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect::<Vec<_>>();
+    assert_eq!(suites, expected);
+}
