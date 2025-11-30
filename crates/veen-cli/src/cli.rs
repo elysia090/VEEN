@@ -7,6 +7,7 @@ use std::io::{Cursor, Write as StdWrite};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command as StdCommand, Stdio};
+use std::str::FromStr;
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1135,6 +1136,29 @@ enum AnchorCommand {
 enum RetentionCommand {
     /// Show configured on-disk retention for a hub data directory.
     Show(RetentionShowArgs),
+    /// Configure on-disk retention for a hub data directory.
+    Set(RetentionSetArgs),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RetentionValue {
+    Indefinite,
+    Seconds(u64),
+}
+
+impl FromStr for RetentionValue {
+    type Err = String;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        if input.eq_ignore_ascii_case("indefinite") {
+            return Ok(Self::Indefinite);
+        }
+
+        input
+            .parse::<u64>()
+            .map(Self::Seconds)
+            .map_err(|_| "expected <seconds> or 'indefinite'".to_string())
+    }
 }
 
 #[derive(Subcommand)]
@@ -2307,8 +2331,24 @@ struct AnchorVerifyArgs {
 
 #[derive(Args)]
 struct RetentionShowArgs {
-    #[arg(long)]
+    #[arg(long, value_name = "DIR")]
     data_dir: PathBuf,
+}
+
+#[derive(Args, Clone, Debug)]
+struct RetentionSetArgs {
+    /// Hub data directory containing retention configuration.
+    #[arg(long, value_name = "DIR")]
+    data_dir: PathBuf,
+    /// Retention window for receipts (seconds or "indefinite").
+    #[arg(long, value_name = "SECONDS|indefinite")]
+    receipts: Option<RetentionValue>,
+    /// Retention window for payloads (seconds or "indefinite").
+    #[arg(long, value_name = "SECONDS|indefinite")]
+    payloads: Option<RetentionValue>,
+    /// Retention window for checkpoints (seconds or "indefinite").
+    #[arg(long, value_name = "SECONDS|indefinite")]
+    checkpoints: Option<RetentionValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3133,6 +3173,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
         },
         Command::Retention(cmd) => match cmd {
             RetentionCommand::Show(args) => handle_retention_show(args).await,
+            RetentionCommand::Set(args) => handle_retention_set(args).await,
         },
         Command::HubTls(cmd) => match cmd {
             HubTlsCommand::TlsInfo(args) => handle_hub_tls_info(args).await,
@@ -8755,6 +8796,61 @@ async fn handle_anchor_verify(args: AnchorVerifyArgs) -> Result<()> {
     Ok(())
 }
 
+fn retention_value_to_json(value: RetentionValue) -> JsonValue {
+    match value {
+        RetentionValue::Indefinite => JsonValue::String("indefinite".to_string()),
+        RetentionValue::Seconds(value) => JsonValue::Number(value.into()),
+    }
+}
+
+async fn handle_retention_set(args: RetentionSetArgs) -> Result<()> {
+    let retention_path = args.data_dir.join(STATE_DIR).join(RETENTION_CONFIG_FILE);
+    let mut retention = if fs::try_exists(&retention_path)
+        .await
+        .with_context(|| format!("checking retention config {}", retention_path.display()))?
+    {
+        read_json_file(&retention_path).await?
+    } else {
+        JsonValue::Object(JsonMap::new())
+    };
+
+    let map = retention.as_object_mut().ok_or_else(|| {
+        CliUsageError::new(format!(
+            "existing retention config at {} is not a JSON object",
+            retention_path.display()
+        ))
+    })?;
+
+    if let Some(value) = args.receipts {
+        map.insert("receipts".to_string(), retention_value_to_json(value));
+    }
+    if let Some(value) = args.payloads {
+        map.insert("payloads".to_string(), retention_value_to_json(value));
+    }
+    if let Some(value) = args.checkpoints {
+        map.insert("checkpoints".to_string(), retention_value_to_json(value));
+    }
+
+    if map.is_empty() {
+        return Err(anyhow!(CliUsageError::new(
+            "no retention values provided; nothing to update".to_string()
+        )));
+    }
+
+    write_json_file(&retention_path, &retention).await?;
+    println!(
+        "updated retention configuration at {}",
+        retention_path.display()
+    );
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&retention).context("formatting retention configuration")?
+    );
+
+    log_cli_goal("CLI.COMP0.RETENTION_SET");
+    Ok(())
+}
+
 async fn handle_retention_show(args: RetentionShowArgs) -> Result<()> {
     let data_dir = &args.data_dir;
     let retention_path = data_dir.join(STATE_DIR).join(RETENTION_CONFIG_FILE);
@@ -10445,6 +10541,19 @@ mod tests {
             .contains("pow-difficulty must be greater than zero"));
     }
 
+    #[test]
+    fn retention_value_parser_supports_seconds_and_indefinite() {
+        assert_eq!(
+            "600".parse::<RetentionValue>().unwrap(),
+            RetentionValue::Seconds(600)
+        );
+        assert_eq!(
+            "indefinite".parse::<RetentionValue>().unwrap(),
+            RetentionValue::Indefinite
+        );
+        assert!("ten".parse::<RetentionValue>().is_err());
+    }
+
     async fn write_test_hub_key(data_dir: &Path) -> anyhow::Result<()> {
         let path = data_dir.join(HUB_KEY_FILE);
         if tokio::fs::try_exists(&path)
@@ -10552,6 +10661,26 @@ mod tests {
             .await
             .expect_err("expected namespace validation failure");
         assert!(err.to_string().contains("namespace"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retention_set_updates_requested_values() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let args = RetentionSetArgs {
+            data_dir: dir.path().to_path_buf(),
+            receipts: Some(RetentionValue::Seconds(3600)),
+            payloads: Some(RetentionValue::Indefinite),
+            checkpoints: None,
+        };
+
+        super::handle_retention_set(args).await?;
+
+        let retention_path = dir.path().join(STATE_DIR).join(RETENTION_CONFIG_FILE);
+        let stored: Value = read_json_file(&retention_path).await?;
+        assert_eq!(stored.get("receipts"), Some(&json!(3600u64)));
+        assert_eq!(stored.get("payloads"), Some(&json!("indefinite")));
+        assert!(stored.get("checkpoints").is_none());
         Ok(())
     }
 
