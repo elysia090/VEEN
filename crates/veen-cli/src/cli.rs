@@ -1217,6 +1217,9 @@ struct HubStartArgs {
     foreground: bool,
     #[arg(long, value_enum, value_name = "LEVEL")]
     log_level: Option<HubLogLevel>,
+    /// Require proof-of-work from clients before accepting submissions.
+    #[arg(long, value_name = "BITS")]
+    pow_difficulty: Option<u8>,
 }
 
 #[derive(Args)]
@@ -3256,7 +3259,27 @@ fn init_tracing() {
     let _ = subscriber.try_init();
 }
 
+fn validate_pow_difficulty(pow_difficulty: Option<u8>) -> Result<()> {
+    if let Some(0) = pow_difficulty {
+        bail_usage!("--pow-difficulty must be greater than zero");
+    }
+
+    Ok(())
+}
+
+fn hub_start_overrides(profile_id: &str, pow_difficulty: Option<u8>) -> Result<HubConfigOverrides> {
+    validate_pow_difficulty(pow_difficulty)?;
+
+    Ok(HubConfigOverrides {
+        profile_id: Some(profile_id.to_string()),
+        pow_difficulty,
+        ..HubConfigOverrides::default()
+    })
+}
+
 async fn handle_hub_start(args: HubStartArgs) -> Result<()> {
+    validate_pow_difficulty(args.pow_difficulty)?;
+
     if !args.foreground && env::var_os("VEEN_CLI_BACKGROUND").is_none() {
         spawn_background_hub(&args).await?;
         return Ok(());
@@ -3284,17 +3307,16 @@ async fn run_hub_foreground(args: HubStartArgs) -> Result<()> {
         profile_id,
         foreground,
         log_level,
+        pow_difficulty,
     } = args;
 
     let profile_id = resolve_profile_id(profile_id)?;
     let log_level_str = log_level.as_ref().map(ToString::to_string);
 
+    let overrides = hub_start_overrides(&profile_id, pow_difficulty)?;
+
     let key_info = ensure_hub_key_material(&data_dir).await?;
 
-    let overrides = HubConfigOverrides {
-        profile_id: Some(profile_id.clone()),
-        ..HubConfigOverrides::default()
-    };
     let runtime_config = HubRuntimeConfig::from_sources(
         listen,
         data_dir.clone(),
@@ -3344,6 +3366,9 @@ async fn run_hub_foreground(args: HubStartArgs) -> Result<()> {
         if let Some(level) = &log_level_str {
             println!("log_level: {level}");
         }
+        if let Some(pow_difficulty) = pow_difficulty {
+            println!("pow_difficulty: {pow_difficulty}");
+        }
         println!("running hub in foreground; press Ctrl+C to stop");
     }
 
@@ -3375,6 +3400,11 @@ async fn spawn_background_hub(args: &HubStartArgs) -> Result<()> {
     if let Some(ref level) = args.log_level {
         command.arg("--log-level").arg(level.to_string());
         command.env("RUST_LOG", format!("veen_hub={level}"));
+    }
+    if let Some(pow_difficulty) = args.pow_difficulty {
+        command
+            .arg("--pow-difficulty")
+            .arg(pow_difficulty.to_string());
     }
     command.arg("--foreground");
     command.env("VEEN_CLI_BACKGROUND", "1");
@@ -10383,6 +10413,36 @@ mod tests {
             }
             _ => panic!("unexpected command parsed"),
         }
+    }
+
+    #[test]
+    fn hub_start_accepts_pow_difficulty() {
+        let cli = Cli::parse_from([
+            "veen",
+            "hub",
+            "start",
+            "--listen",
+            "127.0.0.1:8080",
+            "--data-dir",
+            "/tmp/veen",
+            "--pow-difficulty",
+            "6",
+        ]);
+
+        match cli.command {
+            Command::Hub(HubCommand::Start(args)) => {
+                assert_eq!(args.pow_difficulty, Some(6));
+            }
+            _ => panic!("unexpected command parsed"),
+        }
+    }
+
+    #[test]
+    fn hub_start_rejects_zero_pow_difficulty() {
+        let err = super::hub_start_overrides("profile", Some(0)).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("pow-difficulty must be greater than zero"));
     }
 
     async fn write_test_hub_key(data_dir: &Path) -> anyhow::Result<()> {
