@@ -901,6 +901,9 @@ enum HubCommand {
     /// Inspect hub key and capability lifecycle policy.
     #[command(name = "kex-policy")]
     KexPolicy(HubKexPolicyArgs),
+    /// Inspect TLS configuration for a hub endpoint.
+    #[command(name = "tls-info")]
+    TlsInfo(HubTlsInfoArgs),
     /// Inspect admission pipeline configuration and metrics.
     Admission(HubAdmissionArgs),
     /// Inspect recent admission failures.
@@ -3010,6 +3013,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
             HubCommand::Profile(args) => handle_hub_profile(args).await,
             HubCommand::Role(args) => handle_hub_role(args).await,
             HubCommand::KexPolicy(args) => handle_hub_kex_policy(args).await,
+            HubCommand::TlsInfo(args) => handle_hub_tls_info(args).await,
             HubCommand::Admission(args) => handle_hub_admission(args).await,
             HubCommand::AdmissionLog(args) => handle_hub_admission_log(args).await,
             HubCommand::CheckpointLatest(args) => {
@@ -10318,6 +10322,7 @@ mod tests {
     use anyhow::bail;
     use ciborium::de::from_reader;
     use ciborium::ser::into_writer;
+    use clap::Parser;
     use ed25519_dalek::{Signature, Verifier};
     use hyper::body::to_bytes;
     use hyper::service::{make_service_fn, service_fn};
@@ -10366,6 +10371,18 @@ mod tests {
 
         let no_flag = vec![OsString::from("veen"), OsString::from("hub")];
         assert!(!super::args_request_json_output(&no_flag));
+    }
+
+    #[test]
+    fn hub_tls_info_is_nested_under_hub_command() {
+        let cli = Cli::parse_from(["veen", "hub", "tls-info", "--hub", "http://localhost:8080"]);
+
+        match cli.command {
+            Command::Hub(HubCommand::TlsInfo(args)) => {
+                assert_eq!(args.hub.hub, Some("http://localhost:8080".to_string()));
+            }
+            _ => panic!("unexpected command parsed"),
+        }
     }
 
     async fn write_test_hub_key(data_dir: &Path) -> anyhow::Result<()> {
