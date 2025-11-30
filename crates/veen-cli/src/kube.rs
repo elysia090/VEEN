@@ -28,7 +28,7 @@ use tokio::time::sleep;
 use tokio_stream::StreamExt;
 use tokio_util::{compat::FuturesAsyncReadCompatExt, io::ReaderStream};
 
-use crate::CliUsageError;
+use crate::{read_env_descriptor, CliUsageError};
 
 type JsonMap = serde_json::Map<String, JsonValue>;
 
@@ -81,12 +81,50 @@ pub(crate) enum KubeJobCommand {
     Stream(KubeJobStreamArgs),
 }
 
+async fn resolve_cluster_and_namespace(
+    env: &Option<PathBuf>,
+    cluster_context: &Option<String>,
+    namespace: &Option<String>,
+    require_namespace: bool,
+) -> Result<(String, Option<String>)> {
+    let descriptor = match env {
+        Some(path) => Some(read_env_descriptor(path).await?),
+        None => None,
+    };
+
+    let cluster_context = cluster_context
+        .as_ref()
+        .cloned()
+        .or_else(|| descriptor.as_ref().map(|env| env.cluster_context.clone()))
+        .ok_or_else(|| CliUsageError::new("cluster-context or env descriptor required".into()))?;
+
+    let namespace = namespace
+        .as_ref()
+        .cloned()
+        .or_else(|| descriptor.as_ref().map(|env| env.namespace.clone()));
+
+    if require_namespace {
+        let namespace = namespace
+            .ok_or_else(|| CliUsageError::new("namespace or env descriptor required".into()))?;
+        Ok((cluster_context, Some(namespace)))
+    } else {
+        Ok((cluster_context, namespace))
+    }
+}
+
+fn require_namespace(namespace: Option<String>) -> Result<String> {
+    Ok(namespace
+        .ok_or_else(|| CliUsageError::new("namespace or env descriptor required".into()))?)
+}
+
 #[derive(Args, Debug, Clone)]
 pub(crate) struct KubeRenderArgs {
     #[arg(long = "cluster-context")]
-    pub(crate) cluster_context: String,
+    pub(crate) cluster_context: Option<String>,
     #[arg(long)]
-    pub(crate) namespace: String,
+    pub(crate) namespace: Option<String>,
+    #[arg(long)]
+    pub(crate) env: Option<PathBuf>,
     #[arg(long)]
     pub(crate) name: String,
     #[arg(long)]
@@ -114,7 +152,9 @@ pub(crate) struct KubeRenderArgs {
 #[derive(Args, Debug, Clone)]
 pub(crate) struct KubeApplyArgs {
     #[arg(long = "cluster-context")]
-    pub(crate) cluster_context: String,
+    pub(crate) cluster_context: Option<String>,
+    #[arg(long)]
+    pub(crate) env: Option<PathBuf>,
     #[arg(long = "file")]
     pub(crate) file: PathBuf,
     #[arg(long = "wait-seconds")]
@@ -124,9 +164,11 @@ pub(crate) struct KubeApplyArgs {
 #[derive(Args, Debug, Clone)]
 pub(crate) struct KubeDeleteArgs {
     #[arg(long = "cluster-context")]
-    pub(crate) cluster_context: String,
+    pub(crate) cluster_context: Option<String>,
     #[arg(long)]
-    pub(crate) namespace: String,
+    pub(crate) namespace: Option<String>,
+    #[arg(long)]
+    pub(crate) env: Option<PathBuf>,
     #[arg(long)]
     pub(crate) name: String,
     #[arg(long = "purge-pvcs")]
@@ -136,9 +178,11 @@ pub(crate) struct KubeDeleteArgs {
 #[derive(Args, Debug, Clone)]
 pub(crate) struct KubeStatusArgs {
     #[arg(long = "cluster-context")]
-    pub(crate) cluster_context: String,
+    pub(crate) cluster_context: Option<String>,
     #[arg(long)]
-    pub(crate) namespace: String,
+    pub(crate) namespace: Option<String>,
+    #[arg(long)]
+    pub(crate) env: Option<PathBuf>,
     #[arg(long)]
     pub(crate) name: String,
     #[arg(long)]
@@ -148,9 +192,11 @@ pub(crate) struct KubeStatusArgs {
 #[derive(Args, Debug, Clone)]
 pub(crate) struct KubeLogsArgs {
     #[arg(long = "cluster-context")]
-    pub(crate) cluster_context: String,
+    pub(crate) cluster_context: Option<String>,
     #[arg(long)]
-    pub(crate) namespace: String,
+    pub(crate) namespace: Option<String>,
+    #[arg(long)]
+    pub(crate) env: Option<PathBuf>,
     #[arg(long)]
     pub(crate) name: String,
     #[arg(long = "pod")]
@@ -164,9 +210,11 @@ pub(crate) struct KubeLogsArgs {
 #[derive(Args, Debug, Clone)]
 pub(crate) struct KubeBackupArgs {
     #[arg(long = "cluster-context")]
-    pub(crate) cluster_context: String,
+    pub(crate) cluster_context: Option<String>,
     #[arg(long)]
-    pub(crate) namespace: String,
+    pub(crate) namespace: Option<String>,
+    #[arg(long)]
+    pub(crate) env: Option<PathBuf>,
     #[arg(long)]
     pub(crate) name: String,
     #[arg(long = "snapshot-name")]
@@ -178,9 +226,11 @@ pub(crate) struct KubeBackupArgs {
 #[derive(Args, Debug, Clone)]
 pub(crate) struct KubeRestoreArgs {
     #[arg(long = "cluster-context")]
-    pub(crate) cluster_context: String,
+    pub(crate) cluster_context: Option<String>,
     #[arg(long)]
-    pub(crate) namespace: String,
+    pub(crate) namespace: Option<String>,
+    #[arg(long)]
+    pub(crate) env: Option<PathBuf>,
     #[arg(long)]
     pub(crate) name: String,
     #[arg(long = "snapshot-name")]
@@ -192,9 +242,11 @@ pub(crate) struct KubeRestoreArgs {
 #[derive(Args, Debug, Clone)]
 pub(crate) struct KubeJobSendArgs {
     #[arg(long = "cluster-context")]
-    pub(crate) cluster_context: String,
+    pub(crate) cluster_context: Option<String>,
     #[arg(long)]
-    pub(crate) namespace: String,
+    pub(crate) namespace: Option<String>,
+    #[arg(long)]
+    pub(crate) env: Option<PathBuf>,
     #[arg(long = "hub-service")]
     pub(crate) hub_service: String,
     #[arg(long = "client-secret")]
@@ -220,9 +272,11 @@ pub(crate) struct KubeJobSendArgs {
 #[derive(Args, Debug, Clone)]
 pub(crate) struct KubeJobStreamArgs {
     #[arg(long = "cluster-context")]
-    pub(crate) cluster_context: String,
+    pub(crate) cluster_context: Option<String>,
     #[arg(long)]
-    pub(crate) namespace: String,
+    pub(crate) namespace: Option<String>,
+    #[arg(long)]
+    pub(crate) env: Option<PathBuf>,
     #[arg(long = "hub-service")]
     pub(crate) hub_service: String,
     #[arg(long = "client-secret")]
@@ -292,6 +346,7 @@ async fn handle_render(args: KubeRenderArgs) -> Result<()> {
     let KubeRenderArgs {
         cluster_context,
         namespace,
+        env,
         name,
         image,
         data_pvc,
@@ -307,7 +362,9 @@ async fn handle_render(args: KubeRenderArgs) -> Result<()> {
     if replicas == 0 {
         return Err(CliUsageError::new("--replicas must be >= 1".to_string()).into());
     }
-    let _ = cluster_context;
+    let (_cluster_context, namespace) =
+        resolve_cluster_and_namespace(&env, &cluster_context, &namespace, true).await?;
+    let namespace = require_namespace(namespace)?;
     let resources_cpu = parse_resource_quantity(resources_cpu.as_deref())?;
     let resources_mem = parse_resource_quantity(resources_mem.as_deref())?;
     let config_data = match config {
@@ -356,9 +413,12 @@ async fn handle_render(args: KubeRenderArgs) -> Result<()> {
 async fn handle_apply(args: KubeApplyArgs) -> Result<()> {
     let KubeApplyArgs {
         cluster_context,
+        env,
         file,
         wait_seconds,
     } = args;
+    let (cluster_context, _) =
+        resolve_cluster_and_namespace(&env, &cluster_context, &None, false).await?;
     let client = kube_client(&cluster_context).await?;
     let docs = read_manifest_file(&file).await?;
     for doc in &docs {
@@ -385,9 +445,13 @@ async fn handle_delete(args: KubeDeleteArgs) -> Result<()> {
     let KubeDeleteArgs {
         cluster_context,
         namespace,
+        env,
         name,
         purge_pvcs,
     } = args;
+    let (cluster_context, namespace) =
+        resolve_cluster_and_namespace(&env, &cluster_context, &namespace, true).await?;
+    let namespace = require_namespace(namespace)?;
     let client = kube_client(&cluster_context).await?;
     let base = resource_names(&name);
 
@@ -419,9 +483,13 @@ async fn handle_status(args: KubeStatusArgs) -> Result<()> {
     let KubeStatusArgs {
         cluster_context,
         namespace,
+        env,
         name,
         json,
     } = args;
+    let (cluster_context, namespace) =
+        resolve_cluster_and_namespace(&env, &cluster_context, &namespace, true).await?;
+    let namespace = require_namespace(namespace)?;
     let client = kube_client(&cluster_context).await?;
     let base = resource_names(&name);
 
@@ -525,11 +593,15 @@ async fn handle_logs(args: KubeLogsArgs) -> Result<()> {
     let KubeLogsArgs {
         cluster_context,
         namespace,
+        env,
         name,
         pod,
         follow,
         since,
     } = args;
+    let (cluster_context, namespace) =
+        resolve_cluster_and_namespace(&env, &cluster_context, &namespace, true).await?;
+    let namespace = require_namespace(namespace)?;
     let client = kube_client(&cluster_context).await?;
     let pods_api: Api<Pod> = Api::namespaced(client.clone(), &namespace);
 
@@ -574,12 +646,16 @@ async fn handle_logs(args: KubeLogsArgs) -> Result<()> {
 
 async fn handle_backup(args: KubeBackupArgs) -> Result<()> {
     let KubeBackupArgs {
-        cluster_context: _,
+        cluster_context,
         namespace,
+        env,
         name,
         snapshot_name,
         target_uri,
     } = args;
+    let (_cluster_context, namespace) =
+        resolve_cluster_and_namespace(&env, &cluster_context, &namespace, true).await?;
+    let namespace = require_namespace(namespace)?;
     let client = HttpClient::new();
     let endpoint = format!("http://{}/admin/backup", hub_service_dns(&namespace, &name));
     let payload = json!({
@@ -601,10 +677,14 @@ async fn handle_restore(args: KubeRestoreArgs) -> Result<()> {
     let KubeRestoreArgs {
         cluster_context,
         namespace,
+        env,
         name,
         snapshot_name,
         source_uri,
     } = args;
+    let (cluster_context, namespace) =
+        resolve_cluster_and_namespace(&env, &cluster_context, &namespace, true).await?;
+    let namespace = require_namespace(namespace)?;
     let kube = kube_client(&cluster_context).await?;
     let base = resource_names(&name);
     let deployment_api: Api<Deployment> = Api::namespaced(kube.clone(), &namespace);
@@ -660,22 +740,34 @@ async fn handle_restore(args: KubeRestoreArgs) -> Result<()> {
     Ok(())
 }
 
-async fn handle_job_send(args: KubeJobSendArgs) -> Result<()> {
-    let env = match args.env_file {
-        Some(ref path) => parse_env_file(path).await?,
+async fn handle_job_send(mut args: KubeJobSendArgs) -> Result<()> {
+    let env = match args.env_file.as_ref() {
+        Some(path) => parse_env_file(path).await?,
         None => Vec::new(),
     };
+    let (cluster_context, namespace) =
+        resolve_cluster_and_namespace(&args.env, &args.cluster_context, &args.namespace, true)
+            .await?;
+    let namespace = require_namespace(namespace)?;
+    args.cluster_context = Some(cluster_context.clone());
+    args.namespace = Some(namespace);
     let job = build_job_send_manifest(&args, &env)?;
-    run_job(&args.cluster_context, job).await
+    run_job(&cluster_context, job).await
 }
 
-async fn handle_job_stream(args: KubeJobStreamArgs) -> Result<()> {
-    let env = match args.env_file {
-        Some(ref path) => parse_env_file(path).await?,
+async fn handle_job_stream(mut args: KubeJobStreamArgs) -> Result<()> {
+    let env = match args.env_file.as_ref() {
+        Some(path) => parse_env_file(path).await?,
         None => Vec::new(),
     };
+    let (cluster_context, namespace) =
+        resolve_cluster_and_namespace(&args.env, &args.cluster_context, &args.namespace, true)
+            .await?;
+    let namespace = require_namespace(namespace)?;
+    args.cluster_context = Some(cluster_context.clone());
+    args.namespace = Some(namespace);
     let job = build_job_stream_manifest(&args, &env)?;
-    run_job(&args.cluster_context, job).await
+    run_job(&cluster_context, job).await
 }
 
 async fn store_snapshot(uri: &str, body: &str) -> Result<()> {
@@ -917,9 +1009,13 @@ struct CliJobConfig<'a> {
 }
 
 fn build_job_send_manifest(args: &KubeJobSendArgs, env: &[EnvVar]) -> Result<Job> {
+    let namespace = args
+        .namespace
+        .as_deref()
+        .ok_or_else(|| CliUsageError::new("namespace required for job manifest".into()))?;
     build_cli_job(
         CliJobConfig {
-            namespace: &args.namespace,
+            namespace,
             generate_name: JOB_SEND_GENERATE_NAME,
             image: &args.image,
             env,
@@ -932,9 +1028,13 @@ fn build_job_send_manifest(args: &KubeJobSendArgs, env: &[EnvVar]) -> Result<Job
 }
 
 fn build_job_stream_manifest(args: &KubeJobStreamArgs, env: &[EnvVar]) -> Result<Job> {
+    let namespace = args
+        .namespace
+        .as_deref()
+        .ok_or_else(|| CliUsageError::new("namespace required for job manifest".into()))?;
     build_cli_job(
         CliJobConfig {
-            namespace: &args.namespace,
+            namespace,
             generate_name: JOB_STREAM_GENERATE_NAME,
             image: &args.image,
             env,
@@ -1719,11 +1819,36 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[tokio::test]
+    async fn cluster_and_namespace_can_be_loaded_from_env_descriptor() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let descriptor = json!({
+            "version": 1u64,
+            "name": "demo",
+            "cluster_context": "env-ctx",
+            "namespace": "env-ns",
+            "hubs": {},
+            "tenants": {}
+        });
+        tokio::fs::write(tmp.path(), serde_json::to_vec(&descriptor).unwrap())
+            .await
+            .unwrap();
+
+        let (cluster_context, namespace) =
+            resolve_cluster_and_namespace(&Some(tmp.path().to_path_buf()), &None, &None, true)
+                .await
+                .expect("resolve from env");
+
+        assert_eq!(cluster_context, "env-ctx");
+        assert_eq!(namespace.as_deref(), Some("env-ns"));
+    }
+
     #[test]
     fn send_job_builds_capability_mounts() {
         let args = KubeJobSendArgs {
-            cluster_context: "ctx".into(),
-            namespace: "tenant-a".into(),
+            cluster_context: Some("ctx".into()),
+            namespace: Some("tenant-a".into()),
+            env: None,
             hub_service: "veen-hub-tenant-a.tenant-a.svc.cluster.local:8080".into(),
             client_secret: "client-secret".into(),
             stream: "core/main".into(),
@@ -1769,8 +1894,9 @@ mod tests {
     #[test]
     fn stream_job_uses_state_pvc_when_requested() {
         let args = KubeJobStreamArgs {
-            cluster_context: "ctx".into(),
-            namespace: "tenant-a".into(),
+            cluster_context: Some("ctx".into()),
+            namespace: Some("tenant-a".into()),
+            env: None,
             hub_service: "veen-hub".into(),
             client_secret: "client-secret".into(),
             stream: "core/main".into(),
@@ -1798,8 +1924,9 @@ mod tests {
     #[test]
     fn job_env_vars_are_passed_to_container() {
         let args = KubeJobSendArgs {
-            cluster_context: "ctx".into(),
-            namespace: "tenant-a".into(),
+            cluster_context: Some("ctx".into()),
+            namespace: Some("tenant-a".into()),
+            env: None,
             hub_service: "veen-hub".into(),
             client_secret: "client-secret".into(),
             stream: "core/main".into(),

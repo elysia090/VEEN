@@ -1523,11 +1523,11 @@ struct AuditEnforceCheckArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct EnvDescriptor {
+pub(crate) struct EnvDescriptor {
     version: u64,
     name: String,
-    cluster_context: String,
-    namespace: String,
+    pub(crate) cluster_context: String,
+    pub(crate) namespace: String,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -1559,7 +1559,7 @@ impl EnvDescriptor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct EnvHubDescriptor {
+pub(crate) struct EnvHubDescriptor {
     service_url: String,
     profile_id: String,
     #[serde(default)]
@@ -1567,7 +1567,7 @@ struct EnvHubDescriptor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct EnvTenantDescriptor {
+pub(crate) struct EnvTenantDescriptor {
     stream_prefix: String,
     label_class: String,
 }
@@ -10706,7 +10706,7 @@ mod tests {
         .expect("cli parse");
         match cli.command {
             Command::Kube(crate::kube::KubeCommand::Render(args)) => {
-                assert_eq!(args.namespace, "veen");
+                assert_eq!(args.namespace.as_deref(), Some("veen"));
                 assert_eq!(args.name, "alpha");
                 assert_eq!(args.replicas, 2);
             }
@@ -12703,7 +12703,7 @@ async fn write_env_descriptor(path: &Path, descriptor: &EnvDescriptor) -> Result
     Ok(())
 }
 
-async fn read_env_descriptor(path: &Path) -> Result<EnvDescriptor> {
+pub(crate) async fn read_env_descriptor(path: &Path) -> Result<EnvDescriptor> {
     let descriptor: EnvDescriptor = read_json_file(path).await?;
     descriptor.validate()?;
     Ok(descriptor)
