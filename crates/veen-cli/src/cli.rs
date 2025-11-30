@@ -1179,6 +1179,8 @@ enum SelftestCommand {
     Hardened,
     /// Exercise label/schema overlays (META0+).
     Meta,
+    /// Exercise recorder overlay scenarios.
+    Recorder,
     /// Run every v0.0.1+ suite sequentially with aggregated reporting.
     Plus,
     /// Run the v0.0.1++ orchestration suite.
@@ -3199,6 +3201,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
             SelftestCommand::Kex1 => handle_selftest_kex1().await,
             SelftestCommand::Hardened => handle_selftest_hardened().await,
             SelftestCommand::Meta => handle_selftest_meta().await,
+            SelftestCommand::Recorder => handle_selftest_recorder().await,
             SelftestCommand::Plus => handle_selftest_plus().await,
             SelftestCommand::PlusPlus => handle_selftest_plus_plus().await,
         },
@@ -8893,6 +8896,7 @@ enum SelftestSuite {
     Kex1,
     Hardened,
     Meta,
+    Recorder,
     Plus,
     PlusPlus,
 }
@@ -8908,6 +8912,7 @@ impl SelftestSuite {
             SelftestSuite::Kex1 => "kex1",
             SelftestSuite::Hardened => "hardened",
             SelftestSuite::Meta => "meta",
+            SelftestSuite::Recorder => "recorder",
             SelftestSuite::Plus => "plus",
             SelftestSuite::PlusPlus => "plus-plus",
         }
@@ -9842,6 +9847,29 @@ async fn handle_selftest_meta() -> Result<()> {
         }
         Err(err) => {
             emit_selftest_report(SelftestSuite::Meta, &report);
+            Err(anyhow::Error::new(SelftestFailure::new(err)))
+        }
+    }
+}
+
+async fn handle_selftest_recorder() -> Result<()> {
+    if handle_selftest_stub(SelftestSuite::Recorder)? {
+        return Ok(());
+    }
+    println!("running VEEN recorder self-tests...");
+    let mut report = veen_selftest::SelftestReport::default();
+    let result = {
+        let mut reporter = veen_selftest::SelftestReporter::new(Some(&mut report));
+        veen_selftest::run_recorder(&mut reporter).await
+    };
+    match result {
+        Ok(()) => {
+            emit_selftest_report(SelftestSuite::Recorder, &report);
+            log_cli_goal("CLI.SELFTEST.RECORDER");
+            Ok(())
+        }
+        Err(err) => {
+            emit_selftest_report(SelftestSuite::Recorder, &report);
             Err(anyhow::Error::new(SelftestFailure::new(err)))
         }
     }

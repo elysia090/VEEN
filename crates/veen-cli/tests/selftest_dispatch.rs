@@ -70,6 +70,12 @@ fn selftest_meta_dispatches() {
 }
 
 #[test]
+fn selftest_recorder_dispatches() {
+    let suites = run_stubbed_selftest(&["selftest", "recorder"]);
+    assert_eq!(suites, vec!["recorder".to_string()]);
+}
+
+#[test]
 fn selftest_plus_runs_all_suites_in_order() {
     let suites = run_stubbed_selftest(&["selftest", "plus"]);
     let expected = vec![
