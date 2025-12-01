@@ -3597,8 +3597,8 @@ async fn handle_hub_stop(args: HubStopArgs) -> Result<()> {
 }
 
 async fn handle_hub_status(args: HubStatusArgs) -> Result<()> {
-    let reference = hub_reference_from_locator(&args.hub, "hub status").await?;
-    let result = match reference {
+    let resolved = hub_reference_from_locator(&args.hub, "hub status").await?;
+    let result = match resolved.into_reference() {
         HubReference::Local(data_dir) => {
             let state = load_hub_state(&data_dir).await?;
 
@@ -3668,7 +3668,8 @@ async fn handle_hub_status(args: HubStatusArgs) -> Result<()> {
 }
 
 async fn handle_hub_key(args: HubKeyArgs) -> Result<()> {
-    match hub_reference_from_locator(&args.hub, "hub key").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "hub key").await?;
+    match resolved.into_reference() {
         HubReference::Local(data_dir) => {
             let key_info = read_hub_key_material(&data_dir).await?;
 
@@ -3758,7 +3759,8 @@ async fn handle_hub_verify_rotation(args: HubVerifyRotationArgs) -> Result<()> {
 }
 
 async fn handle_hub_health(args: HubHealthArgs) -> Result<()> {
-    match hub_reference_from_locator(&args.hub, "hub health").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "hub health").await?;
+    match resolved.into_reference() {
         HubReference::Local(data_dir) => {
             let state = load_hub_state(&data_dir).await?;
             let now = current_unix_timestamp()?;
@@ -3829,7 +3831,8 @@ async fn handle_hub_health(args: HubHealthArgs) -> Result<()> {
 }
 
 async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
-    match hub_reference_from_locator(&args.hub, "hub metrics").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "hub metrics").await?;
+    match resolved.into_reference() {
         HubReference::Local(data_dir) => {
             let state = load_hub_state(&data_dir).await?;
             let metrics = state.metrics.clone();
@@ -3856,7 +3859,8 @@ async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
 }
 
 async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
-    let client = match hub_reference_from_locator(&args.hub, "hub profile").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "hub profile").await?;
+    let client = match resolved.into_reference() {
         HubReference::Local(_) => {
             bail_usage!("hub profile requires an HTTP hub endpoint (e.g. http://host:port)");
         }
@@ -3909,14 +3913,16 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
         json,
     } = args;
 
-    let client = match hub_reference_from_locator(&hub, "hub role").await? {
+    let resolved = require_hub(&hub, "hub role").await?;
+    let resolved_realm = resolved.realm_id().map(ToString::to_string);
+    let client = match resolved.into_reference() {
         HubReference::Local(_) => {
             bail_usage!("hub role requires an HTTP hub endpoint (e.g. http://host:port)");
         }
         HubReference::Remote(client) => client,
     };
 
-    let realm_id = match realm {
+    let realm_id = match realm.or_else(|| resolved_realm) {
         Some(value) => Some(parse_realm_id_hex(&value)?),
         None => None,
     };
@@ -3973,7 +3979,8 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
 }
 
 async fn handle_hub_kex_policy(args: HubKexPolicyArgs) -> Result<()> {
-    let client = match hub_reference_from_locator(&args.hub, "hub kex-policy").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "hub kex-policy").await?;
+    let client = match resolved.into_reference() {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("hub kex-policy requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -3987,7 +3994,8 @@ async fn handle_hub_kex_policy(args: HubKexPolicyArgs) -> Result<()> {
 }
 
 async fn handle_hub_admission(args: HubAdmissionArgs) -> Result<()> {
-    let client = match hub_reference_from_locator(&args.hub, "hub admission").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "hub admission").await?;
+    let client = match resolved.into_reference() {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("hub admission requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -4001,7 +4009,8 @@ async fn handle_hub_admission(args: HubAdmissionArgs) -> Result<()> {
 }
 
 async fn handle_hub_admission_log(args: HubAdmissionLogArgs) -> Result<()> {
-    let client = match hub_reference_from_locator(&args.hub, "hub admission-log").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "hub admission-log").await?;
+    let client = match resolved.into_reference() {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("hub admission-log requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -4168,7 +4177,8 @@ where
 }
 
 async fn handle_hub_checkpoint_latest(args: HubCheckpointLatestArgs) -> Result<Checkpoint> {
-    let client = match hub_reference_from_locator(&args.hub, "hub checkpoint-latest").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "hub checkpoint-latest").await?;
+    let client = match resolved.into_reference() {
         HubReference::Local(_) => {
             bail_usage!("checkpoint commands require an HTTP hub endpoint (e.g. http://host:port)")
         }
@@ -4182,7 +4192,8 @@ async fn handle_hub_checkpoint_latest(args: HubCheckpointLatestArgs) -> Result<C
 }
 
 async fn handle_hub_checkpoint_range(args: HubCheckpointRangeArgs) -> Result<Vec<Checkpoint>> {
-    let client = match hub_reference_from_locator(&args.hub, "hub checkpoint-range").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "hub checkpoint-range").await?;
+    let client = match resolved.into_reference() {
         HubReference::Local(_) => {
             bail_usage!("checkpoint commands require an HTTP hub endpoint (e.g. http://host:port)")
         }
@@ -4234,9 +4245,8 @@ fn print_checkpoint_summary(checkpoint: &Checkpoint) {
 }
 
 async fn handle_hub_tls_info(args: HubTlsInfoArgs) -> Result<()> {
-    let hub = hub_reference_from_locator(&args.hub, "hub tls-info")
-        .await?
-        .into_local()?;
+    let resolved = hub_reference_from_locator(&args.hub, "hub tls-info").await?;
+    let hub = resolved.into_reference().into_local()?;
     let tls_info_path = hub.join(STATE_DIR).join(TLS_INFO_FILE);
     if !fs::try_exists(&tls_info_path)
         .await
@@ -4641,8 +4651,8 @@ fn render_send_outcome(outcome: &SendOutcome) {
 }
 
 async fn handle_send(args: SendArgs) -> Result<()> {
-    let reference = hub_reference_from_locator(&args.hub, "send").await?;
-    let outcome = send_message_with_reference(reference, args).await?;
+    let resolved = hub_reference_from_locator(&args.hub, "send").await?;
+    let outcome = send_message_with_reference(resolved.into_reference(), args).await?;
     render_send_outcome(&outcome);
     log_cli_goal("CLI.CORE.SEND");
     Ok(())
@@ -5056,8 +5066,8 @@ fn render_revocations(entries: &[RenderedRevocation], use_json: bool) {
 }
 
 async fn handle_stream(args: StreamArgs) -> Result<()> {
-    let hub = hub_reference_from_locator(&args.hub, "stream").await?;
-    let result = match hub {
+    let resolved = hub_reference_from_locator(&args.hub, "stream").await?;
+    let result = match resolved.into_reference() {
         HubReference::Local(data_dir) => {
             let stream_state = load_stream_state(&data_dir, &args.stream).await?;
             if args.with_proof {
@@ -5271,7 +5281,8 @@ async fn handle_cap_issue(args: CapIssueArgs) -> Result<()> {
 }
 
 async fn handle_cap_authorize(args: CapAuthorizeArgs) -> Result<()> {
-    match hub_reference_from_locator(&args.hub, "cap authorize").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "cap authorize").await?;
+    match resolved.into_reference() {
         HubReference::Local(_) => {
             bail_usage!("cap authorize requires an HTTP hub endpoint (e.g. http://host:port)")
         }
@@ -5311,7 +5322,8 @@ async fn handle_cap_authorize_remote(client: HubHttpClient, args: CapAuthorizeAr
 }
 
 async fn handle_cap_status(args: CapStatusArgs) -> Result<()> {
-    let client = match hub_reference_from_locator(&args.hub, "cap status").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "cap status").await?;
+    let client = match resolved.into_reference() {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("cap status requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -5346,7 +5358,8 @@ async fn handle_cap_status(args: CapStatusArgs) -> Result<()> {
 }
 
 async fn handle_cap_revocations(args: CapRevocationsArgs) -> Result<()> {
-    match hub_reference_from_locator(&args.hub, "cap revocations").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "cap revocations").await?;
+    match resolved.into_reference() {
         HubReference::Remote(client) => handle_cap_revocations_remote(client, args).await?,
         HubReference::Local(data_dir) => handle_cap_revocations_local(data_dir, args).await?,
     };
@@ -5508,7 +5521,8 @@ fn render_cap_status(response: &RemoteCapStatusResponse, auth_ref_hex: &str, use
 }
 
 async fn handle_pow_request(args: PowRequestArgs) -> Result<()> {
-    let client = match hub_reference_from_locator(&args.hub, "pow request").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "pow request").await?;
+    let client = match resolved.into_reference() {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("pow request requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -5605,7 +5619,8 @@ const ADMIN_SIGNING_DOMAIN: &str = "veen/admin";
 const WALLET_TRANSFER_DOMAIN: &str = "veen/cli-wallet-transfer";
 
 async fn handle_fed_authority_publish(args: FedAuthorityPublishArgs) -> Result<()> {
-    match hub_reference_from_locator(&args.hub, "fed authority publish").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "fed authority publish").await?;
+    match resolved.into_reference() {
         HubReference::Remote(client) => handle_fed_authority_publish_remote(client, args).await,
         HubReference::Local(_) => {
             bail_usage!(
@@ -5683,7 +5698,8 @@ async fn handle_fed_authority_show(args: FedAuthorityShowArgs) -> Result<()> {
         json,
     } = args;
 
-    let client = match hub_reference_from_locator(&hub, "fed authority show").await? {
+    let resolved = hub_reference_from_locator(&hub, "fed authority show").await?;
+    let client = match resolved.into_reference() {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("fed authority show requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -6163,7 +6179,8 @@ fn parse_remote_hub_client(reference: &str, context: &str) -> Result<HubHttpClie
 async fn handle_label_authority(args: LabelAuthorityArgs) -> Result<()> {
     let LabelAuthorityArgs { hub, label, json } = args;
 
-    let client = match hub_reference_from_locator(&hub, "label authority").await? {
+    let resolved = hub_reference_from_locator(&hub, "label authority").await?;
+    let client = match resolved.into_reference() {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("label authority requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -6415,7 +6432,8 @@ fn parse_metadata_value(input: Option<String>) -> Result<Option<CborValue>> {
 }
 
 async fn handle_label_class_set(args: LabelClassSetArgs) -> Result<()> {
-    match hub_reference_from_locator(&args.hub, "label-class set").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "label-class set").await?;
+    match resolved.into_reference() {
         HubReference::Remote(client) => handle_label_class_set_remote(client, args).await,
         HubReference::Local(_) => {
             bail_usage!("label-class set requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -6457,7 +6475,8 @@ async fn handle_label_class_set_remote(
 
 async fn handle_label_class_show(args: LabelClassShowArgs) -> Result<()> {
     let LabelClassShowArgs { hub, label, json } = args;
-    let client = match hub_reference_from_locator(&hub, "label-class show").await? {
+    let resolved = hub_reference_from_locator(&hub, "label-class show").await?;
+    let client = match resolved.into_reference() {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("label-class show requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -6485,14 +6504,16 @@ async fn handle_label_class_list(args: LabelClassListArgs) -> Result<()> {
         class,
         json,
     } = args;
-    let client = match hub_reference_from_locator(&hub, "label-class list").await? {
+    let resolved = require_hub(&hub, "label-class list").await?;
+    let resolved_realm = resolved.realm_id().map(ToString::to_string);
+    let client = match resolved.into_reference() {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("label-class list requires an HTTP hub endpoint (e.g. http://host:port)")
         }
     };
 
-    let list = fetch_label_class_list(&client, realm.clone(), class.clone())
+    let list = fetch_label_class_list(&client, realm.or(resolved_realm), class.clone())
         .await
         .map_err(map_label_class_http_error)?;
     render_label_class_list(&list, json_output_enabled(json));
@@ -6521,7 +6542,8 @@ async fn handle_schema_id(args: SchemaIdArgs) -> Result<()> {
 }
 
 async fn handle_schema_register(args: SchemaRegisterArgs) -> Result<()> {
-    match hub_reference_from_locator(&args.hub, "schema register").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "schema register").await?;
+    match resolved.into_reference() {
         HubReference::Remote(client) => handle_schema_register_remote(client, args).await,
         HubReference::Local(_) => {
             bail_usage!("schema register requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -6568,7 +6590,8 @@ async fn handle_schema_show(args: SchemaShowArgs) -> Result<()> {
         json,
     } = args;
 
-    let client = match hub_reference_from_locator(&hub, "schema show").await? {
+    let resolved = hub_reference_from_locator(&hub, "schema show").await?;
+    let client = match resolved.into_reference() {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
             bail_usage!("schema show requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -6584,7 +6607,8 @@ async fn handle_schema_show(args: SchemaShowArgs) -> Result<()> {
 }
 
 async fn handle_schema_list(args: SchemaListArgs) -> Result<()> {
-    match hub_reference_from_locator(&args.hub, "schema list").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "schema list").await?;
+    match resolved.into_reference() {
         HubReference::Remote(client) => handle_schema_list_remote(client).await,
         HubReference::Local(_) => {
             bail_usage!("schema list requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -6641,7 +6665,8 @@ async fn fetch_schema_registry_entry(
 }
 
 async fn handle_wallet_transfer(args: WalletTransferArgs) -> Result<()> {
-    match hub_reference_from_locator(&args.hub, "wallet transfer").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "wallet transfer").await?;
+    match resolved.into_reference() {
         HubReference::Remote(client) => handle_wallet_transfer_remote(client, args).await,
         HubReference::Local(_) => {
             bail_usage!("wallet transfer requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -6708,7 +6733,8 @@ async fn handle_wallet_ledger(args: WalletLedgerArgs) -> Result<()> {
         None
     };
 
-    let reference = hub_reference_from_locator(&args.hub, "wallet ledger").await?;
+    let resolved = hub_reference_from_locator(&args.hub, "wallet ledger").await?;
+    let reference = resolved.into_reference();
     let (messages, stream_tip) =
         load_stream_messages(reference, &args.stream, args.since_stream_seq).await?;
 
@@ -6867,8 +6893,8 @@ struct AgreementVersionFold {
 async fn handle_agreement_status(args: AgreementStatusArgs) -> Result<()> {
     let agreement_id = parse_opaque_id_hex(&args.agreement_id)?;
     let use_json = json_output_enabled(args.json);
-    let reference = hub_reference_from_locator(&args.hub, "agreement status").await?;
-    let (messages, _) = load_stream_messages(reference, &args.stream, 0).await?;
+    let resolved = hub_reference_from_locator(&args.hub, "agreement status").await?;
+    let (messages, _) = load_stream_messages(resolved.into_reference(), &args.stream, 0).await?;
 
     let versions = fold_agreement_versions(&messages, &agreement_id)?;
     let (version, state) = select_agreement_version(&versions, args.version)?;
@@ -7080,8 +7106,8 @@ fn render_agreement_status(output: &AgreementStatusOutput, use_json: bool) {
 async fn handle_recovery_timeline(args: RecoveryTimelineArgs) -> Result<()> {
     let target_identity = parse_principal_id_hex(&args.target_identity)?;
     let use_json = json_output_enabled(args.json);
-    let reference = hub_reference_from_locator(&args.hub, "recovery timeline").await?;
-    let (messages, _) = load_stream_messages(reference, &args.stream, 0).await?;
+    let resolved = hub_reference_from_locator(&args.hub, "recovery timeline").await?;
+    let (messages, _) = load_stream_messages(resolved.into_reference(), &args.stream, 0).await?;
     let entries = build_recovery_timeline(&messages, &target_identity)?;
     let output = RecoveryTimelineOutput {
         stream: args.stream,
@@ -7533,7 +7559,8 @@ async fn submit_operation_payload(
         pow_nonce: None,
     };
 
-    let reference = hub_reference_from_locator(&send_args.hub, options.context).await?;
+    let resolved = hub_reference_from_locator(&send_args.hub, options.context).await?;
+    let reference = resolved.into_reference();
     let outcome = send_message_with_reference(reference.clone(), send_args).await?;
     let submission =
         derive_operation_submission(reference, outcome, payload.schema_name, schema_hex).await?;
@@ -8033,7 +8060,8 @@ async fn operation_id_from_bundle(path: &Path) -> Result<OperationId> {
 }
 
 async fn handle_revoke_publish(args: RevokePublishArgs) -> Result<()> {
-    match hub_reference_from_locator(&args.hub, "revoke publish").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "revoke publish").await?;
+    match resolved.into_reference() {
         HubReference::Remote(client) => handle_revoke_publish_remote(client, args).await,
         HubReference::Local(_) => {
             bail_usage!("revoke publish requires an HTTP hub endpoint (e.g. http://host:port)")
@@ -8075,7 +8103,8 @@ async fn handle_revoke_publish_remote(
 }
 
 async fn handle_resync(args: ResyncArgs) -> Result<()> {
-    match hub_reference_from_locator(&args.hub, "resync").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "resync").await?;
+    match resolved.into_reference() {
         HubReference::Local(data_dir) => {
             handle_resync_local(data_dir, args).await?;
         }
@@ -8158,8 +8187,9 @@ async fn handle_snapshot_verify(args: SnapshotVerifyArgs) -> Result<()> {
     let state_id_hex = hex::encode(state_id.as_bytes());
     let use_json = json_output_enabled(args.json);
 
-    let reference = hub_reference_from_locator(&args.hub, "snapshot verify").await?;
-    let (messages, stream_tip) = load_stream_messages(reference, &args.stream, 0).await?;
+    let resolved = hub_reference_from_locator(&args.hub, "snapshot verify").await?;
+    let (messages, stream_tip) =
+        load_stream_messages(resolved.into_reference(), &args.stream, 0).await?;
     if stream_tip < args.upto_stream_seq {
         bail_usage!(
             "stream {} only has seq {}, cannot verify upto {}",
@@ -8454,7 +8484,8 @@ where
 }
 
 async fn handle_verify_state(args: VerifyStateArgs) -> Result<()> {
-    let hub = hub_reference_from_locator(&args.hub, "verify-state").await?;
+    let resolved = hub_reference_from_locator(&args.hub, "verify-state").await?;
+    let hub = resolved.into_reference();
     let client_state: ClientStateFile = read_json_file(&args.client.join("state.json")).await?;
 
     let hub_seq = match hub {
@@ -8567,9 +8598,9 @@ async fn handle_rpc_call(args: RpcCallArgs) -> Result<()> {
 }
 
 async fn handle_crdt_lww_set(args: CrdtLwwSetArgs) -> Result<()> {
-    let data_dir = hub_reference_from_locator(&args.hub, "crdt lww set")
-        .await?
-        .into_local()?;
+    let resolved = hub_reference_from_locator(&args.hub, "crdt lww set").await?;
+    let data_dir = resolved.into_reference().into_local()?;
+
     ensure_crdt_stream_dir(&data_dir, &args.stream).await?;
     let mut state = load_lww_state(&data_dir, &args.stream).await?;
     let timestamp = args.ts.unwrap_or(current_unix_timestamp()?);
@@ -8593,9 +8624,8 @@ async fn handle_crdt_lww_set(args: CrdtLwwSetArgs) -> Result<()> {
 }
 
 async fn handle_crdt_lww_get(args: CrdtLwwGetArgs) -> Result<()> {
-    let data_dir = hub_reference_from_locator(&args.hub, "crdt lww get")
-        .await?
-        .into_local()?;
+    let resolved = hub_reference_from_locator(&args.hub, "crdt lww get").await?;
+    let data_dir = resolved.into_reference().into_local()?;
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let state = load_lww_state(&data_dir, &args.stream).await?;
     if let Some(value) = state.entries.get(&args.key) {
@@ -8609,9 +8639,8 @@ async fn handle_crdt_lww_get(args: CrdtLwwGetArgs) -> Result<()> {
 }
 
 async fn handle_crdt_orset_add(args: CrdtOrsetAddArgs) -> Result<()> {
-    let data_dir = hub_reference_from_locator(&args.hub, "crdt orset add")
-        .await?
-        .into_local()?;
+    let resolved = hub_reference_from_locator(&args.hub, "crdt orset add").await?;
+    let data_dir = resolved.into_reference().into_local()?;
     ensure_crdt_stream_dir(&data_dir, &args.stream).await?;
     let mut state = load_orset_state(&data_dir, &args.stream).await?;
     let now = current_unix_timestamp()?;
@@ -8631,9 +8660,8 @@ async fn handle_crdt_orset_add(args: CrdtOrsetAddArgs) -> Result<()> {
 }
 
 async fn handle_crdt_orset_remove(args: CrdtOrsetRemoveArgs) -> Result<()> {
-    let data_dir = hub_reference_from_locator(&args.hub, "crdt orset remove")
-        .await?
-        .into_local()?;
+    let resolved = hub_reference_from_locator(&args.hub, "crdt orset remove").await?;
+    let data_dir = resolved.into_reference().into_local()?;
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let mut state = load_orset_state(&data_dir, &args.stream).await?;
     let now = current_unix_timestamp()?;
@@ -8658,9 +8686,8 @@ async fn handle_crdt_orset_remove(args: CrdtOrsetRemoveArgs) -> Result<()> {
 }
 
 async fn handle_crdt_orset_list(args: CrdtOrsetListArgs) -> Result<()> {
-    let data_dir = hub_reference_from_locator(&args.hub, "crdt orset list")
-        .await?
-        .into_local()?;
+    let resolved = hub_reference_from_locator(&args.hub, "crdt orset list").await?;
+    let data_dir = resolved.into_reference().into_local()?;
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let state = load_orset_state(&data_dir, &args.stream).await?;
     let mut visible: BTreeSet<&String> = BTreeSet::new();
@@ -8682,9 +8709,8 @@ async fn handle_crdt_orset_list(args: CrdtOrsetListArgs) -> Result<()> {
 }
 
 async fn handle_crdt_counter_add(args: CrdtCounterAddArgs) -> Result<()> {
-    let data_dir = hub_reference_from_locator(&args.hub, "crdt counter add")
-        .await?
-        .into_local()?;
+    let resolved = hub_reference_from_locator(&args.hub, "crdt counter add").await?;
+    let data_dir = resolved.into_reference().into_local()?;
     ensure_crdt_stream_dir(&data_dir, &args.stream).await?;
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let mut state = load_counter_state(&data_dir, &args.stream).await?;
@@ -8696,9 +8722,8 @@ async fn handle_crdt_counter_add(args: CrdtCounterAddArgs) -> Result<()> {
 }
 
 async fn handle_crdt_counter_get(args: CrdtCounterGetArgs) -> Result<()> {
-    let data_dir = hub_reference_from_locator(&args.hub, "crdt counter get")
-        .await?
-        .into_local()?;
+    let resolved = hub_reference_from_locator(&args.hub, "crdt counter get").await?;
+    let data_dir = resolved.into_reference().into_local()?;
     ensure_client_label_exists(&args.client, &args.stream).await?;
     let state = load_counter_state(&data_dir, &args.stream).await?;
     println!("counter value={}", state.value);
@@ -8707,7 +8732,8 @@ async fn handle_crdt_counter_get(args: CrdtCounterGetArgs) -> Result<()> {
 }
 
 async fn handle_anchor_publish(args: AnchorPublishArgs) -> Result<()> {
-    match hub_reference_from_locator(&args.hub, "anchor publish").await? {
+    let resolved = hub_reference_from_locator(&args.hub, "anchor publish").await?;
+    match resolved.into_reference() {
         HubReference::Local(data_dir) => {
             let mut log = load_anchor_log(&data_dir).await?;
             let ts = args.ts.unwrap_or(current_unix_timestamp()?);
@@ -9043,7 +9069,8 @@ async fn handle_env_show(args: EnvShowArgs) -> Result<()> {
 }
 
 async fn handle_audit_queries(args: AuditQueriesArgs) -> Result<()> {
-    let reference = hub_reference_from_locator(&args.hub, "audit queries").await?;
+    let resolved = hub_reference_from_locator(&args.hub, "audit queries").await?;
+    let reference = resolved.into_reference();
     let use_json = json_output_enabled(args.json);
     let messages = fetch_stream_messages(&reference, &args.stream).await?;
     let mut rows = Vec::new();
@@ -9078,7 +9105,8 @@ async fn handle_audit_queries(args: AuditQueriesArgs) -> Result<()> {
 }
 
 async fn handle_audit_summary(args: AuditSummaryArgs) -> Result<()> {
-    let reference = hub_reference_from_locator(&args.hub, "audit summary").await?;
+    let resolved = hub_reference_from_locator(&args.hub, "audit summary").await?;
+    let reference = resolved.into_reference();
     let use_json = json_output_enabled(args.json);
     let env_descriptor = match args.env {
         Some(path) => Some(read_env_descriptor(&path).await?),
@@ -9182,7 +9210,8 @@ async fn handle_audit_enforce_check(args: AuditEnforceCheckArgs) -> Result<()> {
     if args.policy_files.is_empty() {
         bail_usage!("--policy-file must be provided at least once");
     }
-    let reference = hub_reference_from_locator(&args.hub, "audit enforce-check").await?;
+    let resolved = hub_reference_from_locator(&args.hub, "audit enforce-check").await?;
+    let reference = resolved.into_reference();
     let use_json = json_output_enabled(args.json);
     let mut documents = Vec::new();
     for path in &args.policy_files {
@@ -10391,9 +10420,11 @@ enum HubReference {
     Remote(HubHttpClient),
 }
 
+#[derive(Clone)]
 struct ResolvedHubRef {
     reference: HubReference,
     profile_id: Option<String>,
+    realm_id: Option<String>,
 }
 
 impl ResolvedHubRef {
@@ -10403,6 +10434,10 @@ impl ResolvedHubRef {
 
     fn profile_id(&self) -> Option<&str> {
         self.profile_id.as_deref()
+    }
+
+    fn realm_id(&self) -> Option<&str> {
+        self.realm_id.as_deref()
     }
 }
 
@@ -10426,6 +10461,7 @@ async fn resolve_optional_hub(locator: &HubLocatorArgs) -> Result<Option<Resolve
         return Ok(Some(ResolvedHubRef {
             reference: hub,
             profile_id: None,
+            realm_id: None,
         }));
     }
 
@@ -10449,6 +10485,7 @@ async fn resolve_optional_hub(locator: &HubLocatorArgs) -> Result<Option<Resolve
         return Ok(Some(ResolvedHubRef {
             reference,
             profile_id: Some(hub_descriptor.profile_id.clone()),
+            realm_id: hub_descriptor.realm_id.clone(),
         }));
     }
 
@@ -10458,7 +10495,7 @@ async fn resolve_optional_hub(locator: &HubLocatorArgs) -> Result<Option<Resolve
 async fn hub_reference_from_locator(
     locator: &HubLocatorArgs,
     context: &str,
-) -> Result<HubReference> {
+) -> Result<ResolvedHubRef> {
     let resolved = require_hub(locator, context).await?;
     if let Some(profile_id) = resolved.profile_id() {
         tracing::debug!(
@@ -10467,7 +10504,7 @@ async fn hub_reference_from_locator(
             "resolved hub profile via env descriptor"
         );
     }
-    Ok(resolved.into_reference())
+    Ok(resolved)
 }
 
 #[cfg(test)]
