@@ -4048,7 +4048,7 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
         HubReference::Remote(client) => client,
     };
 
-    let realm_id = match realm.or_else(|| resolved_realm) {
+    let realm_id = match realm.or(resolved_realm) {
         Some(value) => Some(parse_realm_id_hex(&value)?),
         None => None,
     };
