@@ -1280,6 +1280,8 @@ struct HubVerifyRotationArgs {
 struct HubHealthArgs {
     #[command(flatten)]
     hub: HubLocatorArgs,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -2723,7 +2725,7 @@ struct RemoteSchemaUsage {
     last_used_ts: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct RemoteHealthStatus {
     ok: bool,
     #[serde(with = "humantime_serde")]
@@ -3759,75 +3761,199 @@ async fn handle_hub_verify_rotation(args: HubVerifyRotationArgs) -> Result<()> {
 }
 
 async fn handle_hub_health(args: HubHealthArgs) -> Result<()> {
+    let use_json = json_output_enabled(args.json);
     let resolved = hub_reference_from_locator(&args.hub, "hub health").await?;
     match resolved.into_reference() {
         HubReference::Local(data_dir) => {
             let state = load_hub_state(&data_dir).await?;
             let now = current_unix_timestamp()?;
 
-            if state.running {
-                println!("status: running");
-                println!("uptime_sec: {}", state.uptime(now));
+            if use_json {
+                let rendered = render_local_health_json(&state, now);
+                println!("{}", pretty_json(rendered));
             } else {
-                println!("status: stopped");
-                if let Some(stopped_at) = state.stopped_at {
-                    println!("stopped_at: {stopped_at}");
+                if state.running {
+                    println!("status: running");
+                    println!("uptime_sec: {}", state.uptime(now));
+                } else {
+                    println!("status: stopped");
+                    if let Some(stopped_at) = state.stopped_at {
+                        println!("stopped_at: {stopped_at}");
+                    }
                 }
-            }
 
-            if let Some(ref profile_id) = state.profile_id {
-                println!("profile_id: {profile_id}");
-            }
-            if let Some(ref hub_id) = state.hub_id {
-                println!("hub_id: {hub_id}");
+                if let Some(ref profile_id) = state.profile_id {
+                    println!("profile_id: {profile_id}");
+                }
+                if let Some(ref hub_id) = state.hub_id {
+                    println!("hub_id: {hub_id}");
+                }
             }
         }
         HubReference::Remote(client) => {
             let health: RemoteHealthStatus = client.get_json("/healthz", &[]).await?;
-            println!("status: {}", if health.ok { "running" } else { "error" });
-            println!("uptime_sec: {}", health.uptime.as_secs());
-            println!("role: {}", health.role);
-            println!("peaks_count: {}", health.peaks_count);
-            if let Some(profile_id) = health.profile_id.as_deref() {
-                println!("profile_id: {profile_id}");
-            }
-            if let Some(hub_id) = health.hub_id.as_deref() {
-                println!("hub_id: {hub_id}");
-            }
-            if let Some(hub_pk) = health.hub_public_key.as_deref() {
-                println!("hub_pk: {hub_pk}");
-            }
-            println!("submit_ok_total: {}", health.submit_ok_total);
-            if health.submit_err_total.is_empty() {
-                println!("submit_err_total: (none)");
+            if use_json {
+                let rendered = render_remote_health_json(&health)?;
+                println!("{}", pretty_json(rendered));
             } else {
-                println!("submit_err_total:");
-                for (code, count) in health.submit_err_total.iter() {
-                    println!("  {code}: {count}");
+                println!("status: {}", if health.ok { "running" } else { "error" });
+                println!("uptime_sec: {}", health.uptime.as_secs());
+                println!("role: {}", health.role);
+                println!("peaks_count: {}", health.peaks_count);
+                if let Some(profile_id) = health.profile_id.as_deref() {
+                    println!("profile_id: {profile_id}");
                 }
-            }
-            if health.last_stream_seq.is_empty() {
-                println!("last_stream_seq: (none)");
-            } else {
-                println!("last_stream_seq:");
-                for (label, seq) in health.last_stream_seq.iter() {
-                    println!("  {label}: {seq}");
+                if let Some(hub_id) = health.hub_id.as_deref() {
+                    println!("hub_id: {hub_id}");
                 }
-            }
-            if health.mmr_roots.is_empty() {
-                println!("mmr_roots: (none)");
-            } else {
-                println!("mmr_roots:");
-                for (label, root) in health.mmr_roots.iter() {
-                    println!("  {label}: {root}");
+                if let Some(hub_pk) = health.hub_public_key.as_deref() {
+                    println!("hub_pk: {hub_pk}");
                 }
+                println!("submit_ok_total: {}", health.submit_ok_total);
+                if health.submit_err_total.is_empty() {
+                    println!("submit_err_total: (none)");
+                } else {
+                    println!("submit_err_total:");
+                    for (code, count) in health.submit_err_total.iter() {
+                        println!("  {code}: {count}");
+                    }
+                }
+                if health.last_stream_seq.is_empty() {
+                    println!("last_stream_seq: (none)");
+                } else {
+                    println!("last_stream_seq:");
+                    for (label, seq) in health.last_stream_seq.iter() {
+                        println!("  {label}: {seq}");
+                    }
+                }
+                if health.mmr_roots.is_empty() {
+                    println!("mmr_roots: (none)");
+                } else {
+                    println!("mmr_roots:");
+                    for (label, root) in health.mmr_roots.iter() {
+                        println!("  {label}: {root}");
+                    }
+                }
+                println!("data_dir: {}", health.data_dir);
             }
-            println!("data_dir: {}", health.data_dir);
         }
     }
 
     log_cli_goal("CLI.OBS0.HEALTH");
     Ok(())
+}
+
+fn render_remote_health_json(health: &RemoteHealthStatus) -> Result<JsonValue> {
+    let mut root = JsonMap::new();
+    root.insert("ok".to_string(), JsonValue::Bool(health.ok));
+    root.insert(
+        "uptime_sec".to_string(),
+        JsonValue::Number(serde_json::Number::from(health.uptime.as_secs())),
+    );
+    root.insert("role".to_string(), JsonValue::String(health.role.clone()));
+    root.insert(
+        "peaks_count".to_string(),
+        JsonValue::Number(serde_json::Number::from(health.peaks_count)),
+    );
+    root.insert(
+        "profile_id".to_string(),
+        health
+            .profile_id
+            .as_ref()
+            .map(|value| JsonValue::String(value.clone()))
+            .unwrap_or(JsonValue::Null),
+    );
+    root.insert(
+        "hub_id".to_string(),
+        health
+            .hub_id
+            .as_ref()
+            .map(|value| JsonValue::String(value.clone()))
+            .unwrap_or(JsonValue::Null),
+    );
+    root.insert(
+        "hub_pk".to_string(),
+        health
+            .hub_public_key
+            .as_ref()
+            .map(|value| JsonValue::String(value.clone()))
+            .unwrap_or(JsonValue::Null),
+    );
+    root.insert(
+        "submit_ok_total".to_string(),
+        JsonValue::Number(serde_json::Number::from(health.submit_ok_total)),
+    );
+    root.insert(
+        "submit_err_total".to_string(),
+        serde_json::to_value(&health.submit_err_total).context("serializing submit_err_total")?,
+    );
+    root.insert(
+        "last_stream_seq".to_string(),
+        serde_json::to_value(&health.last_stream_seq).context("serializing last_stream_seq")?,
+    );
+    root.insert(
+        "mmr_roots".to_string(),
+        serde_json::to_value(&health.mmr_roots).context("serializing mmr_roots")?,
+    );
+    root.insert(
+        "data_dir".to_string(),
+        JsonValue::String(health.data_dir.clone()),
+    );
+
+    Ok(JsonValue::Object(root))
+}
+
+fn render_local_health_json(state: &HubRuntimeState, now: u64) -> JsonValue {
+    let mut root = JsonMap::new();
+    root.insert("ok".to_string(), JsonValue::Bool(state.running));
+    root.insert(
+        "uptime_sec".to_string(),
+        JsonValue::Number(serde_json::Number::from(state.uptime(now))),
+    );
+    root.insert(
+        "role".to_string(),
+        JsonValue::String("standalone".to_string()),
+    );
+    root.insert(
+        "peaks_count".to_string(),
+        JsonValue::Number(serde_json::Number::from(state.peaks_count)),
+    );
+    root.insert(
+        "profile_id".to_string(),
+        state
+            .profile_id
+            .as_ref()
+            .map(|value| JsonValue::String(value.clone()))
+            .unwrap_or(JsonValue::Null),
+    );
+    root.insert(
+        "hub_id".to_string(),
+        state
+            .hub_id
+            .as_ref()
+            .map(|value| JsonValue::String(value.clone()))
+            .unwrap_or(JsonValue::Null),
+    );
+    root.insert("hub_pk".to_string(), JsonValue::Null);
+    root.insert(
+        "submit_ok_total".to_string(),
+        JsonValue::Number(serde_json::Number::from(state.metrics.submit_ok_total)),
+    );
+    root.insert(
+        "submit_err_total".to_string(),
+        serde_json::to_value(&state.metrics.submit_err_total).unwrap_or(JsonValue::Null),
+    );
+    root.insert(
+        "last_stream_seq".to_string(),
+        serde_json::to_value(&state.last_stream_seq).unwrap_or(JsonValue::Null),
+    );
+    root.insert("mmr_roots".to_string(), JsonValue::Object(JsonMap::new()));
+    root.insert(
+        "data_dir".to_string(),
+        JsonValue::String(state.data_dir.clone()),
+    );
+
+    JsonValue::Object(root)
 }
 
 async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
@@ -10525,6 +10651,7 @@ mod tests {
     use std::convert::Infallible;
     use std::ffi::OsString;
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+    use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -10928,6 +11055,73 @@ mod tests {
         };
         assert!(super::json_output_enabled_with(true, &global_text));
         assert!(!super::json_output_enabled_with(false, &global_text));
+    }
+
+    #[test]
+    fn remote_health_json_includes_expected_fields() -> anyhow::Result<()> {
+        let mut submit_err_total = BTreeMap::new();
+        submit_err_total.insert("E.HUB".to_string(), 2);
+        let mut last_stream_seq = BTreeMap::new();
+        last_stream_seq.insert("core/main".to_string(), 5);
+        let mut mmr_roots = BTreeMap::new();
+        mmr_roots.insert("core/main".to_string(), "abcd".to_string());
+
+        let health = RemoteHealthStatus {
+            ok: true,
+            uptime: Duration::from_secs(42),
+            submit_ok_total: 7,
+            submit_err_total,
+            last_stream_seq,
+            mmr_roots,
+            peaks_count: 9,
+            profile_id: Some("deadbeef".to_string()),
+            hub_id: Some("hub-01".to_string()),
+            hub_public_key: None,
+            role: "standalone".to_string(),
+            data_dir: "/tmp/veen".to_string(),
+        };
+
+        let rendered = super::render_remote_health_json(&health)?;
+        assert_eq!(rendered["ok"], json!(true));
+        assert_eq!(rendered["uptime_sec"], json!(42));
+        assert_eq!(rendered["profile_id"], json!("deadbeef"));
+        assert_eq!(rendered["hub_id"], json!("hub-01"));
+        assert!(rendered["hub_pk"].is_null());
+        assert_eq!(rendered["submit_ok_total"], json!(7));
+        assert_eq!(rendered["submit_err_total"]["E.HUB"], json!(2));
+        assert_eq!(rendered["last_stream_seq"]["core/main"], json!(5));
+        assert_eq!(rendered["mmr_roots"]["core/main"], json!("abcd"));
+        assert_eq!(rendered["data_dir"], json!("/tmp/veen"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn local_health_json_tracks_runtime_state() {
+        let mut state = HubRuntimeState::new(Path::new("/var/lib/veen"));
+        state.running = true;
+        state.started_at = Some(10);
+        state.profile_id = Some("abcd".to_string());
+        state.hub_id = Some("hub-1".to_string());
+        state.peaks_count = 11;
+        state.metrics.submit_ok_total = 3;
+        state
+            .metrics
+            .submit_err_total
+            .insert("E.HUB".to_string(), 1);
+        state.last_stream_seq.insert("core/main".to_string(), 4);
+
+        let rendered = super::render_local_health_json(&state, 20);
+        assert_eq!(rendered["ok"], json!(true));
+        assert_eq!(rendered["uptime_sec"], json!(10));
+        assert_eq!(rendered["peaks_count"], json!(11));
+        assert_eq!(rendered["profile_id"], json!("abcd"));
+        assert_eq!(rendered["hub_id"], json!("hub-1"));
+        assert_eq!(rendered["submit_ok_total"], json!(3));
+        assert_eq!(rendered["submit_err_total"]["E.HUB"], json!(1));
+        assert_eq!(rendered["last_stream_seq"]["core/main"], json!(4));
+        assert_eq!(rendered["data_dir"], json!("/var/lib/veen"));
+        assert!(rendered["hub_pk"].is_null());
     }
 
     #[test]
