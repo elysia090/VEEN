@@ -1,20 +1,32 @@
 # VEEN Usage Compendium
 
-This guide collects end-to-end workflows for the VEEN binaries (`veen`, `veen-hub`, `veen-selftest`, `veen-bridge`). It keeps the commands in one place so operators can move between local development, containerised deployments, and Kubernetes without changing tooling. Every command shown below can be issued against binaries in `target/release`, a manually installed system-wide binary, or inside containers unless noted otherwise. If you have never touched VEEN before, start with the “Prerequisites and build” section, run the “Local developer quickstart” once end-to-end, and only then jump into containers or Kubernetes.
+This document is the “first hour” guide for the VEEN CLI and its companion binaries (`veen`, `veen-hub`, `veen-selftest`, `veen-bridge`). It walks a new operator from zero to a working local hub, then shows how to repeat the same actions inside Docker or Kubernetes without learning new tooling.
 
-**Who this document is for**
-- Anyone new to the VEEN binaries who wants a working setup in under an hour.
-- Existing operators who need a single reference for common commands without cross-referencing other docs.
+**Who should read this**
+- **First-time users:** follow the prerequisites, then complete the Local quickstart once without skipping steps.
+- **Returning operators:** use the command blocks as a single reference so you do not have to cross-check other docs.
 
-**How to read the commands**
-- Commands prefixed with `target/release/` expect a locally built binary. If you installed VEEN system-wide, drop the prefix and run `veen ...` directly.
-- Paths such as `/tmp/veen-hub` are safe to delete after experiments; production deployments should use persistent locations (see “Manual installation”).
-- Flags shown in backticks are literal. Replace bracketed placeholders like `<PROFILE_ID>` with values from your environment.
+**How to use this page**
+- Commands prefixed with `target/release/` assume you are running from a locally built tree. Drop the prefix when using system-wide installs or inside containers.
+- Replace placeholders such as `<PROFILE_ID>` with values from your environment. Flags in backticks are literal.
+- Temporary paths like `/tmp/veen-hub` are safe to delete afterwards; production deployments should point to persistent paths (see “Manual installation”).
+- When something fails, re-run with `--verbose` for noisy logging and watch for filesystem permission errors around your chosen data directory.
+
+**Fast navigation**
+- [1. Prerequisites and build](#1-prerequisites-and-build)
+- [2. Local developer quickstart](#2-local-developer-quickstart)
+- [3. Additional flows](#3-additional-flows)
+- [4. Running with containers](#4-running-with-containers)
+- [5. Environment descriptors (`veen env`)](#5-environment-descriptors-veen-env)
+- [6. Kubernetes workflows (`veen kube`)](#6-kubernetes-workflows-veen-kube)
+- [7. Verification and tests](#7-verification-and-tests)
+- [8. Common helper tools](#8-common-helper-tools)
+- [9. Further reading](#9-further-reading)
 
 ## 1. Prerequisites and build
 
 ### Required packages
-- Target OS: Ubuntu 22.04/24.04 (including WSL2)
+- Target OS: Ubuntu 22.04/24.04 (including WSL2). macOS works if you replace `apt` with Homebrew equivalents.
 - Dependencies: `build-essential pkg-config libssl-dev curl ca-certificates`
 - Optional: `jq` for inspecting JSON outputs and `just` for common developer tasks
 
@@ -25,7 +37,7 @@ sudo apt install -y jq just # optional, but useful for debugging
 ```
 
 ### Rust toolchain
-Use the pinned stable toolchain declared in `rust-toolchain.toml`:
+Use the pinned stable toolchain declared in `rust-toolchain.toml` so your build matches CI:
 
 ```shell
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -41,7 +53,7 @@ If your shell cannot find `cargo`, ensure `~/.cargo/bin` is present on your `PAT
 cargo build --release
 ```
 
-`cargo` will fetch dependencies on first run. Use `CARGO_NET_OFFLINE=true` for an air-gapped build when the dependency cache is already populated.
+`cargo` will fetch dependencies on first run. Supply `CARGO_NET_OFFLINE=true` for an air-gapped build **only** when you already have a populated Cargo cache. If the build fails with linker errors, ensure `libssl-dev` is installed and re-run the command.
 
 #### Quick sanity check
 - List the installed binaries and confirm they respond:
@@ -50,7 +62,7 @@ cargo build --release
   target/release/veen --help | head -n 5
   target/release/veen version
   ```
-- You should see version output such as `veen x.y.z (git <hash>)`. Any missing binary usually means the build did not finish; rerun `cargo build --release` and inspect errors above.
+- Expected result: a version string like `veen x.y.z (git <hash>)` and four binaries present. Missing files usually mean the build aborted; re-run `cargo build --release` and read the first error in the log.
 
 Outputs under `target/release/`:
 - `veen` – CLI used across all workflows
@@ -77,11 +89,11 @@ sudo install -d -m 0755 /etc/veen
 sudo install -d -m 0750 /var/log/veen
 ```
 
-`/var/lib/veen` should be writable by the service account that runs the hub. `/etc/veen` can hold static configuration such as `hub-config.toml` and TLS material if you supply `--tls-cert`/`--tls-key`.
+`/var/lib/veen` should be writable by the service account that runs the hub. `/etc/veen` can hold static configuration such as `hub-config.toml` and TLS material if you supply `--tls-cert`/`--tls-key`. Logs default to stderr; set `RUST_LOG` or `VEEN_LOG_LEVEL` to adjust verbosity.
 
 ## 2. Local developer quickstart
 
-Before starting, create a disposable workspace (e.g. `/tmp/veen-hub` and `/tmp/veen-client`) so you can delete everything after experimenting.
+Complete these steps in order the first time you run VEEN. Create a disposable workspace (e.g. `/tmp/veen-hub` and `/tmp/veen-client`) so you can delete everything afterwards.
 
 1. **Start a hub in the foreground**
    ```shell
@@ -90,7 +102,7 @@ Before starting, create a disposable workspace (e.g. `/tmp/veen-hub` and `/tmp/v
      --data-dir /tmp/veen-hub \
      --foreground
    ```
-   Stop with `Ctrl+C`. `--data-dir` accepts a local path or a `file://` URI. When not running in the foreground, the hub detaches and writes its PID under `<data-dir>/hub.pid` for `hub stop` to consume. On first start you should see the listen address, profile identifier, and log path printed to the terminal; a missing `--listen` error usually means another process is bound to that port.
+   Stop with `Ctrl+C`. `--data-dir` accepts a local path or a `file://` URI. When not running in the foreground, the hub detaches and writes its PID under `<data-dir>/hub.pid` for `hub stop` to consume. On first start you should see the listen address, profile identifier, and log path printed to the terminal. If you see “address already in use”, change `--listen` to a free port.
 
 2. **Generate a client identity**
    ```shell
@@ -107,7 +119,7 @@ Before starting, create a disposable workspace (e.g. `/tmp/veen-hub` and `/tmp/v
      --stream core/main \
      --body '{"text":"hello-veens"}'
    ```
-   Prints the committed sequence number and stores a JSON bundle under the hub data dir. You can pass `--cap <PATH>` to attach a capability token or `--attachment <FILE>` to bundle binary payloads; each flag may be repeated. If you see `unable to open hub`, double-check the path after `--hub` and that the process from step 1 is still running.
+   Expected result: the terminal prints the committed sequence number and the hub writes a JSON bundle under the data directory. Add `--cap <PATH>` to attach a capability token or `--attachment <FILE>` to bundle binary payloads; each flag may be repeated. Errors such as `unable to open hub` usually mean the path after `--hub` is wrong or the hub from step 1 has stopped.
 
 4. **Stream and decrypt messages**
    ```shell
@@ -135,11 +147,12 @@ Before starting, create a disposable workspace (e.g. `/tmp/veen-hub` and `/tmp/v
    This sends a shutdown signal to the backgrounded hub and waits for a clean exit.
 
 7. **Clean up**
+
    Remove temporary state when you are done exploring:
    ```shell
    rm -rf /tmp/veen-hub /tmp/veen-client
    ```
-   Re-run the steps above any time you want a fresh sandbox.
+   Re-run the steps above any time you want a fresh sandbox. When in doubt, delete the temporary directories and repeat steps 1–4 to return to a known-good state.
 
 ## 3. Additional flows
 
