@@ -1,34 +1,37 @@
 # VEEN Usage Compendium
 
-This document is the “first hour” guide for the VEEN CLI and its companion binaries (`veen`, `veen-hub`, `veen-selftest`, `veen-bridge`). It walks a new operator from zero to a working local hub, then shows how to repeat the same actions inside Docker or Kubernetes without learning new tooling.
+This is the “first hour” guide for the VEEN CLI and its companion binaries (`veen`, `veen-hub`, `veen-selftest`, `veen-bridge`). Follow the sections in order the first time you use VEEN, then dip back in as a reference for common tasks.
 
-**Who should read this**
-- **First-time users:** follow the prerequisites, then complete the Local quickstart once without skipping steps.
-- **Returning operators:** use the command blocks as a single reference so you do not have to cross-check other docs.
+**Who is this for?**
+- **First-time users:** start at “Before you begin”, then follow the Local developer quickstart exactly once end-to-end.
+- **Returning operators:** skip straight to the command blocks you need; each block is self-contained.
 
-**How to use this page**
-- Commands prefixed with `target/release/` assume you are running from a locally built tree. Drop the prefix when using system-wide installs or inside containers.
-- Replace placeholders such as `<PROFILE_ID>` with values from your environment. Flags in backticks are literal.
-- Temporary paths like `/tmp/veen-hub` are safe to delete afterwards; production deployments should point to persistent paths (see “Manual installation”).
-- When something fails, re-run with `--verbose` for noisy logging and watch for filesystem permission errors around your chosen data directory.
+**Reading tips**
+- Commands written with `target/release/` assume you built locally. Drop the prefix when using packaged binaries or when already inside Docker/Kubernetes.
+- Replace placeholders like `<PROFILE_ID>` with your own values. Flags in backticks are literal.
+- Use temporary paths such as `/tmp/veen-hub` for experiments; for long-lived hubs see “Manual installation” for persistent directories.
+- If something fails, re-run with `--verbose` to see detailed logs. Most first-run issues relate to filesystem permissions on the chosen data directory.
 
 **Fast navigation**
-- [1. Prerequisites and build](#1-prerequisites-and-build)
-- [2. Local developer quickstart](#2-local-developer-quickstart)
-- [3. Additional flows](#3-additional-flows)
-- [4. Running with containers](#4-running-with-containers)
-- [5. Environment descriptors (`veen env`)](#5-environment-descriptors-veen-env)
-- [6. Kubernetes workflows (`veen kube`)](#6-kubernetes-workflows-veen-kube)
-- [7. Verification and tests](#7-verification-and-tests)
-- [8. Common helper tools](#8-common-helper-tools)
-- [9. Further reading](#9-further-reading)
+- [1. Before you begin](#1-before-you-begin)
+- [2. Build and sanity-check](#2-build-and-sanity-check)
+- [3. Local developer quickstart](#3-local-developer-quickstart)
+- [4. Additional flows](#4-additional-flows)
+- [5. Running with containers](#5-running-with-containers)
+- [6. Environment descriptors (`veen env`)](#6-environment-descriptors-veen-env)
+- [7. Kubernetes workflows (`veen kube`)](#7-kubernetes-workflows-veen-kube)
+- [8. Verification and tests](#8-verification-and-tests)
+- [9. Common helper tools](#9-common-helper-tools)
+- [10. Further reading](#10-further-reading)
 
-## 1. Prerequisites and build
+## 1. Before you begin
 
-### Required packages
-- Target OS: Ubuntu 22.04/24.04 (including WSL2). macOS works if you replace `apt` with Homebrew equivalents.
-- Dependencies: `build-essential pkg-config libssl-dev curl ca-certificates`
-- Optional: `jq` for inspecting JSON outputs and `just` for common developer tasks
+### Supported platforms and packages
+- Target OS: Ubuntu 22.04/24.04 (including WSL2). macOS works if you swap `apt` commands for Homebrew equivalents.
+- Required packages: `build-essential pkg-config libssl-dev curl ca-certificates`
+- Recommended extras: `jq` for inspecting JSON outputs and `just` for developer shortcuts
+
+Install everything in one go on Ubuntu:
 
 ```shell
 sudo apt update
@@ -37,7 +40,7 @@ sudo apt install -y jq just # optional, but useful for debugging
 ```
 
 ### Rust toolchain
-Use the pinned stable toolchain declared in `rust-toolchain.toml` so your build matches CI:
+Use the pinned stable toolchain declared in `rust-toolchain.toml` so your build matches CI and the Docker image:
 
 ```shell
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -46,6 +49,8 @@ cargo --version # verify Rust is available
 ```
 
 If your shell cannot find `cargo`, ensure `~/.cargo/bin` is present on your `PATH` (rerun `source "$HOME/.cargo/env"`).
+
+## 2. Build and sanity-check
 
 ### Build the workspace
 
@@ -64,7 +69,7 @@ cargo build --release
   ```
 - Expected result: a version string like `veen x.y.z (git <hash>)` and four binaries present. Missing files usually mean the build aborted; re-run `cargo build --release` and read the first error in the log.
 
-Outputs under `target/release/`:
+You should now have four binaries under `target/release/`:
 - `veen` – CLI used across all workflows
 - `veen-hub` – hub runtime binary (invoked via `veen hub`)
 - `veen-selftest` – self-test harness
@@ -91,7 +96,7 @@ sudo install -d -m 0750 /var/log/veen
 
 `/var/lib/veen` should be writable by the service account that runs the hub. `/etc/veen` can hold static configuration such as `hub-config.toml` and TLS material if you supply `--tls-cert`/`--tls-key`. Logs default to stderr; set `RUST_LOG` or `VEEN_LOG_LEVEL` to adjust verbosity.
 
-## 2. Local developer quickstart
+## 3. Local developer quickstart
 
 Complete these steps in order the first time you run VEEN. Create a disposable workspace (e.g. `/tmp/veen-hub` and `/tmp/veen-client`) so you can delete everything afterwards.
 
@@ -154,7 +159,7 @@ Complete these steps in order the first time you run VEEN. Create a disposable w
    ```
    Re-run the steps above any time you want a fresh sandbox. When in doubt, delete the temporary directories and repeat steps 1–4 to return to a known-good state.
 
-## 3. Additional flows
+## 4. Additional flows
 
 ### Viewing schema descriptors
 - Inspect a registered schema:
@@ -190,7 +195,7 @@ Prints the state hash and MMR root, highlighting the first mismatch when present
 
 For local debug you can point `--hub` at a filesystem path (e.g. `/tmp/veen-hub`) instead of HTTP(S). Combine with `--expected-root <HEX>` to assert a specific Merkle root during CI.
 
-## 4. Running with containers
+## 5. Running with containers
 
 Docker packaging persists hub data in a named volume.
 
@@ -238,7 +243,7 @@ Set `VEEN_LISTEN`, `VEEN_LOG_LEVEL`, `VEEN_PROFILE_ID`, `VEEN_CONFIG_PATH`, etc.
 
 For TLS, mount cert/key pairs into the container and reference them with `VEEN_TLS_CERT`/`VEEN_TLS_KEY`. Logging verbosity can be increased with `VEEN_LOG_LEVEL=debug` to mirror the `--verbose` flag of the CLI.
 
-## 5. Environment descriptors (`veen env`)
+## 6. Environment descriptors (`veen env`)
 
 Environment files (`*.env.json`) capture cluster context, namespace, and hub metadata for reuse across commands.
 
@@ -277,7 +282,7 @@ Environment files (`*.env.json`) capture cluster context, namespace, and hub met
 
 Subsequent CLI calls can use `--env ~/.config/veen/demo.env.json --hub-name primary` to resolve service URLs and profile IDs automatically. When both `--env` and explicit flags are supplied, the explicit flags win.
 
-## 6. Kubernetes workflows (`veen kube`)
+## 7. Kubernetes workflows (`veen kube`)
 
 Follows `doc/CLI-GOALS-3.txt` to render and apply Namespace/ServiceAccount/RBAC/ConfigMap/Secret/Deployment/Service resources. All subcommands support `--json`.
 
@@ -339,7 +344,7 @@ Run `veen send` / `veen stream` inside short-lived Jobs that mount Secrets conta
 
 Jobs mount Secrets to `/var/lib/veen-client` (and `/var/lib/veen-cap`), stream pod logs in real time, and optionally persist ACK state via `--state-pvc`.
 
-## 7. Verification and tests
+## 8. Verification and tests
 
 - Run all unit tests: `cargo test --workspace`
 - Self-test harness: `target/release/veen selftest core` / `props` / `fuzz` / `all`
@@ -347,12 +352,12 @@ Jobs mount Secrets to `/var/lib/veen-client` (and `/var/lib/veen-cap`), stream p
 
 Temporary directories under `/tmp` are removed automatically on success or failure.
 
-## 8. Common helper tools
+## 9. Common helper tools
 
 - `Justfile` commands: `just ci` (fmt + clippy + test), `just fmt`, `just cli -- --help`
 - Performance: `just perf -- "--requests 512 --concurrency 64"` (add `--mode http` for HTTP latency)
 
-## 9. Further reading
+## 10. Further reading
 
 - Protocol/overlay specs: `doc/spec-1.txt`–`spec-5.txt`, `doc/wallet-spec.txt`, `doc/products-spec-1.txt`
 - CLI/OS goals: `doc/CLI-GOALS-1.txt`–`CLI-GOALS-3.txt`, `doc/OS-GOALS.txt`
