@@ -1,6 +1,15 @@
 # VEEN Usage Compendium
 
-This guide collects end-to-end workflows for the VEEN binaries (`veen`, `veen-hub`, `veen-selftest`, `veen-bridge`). It keeps the commands in one place so operators can move between local development, containerised deployments, and Kubernetes without changing tooling. Every command shown below can be issued against binaries in `target/release`, a manually installed system-wide binary, or inside containers unless noted otherwise.
+This guide collects end-to-end workflows for the VEEN binaries (`veen`, `veen-hub`, `veen-selftest`, `veen-bridge`). It keeps the commands in one place so operators can move between local development, containerised deployments, and Kubernetes without changing tooling. Every command shown below can be issued against binaries in `target/release`, a manually installed system-wide binary, or inside containers unless noted otherwise. If you have never touched VEEN before, start with the “Prerequisites and build” section, run the “Local developer quickstart” once end-to-end, and only then jump into containers or Kubernetes.
+
+**Who this document is for**
+- Anyone new to the VEEN binaries who wants a working setup in under an hour.
+- Existing operators who need a single reference for common commands without cross-referencing other docs.
+
+**How to read the commands**
+- Commands prefixed with `target/release/` expect a locally built binary. If you installed VEEN system-wide, drop the prefix and run `veen ...` directly.
+- Paths such as `/tmp/veen-hub` are safe to delete after experiments; production deployments should use persistent locations (see “Manual installation”).
+- Flags shown in backticks are literal. Replace bracketed placeholders like `<PROFILE_ID>` with values from your environment.
 
 ## 1. Prerequisites and build
 
@@ -24,6 +33,8 @@ source "$HOME/.cargo/env"
 cargo --version # verify Rust is available
 ```
 
+If your shell cannot find `cargo`, ensure `~/.cargo/bin` is present on your `PATH` (rerun `source "$HOME/.cargo/env"`).
+
 ### Build the workspace
 
 ```shell
@@ -31,6 +42,15 @@ cargo build --release
 ```
 
 `cargo` will fetch dependencies on first run. Use `CARGO_NET_OFFLINE=true` for an air-gapped build when the dependency cache is already populated.
+
+#### Quick sanity check
+- List the installed binaries and confirm they respond:
+  ```shell
+  ls target/release/veen*
+  target/release/veen --help | head -n 5
+  target/release/veen version
+  ```
+- You should see version output such as `veen x.y.z (git <hash>)`. Any missing binary usually means the build did not finish; rerun `cargo build --release` and inspect errors above.
 
 Outputs under `target/release/`:
 - `veen` – CLI used across all workflows
@@ -61,6 +81,8 @@ sudo install -d -m 0750 /var/log/veen
 
 ## 2. Local developer quickstart
 
+Before starting, create a disposable workspace (e.g. `/tmp/veen-hub` and `/tmp/veen-client`) so you can delete everything after experimenting.
+
 1. **Start a hub in the foreground**
    ```shell
    target/release/veen hub start \
@@ -68,7 +90,7 @@ sudo install -d -m 0750 /var/log/veen
      --data-dir /tmp/veen-hub \
      --foreground
    ```
-   Stop with `Ctrl+C`. `--data-dir` accepts a local path or a `file://` URI. When not running in the foreground, the hub detaches and writes its PID under `<data-dir>/hub.pid` for `hub stop` to consume.
+   Stop with `Ctrl+C`. `--data-dir` accepts a local path or a `file://` URI. When not running in the foreground, the hub detaches and writes its PID under `<data-dir>/hub.pid` for `hub stop` to consume. On first start you should see the listen address, profile identifier, and log path printed to the terminal; a missing `--listen` error usually means another process is bound to that port.
 
 2. **Generate a client identity**
    ```shell
@@ -85,7 +107,7 @@ sudo install -d -m 0750 /var/log/veen
      --stream core/main \
      --body '{"text":"hello-veens"}'
    ```
-   Prints the committed sequence number and stores a JSON bundle under the hub data dir. You can pass `--cap <PATH>` to attach a capability token or `--attachment <FILE>` to bundle binary payloads; each flag may be repeated.
+   Prints the committed sequence number and stores a JSON bundle under the hub data dir. You can pass `--cap <PATH>` to attach a capability token or `--attachment <FILE>` to bundle binary payloads; each flag may be repeated. If you see `unable to open hub`, double-check the path after `--hub` and that the process from step 1 is still running.
 
 4. **Stream and decrypt messages**
    ```shell
@@ -111,6 +133,13 @@ sudo install -d -m 0750 /var/log/veen
    target/release/veen hub stop --data-dir /tmp/veen-hub
    ```
    This sends a shutdown signal to the backgrounded hub and waits for a clean exit.
+
+7. **Clean up**
+   Remove temporary state when you are done exploring:
+   ```shell
+   rm -rf /tmp/veen-hub /tmp/veen-client
+   ```
+   Re-run the steps above any time you want a fresh sandbox.
 
 ## 3. Additional flows
 
@@ -151,6 +180,11 @@ For local debug you can point `--hub` at a filesystem path (e.g. `/tmp/veen-hub`
 ## 4. Running with containers
 
 Docker packaging persists hub data in a named volume.
+
+Prerequisites:
+- Docker Engine 24+ and Docker Compose Plugin v2.2+ installed on the host.
+- Ports `37411` (default) or your chosen `HUB_PORT` must be free.
+- The current working directory should be the repo root (so Compose can build or locate the binary).
 
 1. **Build and start**
    ```shell
