@@ -197,36 +197,36 @@ Environment files (`*.env.json`) capture cluster context, namespace, and hub met
 
 1. **Initialise**
    ```shell
-    veen env init \
-      --root ~/.config/veen \
-      --name demo \
-      --cluster-context kind-demo \
-      --namespace veen-tenant-demo \
-      --description "demo tenant"
-  ```
-  `--root` must be an existing directory; VEEN will create the `.env.json` file within it. The description is optional but helps distinguish similar clusters.
+   veen env init \
+     --root ~/.config/veen \
+     --name demo \
+     --cluster-context kind-demo \
+     --namespace veen-tenant-demo \
+     --description "demo tenant"
+   ```
+   `--root` must be an existing directory; VEEN will create the `.env.json` file within it. The description is optional but helps distinguish similar clusters.
 
 2. **Register hubs and tenants**
    ```shell
-    veen env add-hub \
-      --env ~/.config/veen/demo.env.json \
-      --hub-name primary \
-      --service-url https://hub.demo.internal:8443 \
-      --profile-id <PROFILE_ID>
-  veen env add-tenant \
-      --env ~/.config/veen/demo.env.json \
-      --tenant-id demo \
-      --stream-prefix core \
-      --label-class wallet
-  ```
-  Use `veen env add-cap` to register capabilities or `veen env add-client` when distributing pre-generated client identities to operators.
+   veen env add-hub \
+     --env ~/.config/veen/demo.env.json \
+     --hub-name primary \
+     --service-url https://hub.demo.internal:8443 \
+     --profile-id <PROFILE_ID>
+   veen env add-tenant \
+     --env ~/.config/veen/demo.env.json \
+     --tenant-id demo \
+     --stream-prefix core \
+     --label-class wallet
+   ```
+   Use `veen env add-cap` to register capabilities or `veen env add-client` when distributing pre-generated client identities to operators.
 
 3. **Inspect**
    ```shell
-  veen env show --env ~/.config/veen/demo.env.json
-  veen env show --env ~/.config/veen/demo.env.json --json
-  ```
-  `--json` output includes embedded hub profile IDs, service URLs, and tenant stream prefixes for consumption by automation.
+   veen env show --env ~/.config/veen/demo.env.json
+   veen env show --env ~/.config/veen/demo.env.json --json
+   ```
+   `--json` output includes embedded hub profile IDs, service URLs, and tenant stream prefixes for consumption by automation.
 
 Subsequent CLI calls can use `--env ~/.config/veen/demo.env.json --hub-name primary` to resolve service URLs and profile IDs automatically. When both `--env` and explicit flags are supplied, the explicit flags win.
 
