@@ -29,6 +29,7 @@ used to drive end-to-end workflows.
   - [Prerequisites](#prerequisites)
   - [Build the workspace](#build-the-workspace)
   - [Local developer quickstart](#local-developer-quickstart)
+- [Comprehensive usage guide](#comprehensive-usage-guide)
 - [Manual installation](#manual-installation)
 - [Development workflow](#development-workflow)
 - [Testing and verification](#testing-and-verification)
@@ -485,6 +486,12 @@ veen kube job stream \
 The CLI watches the Job status, relays pod logs (so decrypted payloads and
 receipt summaries appear immediately), and returns a non-zero exit code when the
 Job fails to complete successfully.
+
+## Comprehensive usage guide
+
+For an end-to-end catalogue of VEEN workflows—including container/Kubernetes
+operations, PoW handling, snapshot verification, environment descriptors, and
+commonly used helper commands—see [`doc/USAGE.md`](doc/USAGE.md).
 
 ## Manual installation
 
