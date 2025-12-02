@@ -1,16 +1,18 @@
 # VEEN Usage Compendium
 
-This guide collects end-to-end workflows for the VEEN binaries (`veen`, `veen-hub`, `veen-selftest`, `veen-bridge`). It keeps the commands in one place so operators can move between local development, containerised deployments, and Kubernetes without changing tooling.
+This guide collects end-to-end workflows for the VEEN binaries (`veen`, `veen-hub`, `veen-selftest`, `veen-bridge`). It keeps the commands in one place so operators can move between local development, containerised deployments, and Kubernetes without changing tooling. Every command shown below can be issued against binaries in `target/release`, a manually installed system-wide binary, or inside containers unless noted otherwise.
 
 ## 1. Prerequisites and build
 
 ### Required packages
 - Target OS: Ubuntu 22.04/24.04 (including WSL2)
 - Dependencies: `build-essential pkg-config libssl-dev curl ca-certificates`
+- Optional: `jq` for inspecting JSON outputs and `just` for common developer tasks
 
 ```shell
 sudo apt update
 sudo apt install -y build-essential pkg-config libssl-dev curl ca-certificates
+sudo apt install -y jq just # optional, but useful for debugging
 ```
 
 ### Rust toolchain
@@ -19,6 +21,7 @@ Use the pinned stable toolchain declared in `rust-toolchain.toml`:
 ```shell
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
+cargo --version # verify Rust is available
 ```
 
 ### Build the workspace
@@ -26,6 +29,8 @@ source "$HOME/.cargo/env"
 ```shell
 cargo build --release
 ```
+
+`cargo` will fetch dependencies on first run. Use `CARGO_NET_OFFLINE=true` for an air-gapped build when the dependency cache is already populated.
 
 Outputs under `target/release/`:
 - `veen` – CLI used across all workflows
@@ -42,6 +47,8 @@ sudo install -m 0755 target/release/veen-selftest /usr/local/bin/veen-selftest
 sudo install -m 0755 target/release/veen-bridge /usr/local/bin/veen-bridge
 ```
 
+When packaging for production hosts, prefer copying the four binaries into `/usr/local/bin` as a single step using your configuration manager (Ansible, Chef, etc.). All binaries are static and require no extra runtime dependencies beyond glibc and OpenSSL.
+
 Recommended directories:
 
 ```shell
@@ -49,6 +56,8 @@ sudo install -d -m 0750 /var/lib/veen
 sudo install -d -m 0755 /etc/veen
 sudo install -d -m 0750 /var/log/veen
 ```
+
+`/var/lib/veen` should be writable by the service account that runs the hub. `/etc/veen` can hold static configuration such as `hub-config.toml` and TLS material if you supply `--tls-cert`/`--tls-key`.
 
 ## 2. Local developer quickstart
 
@@ -59,12 +68,14 @@ sudo install -d -m 0750 /var/log/veen
      --data-dir /tmp/veen-hub \
      --foreground
    ```
-   Stop with `Ctrl+C`. `--data-dir` accepts a local path or a `file://` URI.
+   Stop with `Ctrl+C`. `--data-dir` accepts a local path or a `file://` URI. When not running in the foreground, the hub detaches and writes its PID under `<data-dir>/hub.pid` for `hub stop` to consume.
 
 2. **Generate a client identity**
    ```shell
    target/release/veen keygen --out /tmp/veen-client
    ```
+
+   The command creates `client.json` (public key material) and `client.secret.json` (private key). Keep the secret file outside version control and back it up securely.
 
 3. **Send an encrypted message**
    ```shell
@@ -74,7 +85,7 @@ sudo install -d -m 0750 /var/log/veen
      --stream core/main \
      --body '{"text":"hello-veens"}'
    ```
-   Prints the committed sequence number and stores a JSON bundle under the hub data dir.
+   Prints the committed sequence number and stores a JSON bundle under the hub data dir. You can pass `--cap <PATH>` to attach a capability token or `--attachment <FILE>` to bundle binary payloads; each flag may be repeated.
 
 4. **Stream and decrypt messages**
    ```shell
@@ -86,16 +97,20 @@ sudo install -d -m 0750 /var/log/veen
    ```
    Displays decrypted bodies, attachment metadata, and received sequence numbers. ACK state is maintained client-side.
 
+   Add `--with-proof` to request cryptographic proofs for each record or `--follow` to keep streaming new messages.
+
 5. **Inspect hub status and keys**
    ```shell
    target/release/veen hub status --hub /tmp/veen-hub
    target/release/veen hub key --hub /tmp/veen-hub
    ```
+   `hub status` reports the listen address, current state root, and whether PoW is enabled. `hub key` prints the hub's signing key and profile identifier.
 
 6. **Stop a background hub**
    ```shell
    target/release/veen hub stop --data-dir /tmp/veen-hub
    ```
+   This sends a shutdown signal to the backgrounded hub and waits for a clean exit.
 
 ## 3. Additional flows
 
@@ -117,6 +132,8 @@ If a hub demands PoW, supply the parameters on `veen send` or `veen rpc call`:
 
 Enable PoW requirements on the hub with `veen hub start --pow-difficulty`.
 
+Include `--pow-max-time <SECONDS>` to cap the time spent solving. All PoW parameters are echoed back in verbose logs to aid debugging.
+
 ### Snapshot verification
 Verify that a stream state matches a checkpoint:
 ```shell
@@ -129,6 +146,8 @@ veen snapshot verify \
 ```
 Prints the state hash and MMR root, highlighting the first mismatch when present. Use `--json` for structured output.
 
+For local debug you can point `--hub` at a filesystem path (e.g. `/tmp/veen-hub`) instead of HTTP(S). Combine with `--expected-root <HEX>` to assert a specific Merkle root during CI.
+
 ## 4. Running with containers
 
 Docker packaging persists hub data in a named volume.
@@ -139,12 +158,16 @@ Docker packaging persists hub data in a named volume.
    ```
    Listens on `0.0.0.0:37411` with `restart: unless-stopped`.
 
+   Override the exposed port with `HUB_PORT=<PORT> docker compose up -d` if you need to avoid clashes. Compose injects the hub binary built from the local workspace by default; set `HUB_IMAGE` to pull a prebuilt image instead.
+
 2. **Health and logs**
    ```shell
    docker compose logs -f hub
    docker compose ps
    ```
    A container healthcheck runs `veen hub health` internally.
+
+   Use `docker compose exec hub veen hub status --hub /var/lib/veen` to confirm the in-container data directory and profile ID.
 
 3. **Use the CLI inside the container**
    Keep client material on the shared volume:
@@ -166,41 +189,46 @@ Docker packaging persists hub data in a named volume.
 ### Overriding environment variables
 Set `VEEN_LISTEN`, `VEEN_LOG_LEVEL`, `VEEN_PROFILE_ID`, `VEEN_CONFIG_PATH`, etc. in `docker-compose.yml` or via `docker compose run -e` to control listen addresses or config paths.
 
+For TLS, mount cert/key pairs into the container and reference them with `VEEN_TLS_CERT`/`VEEN_TLS_KEY`. Logging verbosity can be increased with `VEEN_LOG_LEVEL=debug` to mirror the `--verbose` flag of the CLI.
+
 ## 5. Environment descriptors (`veen env`)
 
 Environment files (`*.env.json`) capture cluster context, namespace, and hub metadata for reuse across commands.
 
 1. **Initialise**
    ```shell
-   veen env init \
-     --root ~/.config/veen \
-     --name demo \
-     --cluster-context kind-demo \
-     --namespace veen-tenant-demo \
-     --description "demo tenant"
-   ```
+    veen env init \
+      --root ~/.config/veen \
+      --name demo \
+      --cluster-context kind-demo \
+      --namespace veen-tenant-demo \
+      --description "demo tenant"
+  ```
+  `--root` must be an existing directory; VEEN will create the `.env.json` file within it. The description is optional but helps distinguish similar clusters.
 
 2. **Register hubs and tenants**
    ```shell
-   veen env add-hub \
-     --env ~/.config/veen/demo.env.json \
-     --hub-name primary \
-     --service-url https://hub.demo.internal:8443 \
-     --profile-id <PROFILE_ID>
-   veen env add-tenant \
-     --env ~/.config/veen/demo.env.json \
-     --tenant-id demo \
-     --stream-prefix core \
-     --label-class wallet
-   ```
+    veen env add-hub \
+      --env ~/.config/veen/demo.env.json \
+      --hub-name primary \
+      --service-url https://hub.demo.internal:8443 \
+      --profile-id <PROFILE_ID>
+  veen env add-tenant \
+      --env ~/.config/veen/demo.env.json \
+      --tenant-id demo \
+      --stream-prefix core \
+      --label-class wallet
+  ```
+  Use `veen env add-cap` to register capabilities or `veen env add-client` when distributing pre-generated client identities to operators.
 
 3. **Inspect**
    ```shell
-   veen env show --env ~/.config/veen/demo.env.json
-   veen env show --env ~/.config/veen/demo.env.json --json
-   ```
+  veen env show --env ~/.config/veen/demo.env.json
+  veen env show --env ~/.config/veen/demo.env.json --json
+  ```
+  `--json` output includes embedded hub profile IDs, service URLs, and tenant stream prefixes for consumption by automation.
 
-Subsequent CLI calls can use `--env ~/.config/veen/demo.env.json --hub-name primary` to resolve service URLs and profile IDs automatically.
+Subsequent CLI calls can use `--env ~/.config/veen/demo.env.json --hub-name primary` to resolve service URLs and profile IDs automatically. When both `--env` and explicit flags are supplied, the explicit flags win.
 
 ## 6. Kubernetes workflows (`veen kube`)
 
