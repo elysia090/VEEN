@@ -4712,6 +4712,7 @@ fn render_id_usage(entries: &[IdUsageEntry], use_json: bool) {
     }
 }
 
+#[derive(Debug)]
 struct SendOutcome {
     stream: String,
     seq: u64,
@@ -4719,17 +4720,20 @@ struct SendOutcome {
     detail: SendOutcomeDetail,
 }
 
+#[derive(Debug)]
 enum SendOutcomeDetail {
     Local(Box<LocalSendDetail>),
     Remote(RemoteSendDetail),
 }
 
+#[derive(Debug)]
 struct LocalSendDetail {
     message: StoredMessage,
     bundle_path: PathBuf,
     receipt: StreamReceipt,
 }
 
+#[derive(Debug)]
 struct RemoteSendDetail {
     response: RemoteSubmitResponse,
 }
