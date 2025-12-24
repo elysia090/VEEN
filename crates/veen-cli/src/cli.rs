@@ -10732,7 +10732,10 @@ mod tests {
 
         match cli.command {
             Command::Help(args) => {
-                assert_eq!(args.command, vec!["hub".to_string(), "tls-info".to_string()]);
+                assert_eq!(
+                    args.command,
+                    vec!["hub".to_string(), "tls-info".to_string()]
+                );
             }
             _ => panic!("unexpected command parsed"),
         }
