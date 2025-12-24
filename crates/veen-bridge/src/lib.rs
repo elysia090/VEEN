@@ -243,7 +243,9 @@ impl BridgeRuntime {
         let state = self
             .streams
             .get_mut(stream)
-            .expect("stream state must exist after bridge request");
+            .with_context(|| {
+                format!("stream state missing after bridge request for stream {stream}")
+            })?;
         state.mmr = preview_mmr;
         state.next_seq = state.next_seq.saturating_add(1);
         Ok(())
