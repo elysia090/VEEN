@@ -499,6 +499,17 @@ pub async fn run_hardened(reporter: &mut SelftestReporter<'_>) -> Result<()> {
 
 /// Label and schema overlays (META0+) self-tests.
 pub async fn run_meta(reporter: &mut SelftestReporter<'_>) -> Result<()> {
+    let prereqs = process_harness::core_suite_prereqs()
+        .context("checking meta suite prerequisites")?;
+    if !prereqs.ready() {
+        let missing = prereqs.missing.join("; ");
+        let diagnostics = prereqs.diagnostics.join("; ");
+        bail!(
+            "meta integration suite prerequisites missing: {missing}. diagnostics: {diagnostics}. \
+            Ensure veen-hub/veen-cli binaries are available, the hub data directory is writable, \
+            and META0+ schema registry endpoints are enabled."
+        );
+    }
     let harness = IntegrationHarness::new()
         .await
         .context("initialising meta integration harness")?;
@@ -523,6 +534,10 @@ pub async fn run_meta(reporter: &mut SelftestReporter<'_>) -> Result<()> {
         ],
         perf: None,
     });
+    ensure!(
+        reporter.recorded() > 0,
+        "meta self-test did not record any entries"
+    );
 
     tracing::info!("meta overlay self-tests completed successfully");
     Ok(())

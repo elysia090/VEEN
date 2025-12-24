@@ -10,7 +10,7 @@ use ed25519_dalek::{Signer, SigningKey};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use rand::rngs::OsRng;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use serde_json::json;
@@ -1280,28 +1280,29 @@ impl IntegrationHarness {
 
         let payload = encode_signed_envelope(schema_meta_schema(), &descriptor, &signing_key)
             .context("encoding schema register payload")?;
-        self.http
+        let register_response = self
+            .http
             .post(format!("{hub_base}/schema"))
             .header("content-type", "application/cbor")
             .body(payload)
             .send()
             .await
-            .context("registering schema via overlay")?
-            .error_for_status()
-            .context("schema register rejected")?;
+            .context("registering schema via overlay")?;
+        meta_overlay_response_or_bail(register_response, "schema register").await?;
 
-        let registry: Vec<SchemaDescriptor> = self
+        let registry_response = self
             .http
             .get(format!("{hub_base}/schema"))
             .send()
             .await
-            .context("fetching schema registry")?
-            .error_for_status()
-            .context("schema list rejected")?
-            .json()
-            .await
-            .context("decoding schema registry")?;
-        let fetched: SchemaDescriptor = self
+            .context("fetching schema registry")?;
+        let registry: Vec<SchemaDescriptor> =
+            meta_overlay_response_or_bail(registry_response, "schema registry list")
+                .await?
+                .json()
+                .await
+                .context("decoding schema registry")?;
+        let fetched_response = self
             .http
             .get(format!(
                 "{hub_base}/schema/{}",
@@ -1309,12 +1310,13 @@ impl IntegrationHarness {
             ))
             .send()
             .await
-            .context("fetching schema descriptor")?
-            .error_for_status()
-            .context("schema fetch rejected")?
-            .json()
-            .await
-            .context("decoding schema descriptor")?;
+            .context("fetching schema descriptor")?;
+        let fetched: SchemaDescriptor =
+            meta_overlay_response_or_bail(fetched_response, "schema registry entry fetch")
+                .await?
+                .json()
+                .await
+                .context("decoding schema descriptor")?;
 
         ensure!(
             fetched.schema_id == descriptor.schema_id
@@ -2575,6 +2577,34 @@ fn current_unix_timestamp_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or_default()
+}
+
+async fn meta_overlay_response_or_bail(
+    response: reqwest::Response,
+    action: &str,
+) -> Result<reqwest::Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let mut message = format!("meta overlay {action} failed with status {status}");
+    if !body.trim().is_empty() {
+        message.push_str(&format!(": {body}"));
+    }
+    if matches!(
+        status,
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED | StatusCode::BAD_REQUEST
+    ) {
+        message.push_str(
+            ". META0+ overlay tests require a hub that exposes the schema registry endpoints \
+            (/schema and /schema/<id>), has a writable data directory for registry persistence, \
+            and is built/configured with META0+ support. If you are using a custom hub config, \
+            verify it is loaded and does not disable schema registry features.",
+        );
+    }
+    bail!(message);
 }
 
 pub async fn run_core_suite() -> Result<()> {
