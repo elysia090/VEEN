@@ -130,7 +130,34 @@ impl StreamRuntime {
 
 struct DuplicateDetector {
     bloom: Bloom<[u8; 32]>,
-    recent: LruCache<LeafHash, ()>,
+    recent: LruCache<DedupKey, ()>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct DedupKey {
+    stream: String,
+    leaf_hash: LeafHash,
+}
+
+impl DedupKey {
+    fn new(stream: String, leaf_hash: LeafHash) -> Self {
+        Self { stream, leaf_hash }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct DedupCacheEntry {
+    stream: String,
+    leaf_hash: String,
+}
+
+impl From<&DedupKey> for DedupCacheEntry {
+    fn from(key: &DedupKey) -> Self {
+        Self {
+            stream: key.stream.clone(),
+            leaf_hash: hex::encode(key.leaf_hash.as_bytes()),
+        }
+    }
 }
 
 enum DedupCheck {
@@ -150,43 +177,57 @@ impl DuplicateDetector {
         }
     }
 
-    fn seed<I: IntoIterator<Item = LeafHash>>(&mut self, hashes: I) {
-        for hash in hashes {
-            self.insert(&hash);
+    fn seed<I: IntoIterator<Item = DedupKey>>(&mut self, entries: I) {
+        for entry in entries {
+            self.insert(entry);
         }
     }
 
-    fn insert(&mut self, hash: &LeafHash) {
-        self.bloom.set(hash.as_bytes());
-        self.recent.put(*hash, ());
+    fn insert(&mut self, key: DedupKey) {
+        let key_bytes = dedup_key_bytes(&key.stream, &key.leaf_hash);
+        self.bloom.set(&key_bytes);
+        self.recent.put(key, ());
     }
 
-    fn check_and_insert(&mut self, hash: &LeafHash) -> DedupCheck {
-        if self.recent.get(hash).is_some() {
+    fn check_and_insert(&mut self, stream: &str, leaf_hash: &LeafHash) -> DedupCheck {
+        let key = DedupKey::new(stream.to_string(), *leaf_hash);
+        if self.recent.get(&key).is_some() {
             return DedupCheck::RecentDuplicate;
         }
-        if self.bloom.check(hash.as_bytes()) {
+        let key_bytes = dedup_key_bytes(stream, leaf_hash);
+        if self.bloom.check(&key_bytes) {
             return DedupCheck::BloomHit;
         }
-        self.insert(hash);
+        self.insert(key);
         DedupCheck::New
     }
 
-    fn confirm_duplicate(&mut self, hash: &LeafHash) {
-        self.recent.put(*hash, ());
+    fn confirm_duplicate(&mut self, stream: &str, leaf_hash: &LeafHash) {
+        self.recent
+            .put(DedupKey::new(stream.to_string(), *leaf_hash), ());
     }
 
-    fn confirm_unique(&mut self, hash: &LeafHash) {
-        self.insert(hash);
+    fn confirm_unique(&mut self, stream: &str, leaf_hash: &LeafHash) {
+        self.insert(DedupKey::new(stream.to_string(), *leaf_hash));
     }
 
-    fn recent_hashes(&self) -> Vec<LeafHash> {
+    fn recent_keys(&self) -> Vec<DedupKey> {
         self.recent
             .iter()
             .rev()
-            .map(|(hash, _)| *hash)
+            .map(|(key, _)| key.clone())
             .collect()
     }
+}
+
+fn dedup_key_bytes(stream: &str, leaf_hash: &LeafHash) -> [u8; 32] {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(stream.as_bytes());
+    hasher.update(leaf_hash.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&digest);
+    bytes
 }
 
 const MAX_ADMISSION_EVENTS: usize = 512;
@@ -211,15 +252,15 @@ impl HubPipeline {
         let schema_registry = build_schema_registry(&schema_descriptors);
         let identity = load_hub_identity(storage).await?;
         let mut dedup_detector = DuplicateDetector::new(&config.dedup);
-        let recent_hashes = match load_recent_leaf_hash_cache(storage, &config.dedup).await? {
-            Some(hashes) => hashes,
+        let recent_entries = match load_recent_dedup_cache(storage, &config.dedup).await? {
+            Some(entries) => entries,
             None => {
-                let hashes = collect_recent_leaf_hashes(&streams, &config.dedup)?;
-                persist_recent_leaf_hash_cache(storage, &hashes).await?;
-                hashes
+                let entries = collect_recent_dedup_entries(&streams, &config.dedup)?;
+                persist_recent_dedup_cache(storage, &entries).await?;
+                entries
             }
         };
-        dedup_detector.seed(recent_hashes);
+        dedup_detector.seed(recent_entries);
         let state = HubState {
             streams,
             capabilities,
@@ -545,19 +586,19 @@ impl HubPipeline {
         let mut confirmed_duplicate = false;
         let dedup_result = {
             let mut dedup = self.dedup.lock().await;
-            dedup.check_and_insert(&leaf)
+            dedup.check_and_insert(&stream, &leaf)
         };
         match dedup_result {
             DedupCheck::RecentDuplicate => {
                 confirmed_duplicate = true;
             }
             DedupCheck::BloomHit => {
-                confirmed_duplicate = leaf_hash_exists(&guard.streams, &leaf)?;
+                confirmed_duplicate = leaf_hash_exists(stream_runtime, &leaf)?;
                 let mut dedup = self.dedup.lock().await;
                 if confirmed_duplicate {
-                    dedup.confirm_duplicate(&leaf);
+                    dedup.confirm_duplicate(&stream, &leaf);
                 } else {
-                    dedup.confirm_unique(&leaf);
+                    dedup.confirm_unique(&stream, &leaf);
                 }
             }
             DedupCheck::New => {}
@@ -630,11 +671,11 @@ impl HubPipeline {
         }
 
         if let Err(err) = self
-            .persist_recent_leaf_hash_cache()
+            .persist_recent_dedup_cache()
             .await
-            .context("persisting recent leaf hash cache")
+            .context("persisting recent dedup cache")
         {
-            tracing::warn!(error = ?err, "failed to persist recent leaf hash cache");
+            tracing::warn!(error = ?err, "failed to persist recent dedup cache");
         }
 
         self.observability.record_submit_ok();
@@ -658,12 +699,12 @@ impl HubPipeline {
         Err(anyhow::Error::new(err))
     }
 
-    async fn persist_recent_leaf_hash_cache(&self) -> Result<()> {
-        let hashes = {
+    async fn persist_recent_dedup_cache(&self) -> Result<()> {
+        let entries = {
             let dedup = self.dedup.lock().await;
-            dedup.recent_hashes()
+            dedup.recent_keys()
         };
-        persist_recent_leaf_hash_cache(&self.storage, &hashes).await
+        persist_recent_dedup_cache(&self.storage, &entries).await
     }
 
     pub async fn bridge_ingest(
@@ -2411,22 +2452,26 @@ async fn load_existing_streams(storage: &HubStorage) -> Result<HashMap<String, S
     Ok(map)
 }
 
-fn collect_recent_leaf_hashes(
+fn collect_recent_dedup_entries(
     streams: &HashMap<String, StreamRuntime>,
     config: &DedupConfig,
-) -> Result<Vec<LeafHash>> {
+) -> Result<Vec<DedupKey>> {
     let limit = config.bloom_capacity.max(config.lru_capacity);
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let mut entries: Vec<(u64, u64, LeafHash)> = Vec::new();
+    let mut entries: Vec<(u64, u64, DedupKey)> = Vec::new();
 
     for runtime in streams.values() {
         let len = runtime.state.messages.len();
         let start = len.saturating_sub(limit);
         for message in runtime.state.messages.iter().skip(start) {
             let leaf = leaf_hash_for(message)?;
-            entries.push((message.sent_at, message.seq, leaf));
+            entries.push((
+                message.sent_at,
+                message.seq,
+                DedupKey::new(message.stream.clone(), leaf),
+            ));
         }
     }
 
@@ -2435,59 +2480,57 @@ fn collect_recent_leaf_hashes(
         entries.drain(0..entries.len().saturating_sub(limit));
     }
 
-    Ok(entries.into_iter().map(|(_, _, leaf)| leaf).collect())
+    Ok(entries.into_iter().map(|(_, _, key)| key).collect())
 }
 
-async fn load_recent_leaf_hash_cache(
+async fn load_recent_dedup_cache(
     storage: &HubStorage,
     config: &DedupConfig,
-) -> Result<Option<Vec<LeafHash>>> {
+) -> Result<Option<Vec<DedupKey>>> {
     let path = storage.recent_leaf_hashes_path();
     let data = match fs::read(&path).await {
         Ok(data) => data,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
         Err(err) => {
             return Err(err)
-                .with_context(|| format!("reading recent leaf hash cache from {}", path.display()))
+                .with_context(|| format!("reading recent dedup cache from {}", path.display()))
         }
     };
-    let encoded: Vec<String> = serde_json::from_slice(&data)
-        .with_context(|| format!("decoding recent leaf hash cache from {}", path.display()))?;
+    let encoded: Vec<DedupCacheEntry> = match serde_json::from_slice(&data) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(None),
+    };
     let limit = config.bloom_capacity.max(config.lru_capacity);
-    let mut hashes = Vec::with_capacity(encoded.len());
-    for hex_value in encoded {
-        let hash = LeafHash::from_str(&hex_value)
-            .with_context(|| format!("parsing cached leaf hash {}", hex_value))?;
-        hashes.push(hash);
+    let mut keys = Vec::with_capacity(encoded.len());
+    for entry in encoded {
+        let leaf_hash = LeafHash::from_str(&entry.leaf_hash).with_context(|| {
+            format!("parsing cached leaf hash {}", entry.leaf_hash)
+        })?;
+        keys.push(DedupKey::new(entry.stream, leaf_hash));
     }
-    if hashes.len() > limit {
-        hashes.drain(0..hashes.len().saturating_sub(limit));
+    if keys.len() > limit {
+        keys.drain(0..keys.len().saturating_sub(limit));
     }
-    Ok(Some(hashes))
+    Ok(Some(keys))
 }
 
-async fn persist_recent_leaf_hash_cache(storage: &HubStorage, hashes: &[LeafHash]) -> Result<()> {
+async fn persist_recent_dedup_cache(
+    storage: &HubStorage,
+    entries: &[DedupKey],
+) -> Result<()> {
     let path = storage.recent_leaf_hashes_path();
-    let encoded: Vec<String> = hashes
-        .iter()
-        .map(|hash| hex::encode(hash.as_bytes()))
-        .collect();
+    let encoded: Vec<DedupCacheEntry> = entries.iter().map(DedupCacheEntry::from).collect();
     let data = serde_json::to_vec(&encoded)
-        .with_context(|| format!("encoding recent leaf hash cache for {}", path.display()))?;
+        .with_context(|| format!("encoding recent dedup cache for {}", path.display()))?;
     fs::write(&path, data)
         .await
-        .with_context(|| format!("writing recent leaf hash cache to {}", path.display()))
+        .with_context(|| format!("writing recent dedup cache to {}", path.display()))
 }
 
-fn leaf_hash_exists(
-    streams: &HashMap<String, StreamRuntime>,
-    leaf_hash: &LeafHash,
-) -> Result<bool> {
-    for runtime in streams.values() {
-        for message in &runtime.state.messages {
-            if &leaf_hash_for(message)? == leaf_hash {
-                return Ok(true);
-            }
+fn leaf_hash_exists(runtime: &StreamRuntime, leaf_hash: &LeafHash) -> Result<bool> {
+    for message in &runtime.state.messages {
+        if &leaf_hash_for(message)? == leaf_hash {
+            return Ok(true);
         }
     }
     Ok(false)
