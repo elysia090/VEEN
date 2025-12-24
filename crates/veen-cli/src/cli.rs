@@ -5020,10 +5020,11 @@ async fn send_message_remote(client: HubHttpClient, args: SendArgs) -> Result<Se
         }
 
         if let Some(nonce) = args.pow_nonce {
-            let challenge_hex = args
-                .pow_challenge
-                .as_deref()
-                .expect("pow_nonce requires pow_challenge");
+            let challenge_hex = if let Some(challenge_hex) = args.pow_challenge.as_deref() {
+                challenge_hex
+            } else {
+                bail_usage!("--pow-nonce requires --pow-challenge");
+            };
             let challenge = decode_pow_challenge_hex(challenge_hex)?;
             let cookie = PowCookie {
                 challenge,
@@ -11564,6 +11565,42 @@ mod tests {
         assert_eq!(pow_cookie.difficulty, solved.difficulty);
         assert_eq!(pow_cookie.nonce, solved.nonce);
         assert_eq!(pow_cookie.challenge, challenge_bytes);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_remote_rejects_nonce_without_challenge() -> anyhow::Result<()> {
+        let client_dir = tempdir()?;
+        handle_keygen(KeygenArgs {
+            out: client_dir.path().to_path_buf(),
+        })
+        .await?;
+
+        let client = HubHttpClient::new(Url::parse("http://localhost")?, build_http_client()?);
+
+        let args = SendArgs {
+            hub: HubLocatorArgs::from_url("http://localhost".to_string()),
+            client: client_dir.path().to_path_buf(),
+            stream: "pow".to_string(),
+            body: json!({ "msg": "pow" }).to_string(),
+            schema: None,
+            expires_at: None,
+            cap: None,
+            parent: None,
+            attach: Vec::new(),
+            no_store_body: false,
+            pow_difficulty: Some(3),
+            pow_challenge: None,
+            pow_nonce: Some(42),
+        };
+
+        let err = super::send_message_remote(client, args)
+            .await
+            .expect_err("missing challenge should error");
+        assert!(err
+            .to_string()
+            .contains("--pow-nonce requires --pow-challenge"));
 
         Ok(())
     }
