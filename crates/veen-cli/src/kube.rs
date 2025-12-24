@@ -815,18 +815,28 @@ async fn scale_deployment(api: &Api<Deployment>, name: &str, replicas: i32) -> R
     Ok(())
 }
 
-fn handle_env_line(line: &str) -> Result<Option<EnvVar>> {
+fn parse_env_line(line: &str, line_number: usize) -> Result<Option<EnvVar>> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
         return Ok(None);
     }
     if let Some((key, value)) = trimmed.split_once('=') {
+        let name = key.trim();
+        if name.is_empty() {
+            return Err(CliUsageError::new(format!(
+                "invalid env-file line {line_number}: empty key"
+            ))
+            .into());
+        }
         return Ok(Some(EnvVar {
-            name: key.trim().to_string(),
+            name: name.to_string(),
             value: value.trim().to_string(),
         }));
     }
-    Err(CliUsageError::new("invalid env-file line".to_string()).into())
+    Err(CliUsageError::new(format!(
+        "invalid env-file line {line_number}: expected KEY=VALUE"
+    ))
+    .into())
 }
 
 async fn parse_env_file(path: &Path) -> Result<Vec<EnvVar>> {
@@ -834,8 +844,8 @@ async fn parse_env_file(path: &Path) -> Result<Vec<EnvVar>> {
         .await
         .with_context(|| format!("reading env file {}", path.display()))?;
     let mut vars = Vec::new();
-    for line in contents.lines() {
-        if let Some(var) = handle_env_line(line)? {
+    for (idx, line) in contents.lines().enumerate() {
+        if let Some(var) = parse_env_line(line, idx + 1)? {
             vars.push(var);
         }
     }
