@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::fs::{self, OpenOptions};
-use tokio::io::AsyncWriteExt;
+use tokio::fs::{self, File, OpenOptions};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use super::HubStorage;
 
@@ -51,16 +51,20 @@ pub async fn load_stream_index(path: &Path) -> Result<Vec<StreamIndexEntry>> {
         return Ok(Vec::new());
     }
 
-    let data = fs::read(path)
-        .await
-        .with_context(|| format!("reading stream index {}", path.display()))?;
-
     let mut entries = Vec::new();
-    for line in data.split(|byte| *byte == b'\n') {
+    let file = File::open(path)
+        .await
+        .with_context(|| format!("opening stream index {}", path.display()))?;
+    let mut lines = BufReader::new(file).lines();
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .with_context(|| format!("reading stream index {}", path.display()))?
+    {
         if line.is_empty() {
             continue;
         }
-        let entry: StreamIndexEntry = serde_json::from_slice(line)
+        let entry: StreamIndexEntry = serde_json::from_str(&line)
             .with_context(|| format!("decoding stream index entry from {}", path.display()))?;
         entries.push(entry);
     }
