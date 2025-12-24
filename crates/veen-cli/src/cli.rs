@@ -343,6 +343,16 @@ fn json_output_enabled(explicit: bool) -> bool {
     explicit || global_options().json
 }
 
+fn cli_binary_name() -> String {
+    env::args_os()
+        .next()
+        .and_then(|arg| {
+            let path = Path::new(&arg);
+            path.file_name().map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "veen-cli".to_string())
+}
+
 fn emit_cli_error(code: &str, detail: Option<&str>, use_json: bool) {
     if use_json {
         let mut root = JsonMap::new();
@@ -364,10 +374,15 @@ fn emit_cli_error(code: &str, detail: Option<&str>, use_json: bool) {
                 eprintln!("{{\"ok\":false,\"code\":\"{code}\"}}");
             }
         }
-    } else if let Some(detail) = detail {
-        eprintln!("{code}: {detail}");
     } else {
-        eprintln!("{code}");
+        if let Some(detail) = detail {
+            eprintln!("{code}: {detail}");
+        } else {
+            eprintln!("{code}");
+        }
+        if code == CliExitKind::Usage.label() {
+            eprintln!("hint: run '{} help' for usage", cli_binary_name());
+        }
     }
 }
 
