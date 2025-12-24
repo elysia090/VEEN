@@ -19,7 +19,7 @@ use hex;
 
 use crate::pipeline::{
     AnchorRequest, BridgeIngestRequest, CapabilityError, HubPipeline, HubProfileDescriptor,
-    HubRoleDescriptor, ObservabilityReport, SubmitError, SubmitRequest,
+    ObservabilityReport, SubmitError, SubmitRequest,
 };
 use std::str::FromStr;
 use veen_core::label::{Label, StreamId};
