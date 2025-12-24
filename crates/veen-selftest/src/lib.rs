@@ -174,8 +174,8 @@ pub async fn run_core(reporter: &mut SelftestReporter<'_>) -> Result<()> {
         "core self-test registered no cases"
     );
 
-    let prereqs = process_harness::core_suite_prereqs()
-        .context("checking core suite prerequisites")?;
+    let prereqs =
+        process_harness::core_suite_prereqs().context("checking core suite prerequisites")?;
     if !prereqs.ready() {
         let missing = prereqs.missing.join("; ");
         let diagnostics = prereqs.diagnostics.join("; ");
@@ -499,8 +499,8 @@ pub async fn run_hardened(reporter: &mut SelftestReporter<'_>) -> Result<()> {
 
 /// Label and schema overlays (META0+) self-tests.
 pub async fn run_meta(reporter: &mut SelftestReporter<'_>) -> Result<()> {
-    let prereqs = process_harness::core_suite_prereqs()
-        .context("checking meta suite prerequisites")?;
+    let prereqs =
+        process_harness::core_suite_prereqs().context("checking meta suite prerequisites")?;
     if !prereqs.ready() {
         let missing = prereqs.missing.join("; ");
         let diagnostics = prereqs.diagnostics.join("; ");

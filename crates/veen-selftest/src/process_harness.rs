@@ -181,7 +181,10 @@ pub fn core_suite_prereqs() -> Result<CoreSuitePrereqs> {
         }
     }
 
-    Ok(CoreSuitePrereqs { missing, diagnostics })
+    Ok(CoreSuitePrereqs {
+        missing,
+        diagnostics,
+    })
 }
 
 fn ensure_binary(path: &Path, crate_name: &str, bin_name: &str) -> Result<()> {
