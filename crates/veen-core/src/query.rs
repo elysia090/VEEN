@@ -110,11 +110,10 @@ impl TimeFilter {
 impl QueryFilter {
     fn normalize(mut self) -> Result<Self, QueryError> {
         if let Some(subject_id) = &self.subject_id {
-            let trimmed = subject_id.trim();
-            if trimmed.is_empty() {
-                return Err(QueryError::InvalidSubjectId);
-            }
-            self.subject_id = Some(trimmed.to_string());
+            self.subject_id = Some(normalize_non_empty(
+                subject_id,
+                QueryError::InvalidSubjectId,
+            )?);
         }
 
         if let Some(event_types) = self.event_type {
@@ -124,11 +123,10 @@ impl QueryFilter {
 
             let mut normalized = Vec::with_capacity(event_types.len());
             for value in event_types {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    return Err(QueryError::InvalidEventTypes);
-                }
-                normalized.push(trimmed.to_string());
+                normalized.push(normalize_non_empty(
+                    &value,
+                    QueryError::InvalidEventTypes,
+                )?);
             }
 
             self.event_type = Some(normalized);
@@ -162,20 +160,18 @@ impl Aggregate {
 
         let mut normalized_group_by = Vec::with_capacity(self.group_by.len());
         for value in self.group_by.into_iter() {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                return Err(QueryError::InvalidAggregateGroupBy);
-            }
-            normalized_group_by.push(trimmed.to_string());
+            normalized_group_by.push(normalize_non_empty(
+                &value,
+                QueryError::InvalidAggregateGroupBy,
+            )?);
         }
 
         let mut normalized_metrics = Vec::with_capacity(self.metrics.len());
         for value in self.metrics.into_iter() {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                return Err(QueryError::InvalidAggregateMetrics);
-            }
-            normalized_metrics.push(trimmed.to_string());
+            normalized_metrics.push(normalize_non_empty(
+                &value,
+                QueryError::InvalidAggregateMetrics,
+            )?);
         }
 
         self.group_by = normalized_group_by;
@@ -215,16 +211,25 @@ fn normalize_required_list(
         return Err(empty_error);
     }
 
-    let normalized: Vec<String> = values
-        .into_iter()
-        .map(|value| value.trim().to_string())
-        .collect();
-
-    if normalized.iter().any(|value| value.is_empty()) {
-        return Err(invalid_error);
+    let mut normalized = Vec::with_capacity(values.len());
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(invalid_error);
+        }
+        normalized.push(trimmed.to_string());
     }
 
     Ok(normalized)
+}
+
+fn normalize_non_empty(value: &str, error: QueryError) -> Result<String, QueryError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        Err(error)
+    } else {
+        Ok(trimmed.to_string())
+    }
 }
 
 impl QueryDescriptor {
@@ -260,15 +265,10 @@ impl QueryDescriptor {
             None => None,
         };
 
-        let query_id = self
-            .query_id
-            .unwrap_or_else(query_id_gen)
-            .trim()
-            .to_string();
-
-        if query_id.is_empty() {
-            return Err(QueryError::MissingQueryId);
-        }
+        let query_id = normalize_non_empty(
+            &self.query_id.unwrap_or_else(query_id_gen),
+            QueryError::MissingQueryId,
+        )?;
 
         Ok(NormalizedQueryDescriptor {
             query_id,
@@ -366,40 +366,24 @@ impl ResultDigest {
     {
         evidence_policy.normalize()?;
 
-        let query_id = query_id.into().trim().to_string();
-        if query_id.is_empty() {
-            return Err(QueryError::InvalidQueryId);
-        }
+        let query_id = normalize_non_empty(&query_id.into(), QueryError::InvalidQueryId)?;
 
         let executed_at = context.executed_at;
         validate_timestamp(&executed_at)?;
 
-        let result_id = result_id
-            .unwrap_or_else(&mut result_id_gen)
-            .trim()
-            .to_string();
-        if result_id.is_empty() {
-            return Err(QueryError::MissingResultId);
-        }
+        let result_id = normalize_non_empty(
+            &result_id.unwrap_or_else(&mut result_id_gen),
+            QueryError::MissingResultId,
+        )?;
 
         validate_rows(rows)?;
         validate_evidence_summary(evidence_summary, &evidence_policy, &query_id, &result_id)?;
 
-        let hub_id = context.hub_id.trim().to_string();
-        if hub_id.is_empty() {
-            return Err(QueryError::InvalidHubId);
-        }
+        let hub_id = normalize_non_empty(&context.hub_id, QueryError::InvalidHubId)?;
 
         let profile_id = context
             .profile_id
-            .map(|value| {
-                let trimmed = value.trim().to_string();
-                if trimmed.is_empty() {
-                    Err(QueryError::InvalidProfileId)
-                } else {
-                    Ok(trimmed)
-                }
-            })
+            .map(|value| normalize_non_empty(&value, QueryError::InvalidProfileId))
             .transpose()?;
 
         let rows_hash = hash_rows(rows)?;
