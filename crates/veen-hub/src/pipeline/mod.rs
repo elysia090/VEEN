@@ -3403,7 +3403,7 @@ mod tests {
             assert_eq!(descriptor.max_msgs_per_client_id_per_label, Some(5));
             assert_eq!(descriptor.default_cap_ttl_sec, Some(600));
             assert_eq!(descriptor.max_cap_ttl_sec, Some(600));
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
     }
@@ -3428,7 +3428,7 @@ mod tests {
             assert_eq!(filtered.events.len(), 1);
             assert_eq!(filtered.events[0].code, "E.CAP");
             assert!(filtered.events[0].detail.contains("expired"));
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
     }
@@ -3459,7 +3459,7 @@ mod tests {
                 response.revocations[0].reason.as_deref(),
                 Some("compromised")
             );
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
     }
@@ -3477,7 +3477,7 @@ mod tests {
             assert!(report.indexes_initialised);
             assert!(report.details.is_empty());
             assert!(report.authority_view.ok);
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
     }
@@ -3510,7 +3510,7 @@ mod tests {
                 .details
                 .iter()
                 .any(|detail| detail.contains("authority")));
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
     }
@@ -3558,7 +3558,7 @@ mod tests {
             assert!(!report.ok, "divergent indexes must fail readiness");
             assert!(!report.indexes_initialised);
             assert!(report.details.iter().any(|detail| detail.contains(stream)));
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
     }
@@ -3644,7 +3644,7 @@ mod tests {
                 }
                 other => panic!("unexpected error: {other:?}"),
             }
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
     }
@@ -3688,7 +3688,7 @@ mod tests {
             };
 
             pipeline.submit(request).await.expect("submit to succeed");
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
     }
@@ -3738,7 +3738,7 @@ mod tests {
                     assert!(!leaf_hash.is_empty());
                 }
             }
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
     }
@@ -3796,7 +3796,7 @@ mod tests {
                 .await
                 .expect_err("duplicate submit should fail after restart");
             assert!(err.downcast_ref::<SubmitError>().is_some());
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
     }
@@ -3936,7 +3936,7 @@ mod tests {
                 }
                 other => panic!("unexpected error: {other:?}"),
             }
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
     }
@@ -3982,7 +3982,7 @@ mod tests {
                 }
                 other => panic!("unexpected error: {other:?}"),
             }
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
     }
@@ -4031,7 +4031,7 @@ mod tests {
                 }
                 other => panic!("unexpected error: {other:?}"),
             }
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
     }
