@@ -327,16 +327,21 @@ fn global_options_lock() -> &'static RwLock<GlobalOptions> {
 }
 
 fn set_global_options(options: GlobalOptions) {
-    *global_options_lock()
-        .write()
-        .expect("global options lock poisoned") = options;
+    match global_options_lock().write() {
+        Ok(mut guard) => {
+            *guard = options;
+        }
+        Err(poisoned) => {
+            *poisoned.into_inner() = options;
+        }
+    }
 }
 
 fn global_options() -> GlobalOptions {
-    global_options_lock()
-        .read()
-        .expect("global options lock poisoned")
-        .clone()
+    match global_options_lock().read() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
 }
 
 fn json_output_enabled(explicit: bool) -> bool {
