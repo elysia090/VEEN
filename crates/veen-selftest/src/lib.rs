@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fmt};
 
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
 use rand::rngs::{OsRng, StdRng};
@@ -134,26 +134,56 @@ impl SelftestGoalReport {
 
 pub struct SelftestReporter<'a> {
     target: Option<&'a mut SelftestReport>,
+    recorded: usize,
 }
 
 impl<'a> SelftestReporter<'a> {
     pub fn new(target: Option<&'a mut SelftestReport>) -> Self {
-        Self { target }
+        Self {
+            target,
+            recorded: 0,
+        }
     }
 
     pub fn disabled() -> Self {
-        Self { target: None }
+        Self {
+            target: None,
+            recorded: 0,
+        }
     }
 
     pub fn record(&mut self, entry: SelftestGoalReport) {
+        self.recorded += 1;
         if let Some(report) = self.target.as_mut() {
             report.add_entry(entry);
         }
+    }
+
+    pub fn recorded(&self) -> usize {
+        self.recorded
     }
 }
 
 /// Execute the core protocol self-test invariants described in the CLI goal.
 pub async fn run_core(reporter: &mut SelftestReporter<'_>) -> Result<()> {
+    let mut registrations = Vec::new();
+    registrations.push("protocol invariant checks");
+    registrations.push("process harness integration suite");
+    ensure!(
+        !registrations.is_empty(),
+        "core self-test registered no cases"
+    );
+
+    let prereqs = process_harness::core_suite_prereqs()
+        .context("checking core suite prerequisites")?;
+    if !prereqs.ready() {
+        let missing = prereqs.missing.join("; ");
+        let diagnostics = prereqs.diagnostics.join("; ");
+        bail!(
+            "core integration suite prerequisites missing: {missing}. diagnostics: {diagnostics}"
+        );
+    }
+
     let data = SampleData::generate()?;
 
     ensure!(data.msg.has_valid_version(), "unexpected message version");
@@ -245,6 +275,10 @@ pub async fn run_core(reporter: &mut SelftestReporter<'_>) -> Result<()> {
         perf: None,
     };
     reporter.record(entry);
+    ensure!(
+        reporter.recorded() > 0,
+        "core self-test did not record any entries"
+    );
 
     Ok(())
 }

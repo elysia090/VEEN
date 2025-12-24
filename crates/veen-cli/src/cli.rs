@@ -9887,6 +9887,11 @@ async fn handle_selftest_core() -> Result<()> {
     match result {
         Ok(()) => {
             emit_selftest_report(SelftestSuite::Core, &report);
+            if report.is_empty() {
+                return Err(anyhow::Error::new(SelftestFailure::new(anyhow!(
+                    "core self-test recorded no entries; check core suite registration/prerequisites"
+                ))));
+            }
             log_cli_goal("CLI.SELFTEST.CORE");
             Ok(())
         }
