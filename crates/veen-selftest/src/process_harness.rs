@@ -110,6 +110,17 @@ pub struct MetaOverlayResult {
     pub registry_len: usize,
 }
 
+pub struct CoreSuitePrereqs {
+    pub missing: Vec<String>,
+    pub diagnostics: Vec<String>,
+}
+
+impl CoreSuitePrereqs {
+    pub fn ready(&self) -> bool {
+        self.missing.is_empty()
+    }
+}
+
 #[derive(Deserialize)]
 struct PowChallengeResponse {
     pub ok: bool,
@@ -144,6 +155,33 @@ impl BinaryPaths {
         }
         Ok(Self { hub, cli, bridge })
     }
+}
+
+pub fn core_suite_prereqs() -> Result<CoreSuitePrereqs> {
+    let mut diagnostics = Vec::new();
+    let mut missing = Vec::new();
+
+    match BinaryPaths::discover() {
+        Ok(bins) => {
+            diagnostics.push(format!("hub_binary={}", bins.hub.display()));
+            diagnostics.push(format!("cli_binary={}", bins.cli.display()));
+            diagnostics.push(format!("bridge_binary={}", bins.bridge.display()));
+        }
+        Err(err) => {
+            missing.push(format!("required binaries unavailable: {err}"));
+        }
+    }
+
+    match TempDir::new() {
+        Ok(temp) => {
+            diagnostics.push(format!("scratch_dir={}", temp.path().display()));
+        }
+        Err(err) => {
+            missing.push(format!("unable to create scratch directory: {err}"));
+        }
+    }
+
+    Ok(CoreSuitePrereqs { missing, diagnostics })
 }
 
 fn ensure_binary(path: &Path, crate_name: &str, bin_name: &str) -> Result<()> {
