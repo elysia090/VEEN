@@ -348,7 +348,8 @@ fn cli_binary_name() -> String {
         .next()
         .and_then(|arg| {
             let path = Path::new(&arg);
-            path.file_name().map(|name| name.to_string_lossy().into_owned())
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| "veen-cli".to_string())
 }
