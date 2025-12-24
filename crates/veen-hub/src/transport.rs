@@ -166,14 +166,17 @@ async fn handle_submit(
                 tracing::warn!(error = ?cap_err, "submit failed");
                 let code = cap_err.code();
                 pipeline.observability().record_submit_err(code);
-                pipeline
+                if let Err(err) = pipeline
                     .record_admission_failure(
                         &stream_label,
                         &client_id,
                         cap_err.code(),
                         &cap_err.to_string(),
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(error = ?err, "recording admission failure failed");
+                }
                 let status = match code {
                     "E.RATE" => StatusCode::TOO_MANY_REQUESTS,
                     "E.SIZE" => StatusCode::PAYLOAD_TOO_LARGE,
@@ -191,18 +194,25 @@ async fn handle_submit(
                 tracing::warn!(error = ?submit_err, "submit failed");
                 let code = submit_err.code();
                 pipeline.observability().record_submit_err(code);
-                pipeline
+                if let Err(err) = pipeline
                     .record_admission_failure(
                         &stream_label,
                         &client_id,
                         code,
                         &submit_err.to_string(),
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(error = ?err, "recording admission failure failed");
+                }
                 (StatusCode::CONFLICT, submit_err.to_string()).into_response()
             } else {
                 tracing::warn!(error = ?err, "submit failed");
-                (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    err.to_string(),
+                )
+                    .into_response()
             }
         }
     }
@@ -316,10 +326,16 @@ async fn handle_revocations(
         None => None,
     };
     let limit = query.limit.map(|value| value as usize);
-    let response = pipeline
+    match pipeline
         .revocation_list(kind, query.since, query.active_only.unwrap_or(false), limit)
-        .await;
-    (StatusCode::OK, Json(response)).into_response()
+        .await
+    {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "revocation list failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+        }
+    }
 }
 
 async fn handle_pow_request(
@@ -394,10 +410,13 @@ async fn handle_authority_view(
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
 
-    let descriptor = pipeline
-        .authority_view_descriptor(realm_id, stream_id)
-        .await;
-    (StatusCode::OK, Json(descriptor)).into_response()
+    match pipeline.authority_view_descriptor(realm_id, stream_id).await {
+        Ok(descriptor) => (StatusCode::OK, Json(descriptor)).into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "authority view failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+        }
+    }
 }
 
 async fn handle_label_class(State(pipeline): State<HubPipeline>, body: Bytes) -> impl IntoResponse {
@@ -419,8 +438,13 @@ async fn handle_label_authority(
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
 
-    let descriptor = pipeline.label_authority_descriptor(stream_id).await;
-    (StatusCode::OK, Json(descriptor)).into_response()
+    match pipeline.label_authority_descriptor(stream_id).await {
+        Ok(descriptor) => (StatusCode::OK, Json(descriptor)).into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "label authority failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+        }
+    }
 }
 
 async fn handle_label_class_show(
@@ -490,13 +514,20 @@ async fn handle_health(State(pipeline): State<HubPipeline>) -> impl IntoResponse
 }
 
 async fn handle_ready(State(pipeline): State<HubPipeline>) -> impl IntoResponse {
-    let report = pipeline.readiness_report().await;
-    let status = if report.ok {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-    (status, Json(report)).into_response()
+    match pipeline.readiness_report().await {
+        Ok(report) => {
+            let status = if report.ok {
+                StatusCode::OK
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+            (status, Json(report)).into_response()
+        }
+        Err(err) => {
+            tracing::warn!(error = ?err, "readiness report failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+        }
+    }
 }
 
 async fn handle_metrics(State(pipeline): State<HubPipeline>) -> impl IntoResponse {
@@ -548,8 +579,13 @@ async fn handle_role(
         None => None,
     };
 
-    let descriptor: HubRoleDescriptor = pipeline.role_descriptor(realm, stream).await;
-    (StatusCode::OK, Json(descriptor)).into_response()
+    match pipeline.role_descriptor(realm, stream).await {
+        Ok(descriptor) => (StatusCode::OK, Json(descriptor)).into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "role descriptor failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+        }
+    }
 }
 
 async fn handle_checkpoint_latest(State(pipeline): State<HubPipeline>) -> impl IntoResponse {

@@ -307,8 +307,8 @@ impl HubPipeline {
             .iter()
             .map(|attachment| attachment.stored.clone())
             .collect::<Vec<_>>();
-        let submitted_at = current_unix_timestamp();
-        let submitted_at_ms = current_unix_timestamp_millis();
+        let submitted_at = current_unix_timestamp()?;
+        let submitted_at_ms = current_unix_timestamp_millis()?;
         let client_id_value = ClientId::from_str(&client_id)
             .with_context(|| format!("parsing client_id {client_id} as hex-encoded identifier"))?;
         let client_target = RevocationTarget::from_slice(client_id_value.as_ref())
@@ -512,7 +512,7 @@ impl HubPipeline {
                 drop(guard);
                 self.observability.record_submit_err("E.DUP");
                 self.record_admission_failure(&stream, &client_id, "E.DUP", "duplicate leaf hash")
-                    .await;
+                    .await?;
                 return Err(anyhow::Error::new(SubmitError::Duplicate {
                     leaf_hash: leaf_hex,
                 }));
@@ -855,7 +855,7 @@ impl HubPipeline {
             bail!("capability ttl must be greater than zero seconds");
         }
 
-        let now = current_unix_timestamp();
+        let now = current_unix_timestamp()?;
         let expires_at = now.saturating_add(token.allow.ttl);
         let auth_ref = token.auth_ref().context("computing capability auth_ref")?;
         let auth_ref_hex = hex::encode(auth_ref.as_ref());
@@ -878,17 +878,20 @@ impl HubPipeline {
         );
 
         let mut guard = self.inner.write().await;
+        let bucket_state = match token.allow.rate.as_ref() {
+            Some(rate) => Some(TokenBucketState::new(
+                rate.burst,
+                current_unix_timestamp_millis()?,
+            )),
+            None => None,
+        };
         let record = CapabilityRecord {
             subject: subject_hex,
             stream_ids,
             expires_at,
             ttl: token.allow.ttl,
             rate: token.allow.rate.clone(),
-            bucket_state: token
-                .allow
-                .rate
-                .as_ref()
-                .map(|rate| TokenBucketState::new(rate.burst, current_unix_timestamp_millis())),
+            bucket_state,
             uses: 0,
             token_hash: Some(hex::encode(cap_token_hash(token_bytes))),
         };
@@ -909,7 +912,7 @@ impl HubPipeline {
         guard.anchors.entries.push(AnchorRecord {
             stream: anchor.stream,
             mmr_root: anchor.mmr_root,
-            timestamp: current_unix_timestamp(),
+            timestamp: current_unix_timestamp()?,
             backend: anchor.backend,
         });
         persist_anchor_log(&self.storage, &guard.anchors).await
@@ -954,7 +957,7 @@ impl HubPipeline {
         }
     }
 
-    pub async fn readiness_report(&self) -> HubReadinessReport {
+    pub async fn readiness_report(&self) -> Result<HubReadinessReport> {
         let mut details = Vec::new();
         let data_dir = self.storage.data_dir().to_string_lossy().into_owned();
         let state_dir = self.storage.state_dir();
@@ -969,7 +972,7 @@ impl HubPipeline {
             }
         };
 
-        let now = current_unix_timestamp();
+        let now = current_unix_timestamp()?;
         let mut indexes_initialised = true;
         let authority_readiness = {
             let guard = self.inner.read().await;
@@ -1013,14 +1016,14 @@ impl HubPipeline {
 
         let ok = state_dir_accessible && indexes_initialised && authority_readiness.ok;
 
-        HubReadinessReport {
+        Ok(HubReadinessReport {
             ok,
             data_dir,
             state_dir_accessible,
             indexes_initialised,
             authority_view: authority_readiness,
             details,
-        }
+        })
     }
 
     pub async fn profile_descriptor(&self) -> HubProfileDescriptor {
@@ -1054,7 +1057,7 @@ impl HubPipeline {
         &self,
         realm_id: Option<RealmId>,
         stream_id: Option<StreamId>,
-    ) -> HubRoleDescriptor {
+    ) -> Result<HubRoleDescriptor> {
         let role = match self.role {
             HubRole::Primary => {
                 if self.federation.replica_targets.is_empty() {
@@ -1069,7 +1072,7 @@ impl HubPipeline {
 
         if let Some(stream_id) = stream_id {
             let guard = self.inner.read().await;
-            let now = current_unix_timestamp();
+            let now = current_unix_timestamp()?;
             let authority = guard
                 .authority_view
                 .label_authority(stream_id, realm_id, now);
@@ -1085,7 +1088,7 @@ impl HubPipeline {
             let primary_hex = authority.primary_hub.map(|hub| hex::encode(hub.as_ref()));
             let local_is_primary = authority.primary_hub == Some(self.identity.hub_id);
 
-            HubRoleDescriptor {
+            Ok(HubRoleDescriptor {
                 ok: true,
                 hub_id: self.identity.hub_id_hex.clone(),
                 role,
@@ -1097,14 +1100,14 @@ impl HubPipeline {
                     primary_hub: primary_hex,
                     local_is_primary,
                 }),
-            }
+            })
         } else {
-            HubRoleDescriptor {
+            Ok(HubRoleDescriptor {
                 ok: true,
                 hub_id: self.identity.hub_id_hex.clone(),
                 role,
                 stream: None,
-            }
+            })
         }
     }
 
@@ -1229,18 +1232,19 @@ impl HubPipeline {
         client_id: &str,
         code: &str,
         detail: &str,
-    ) {
+    ) -> Result<()> {
         let mut guard = self.inner.write().await;
         if guard.admission_events.len() >= MAX_ADMISSION_EVENTS {
             guard.admission_events.pop_front();
         }
         guard.admission_events.push_back(AdmissionLogEvent {
-            ts: current_unix_timestamp(),
+            ts: current_unix_timestamp()?,
             code: code.trim().to_ascii_uppercase(),
             label_prefix: identifier_prefix(label),
             client_id_prefix: identifier_prefix(client_id),
             detail: detail.to_string(),
         });
+        Ok(())
     }
 
     pub async fn capability_status(&self, auth_ref_hex: &str) -> Result<HubCapStatusResponse> {
@@ -1248,7 +1252,7 @@ impl HubPipeline {
             bail!("auth_ref must not be empty");
         }
         let auth_target = revocation_target_from_hex_str(auth_ref_hex)?;
-        let now = current_unix_timestamp();
+        let now = current_unix_timestamp()?;
         let guard = self.inner.read().await;
         let record = guard.capabilities.records.get(auth_ref_hex);
         let mut revocation_detail: Option<(RevocationKind, RevocationRecord)> = guard
@@ -1309,8 +1313,8 @@ impl HubPipeline {
         since: Option<u64>,
         active_only: bool,
         limit: Option<usize>,
-    ) -> HubRevocationList {
-        let now = current_unix_timestamp();
+    ) -> Result<HubRevocationList> {
+        let now = current_unix_timestamp()?;
         let guard = self.inner.read().await;
         let mut entries: Vec<HubRevocationEntry> = guard
             .revocation_log
@@ -1342,10 +1346,10 @@ impl HubPipeline {
         if let Some(limit) = limit {
             entries.truncate(limit);
         }
-        HubRevocationList {
+        Ok(HubRevocationList {
             ok: true,
             revocations: entries,
-        }
+        })
     }
 
     pub async fn pow_challenge(&self, requested: Option<u8>) -> Result<HubPowChallengeDescriptor> {
@@ -1366,8 +1370,8 @@ impl HubPipeline {
         &self,
         realm_id: RealmId,
         stream_id: StreamId,
-    ) -> HubAuthorityRecordDescriptor {
-        let now = current_unix_timestamp();
+    ) -> Result<HubAuthorityRecordDescriptor> {
+        let now = current_unix_timestamp()?;
         let records = {
             let guard = self.inner.read().await;
             guard.authority_view.records_for(realm_id, stream_id)
@@ -1404,7 +1408,7 @@ impl HubPipeline {
         let expires_at = selected.and_then(|record| record.expires_at());
         let active_now = active.is_some();
 
-        HubAuthorityRecordDescriptor {
+        Ok(HubAuthorityRecordDescriptor {
             ok: true,
             realm_id: hex::encode(realm_id.as_ref()),
             stream_id: hex::encode(stream_id.as_ref()),
@@ -1415,14 +1419,14 @@ impl HubPipeline {
             ttl,
             expires_at,
             active_now,
-        }
+        })
     }
 
     pub async fn label_authority_descriptor(
         &self,
         stream_id: StreamId,
-    ) -> HubLabelAuthorityDescriptor {
-        let now = current_unix_timestamp();
+    ) -> Result<HubLabelAuthorityDescriptor> {
+        let now = current_unix_timestamp()?;
         let authority = {
             let guard = self.inner.read().await;
             guard
@@ -1448,7 +1452,7 @@ impl HubPipeline {
             .filter(|value| !value.is_empty());
         let local_is_authorized = authority.allows_hub(self.identity.hub_id);
 
-        HubLabelAuthorityDescriptor {
+        Ok(HubLabelAuthorityDescriptor {
             ok: true,
             label: hex::encode(stream_id.as_ref()),
             realm_id,
@@ -1458,7 +1462,7 @@ impl HubPipeline {
             replica_hubs,
             local_hub_id: self.identity.hub_id_hex.clone(),
             local_is_authorized,
-        }
+        })
     }
 
     pub async fn label_class_descriptor(&self, label: Label) -> HubLabelClassDescriptor {
@@ -3208,18 +3212,18 @@ fn leaf_hash_for(message: &StoredMessage) -> Result<LeafHash> {
     Ok(LeafHash::new(bytes))
 }
 
-fn current_unix_timestamp() -> u64 {
+fn current_unix_timestamp() -> Result<u64> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system time before UNIX_EPOCH");
-    now.as_secs()
+        .context("system time before UNIX_EPOCH")?;
+    Ok(now.as_secs())
 }
 
-fn current_unix_timestamp_millis() -> u64 {
+fn current_unix_timestamp_millis() -> Result<u64> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system time before UNIX_EPOCH");
-    now.as_millis() as u64
+        .context("system time before UNIX_EPOCH")?;
+    Ok(now.as_millis() as u64)
 }
 
 fn revocation_target_from_hex_str(value: &str) -> Result<RevocationTarget> {
@@ -3286,7 +3290,7 @@ mod tests {
         let verifying = signing.verifying_key();
         let material = HubKeyMaterial {
             version: HUB_KEY_VERSION,
-            created_at: current_unix_timestamp(),
+            created_at: current_unix_timestamp()?,
             public_key: ByteBuf::from(verifying.as_bytes().to_vec()),
             secret_key: ByteBuf::from(signing.to_bytes().to_vec()),
         };
@@ -3323,7 +3327,11 @@ mod tests {
         init_pipeline_with_overrides(data_dir, HubConfigOverrides::default()).await
     }
 
-    async fn allow_stream_for_hub(pipeline: &HubPipeline, label: &str, realm_name: &str) {
+    async fn allow_stream_for_hub(
+        pipeline: &HubPipeline,
+        label: &str,
+        realm_name: &str,
+    ) -> Result<()> {
         let stream_id = cap_stream_id_from_label(label).expect("stream id");
         let realm = RealmId::derive(realm_name);
         let record = AuthorityRecord {
@@ -3332,11 +3340,12 @@ mod tests {
             primary_hub: pipeline.identity.hub_id,
             replica_hubs: Vec::new(),
             policy: AuthorityPolicy::SinglePrimary,
-            ts: current_unix_timestamp(),
+            ts: current_unix_timestamp()?,
             ttl: 600,
         };
         let payload = encode_envelope(schema_fed_authority(), record);
         pipeline.publish_authority(&payload).await.unwrap();
+        Ok(())
     }
 
     fn encode_envelope<T: Serialize>(schema: [u8; 32], body: T) -> Vec<u8> {
@@ -3360,8 +3369,8 @@ mod tests {
     }
 
     #[test]
-    fn kex_policy_descriptor_reflects_admission_overrides() {
-        let rt = Runtime::new().unwrap();
+    fn kex_policy_descriptor_reflects_admission_overrides() -> Result<()> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let temp = tempdir().unwrap();
             let overrides = HubConfigOverrides {
@@ -3373,12 +3382,13 @@ mod tests {
 
             {
                 let mut guard = pipeline.inner.write().await;
+                let expires_at = current_unix_timestamp()? + 600;
                 guard.capabilities.records.insert(
                     "deadbeef".to_string(),
                     CapabilityRecord {
                         subject: "client".into(),
                         stream_ids: vec!["core/test".into()],
-                        expires_at: current_unix_timestamp() + 600,
+                        expires_at,
                         ttl: 600,
                         rate: None,
                         bucket_state: None,
@@ -3393,22 +3403,24 @@ mod tests {
             assert_eq!(descriptor.max_msgs_per_client_id_per_label, Some(5));
             assert_eq!(descriptor.default_cap_ttl_sec, Some(600));
             assert_eq!(descriptor.max_cap_ttl_sec, Some(600));
-        });
+            Ok(())
+        })?;
+        Ok(())
     }
 
     #[test]
-    fn admission_log_filters_results() {
-        let rt = Runtime::new().unwrap();
+    fn admission_log_filters_results() -> Result<()> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let temp = tempdir().unwrap();
             let pipeline = init_pipeline(temp.path()).await;
 
             pipeline
                 .record_admission_failure("core/test", "aa", "E.AUTH", "missing auth")
-                .await;
+                .await?;
             pipeline
                 .record_admission_failure("core/test", "bb", "E.CAP", "expired")
-                .await;
+                .await?;
 
             let filtered = pipeline
                 .admission_log(Some(1), Some(vec!["E.CAP".to_string()]))
@@ -3416,12 +3428,14 @@ mod tests {
             assert_eq!(filtered.events.len(), 1);
             assert_eq!(filtered.events[0].code, "E.CAP");
             assert!(filtered.events[0].detail.contains("expired"));
-        });
+            Ok(())
+        })?;
+        Ok(())
     }
 
     #[test]
-    fn revocation_list_respects_filters() {
-        let rt = Runtime::new().unwrap();
+    fn revocation_list_respects_filters() -> Result<()> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let temp = tempdir().unwrap();
             let pipeline = init_pipeline(temp.path()).await;
@@ -3430,7 +3444,7 @@ mod tests {
                 kind: RevocationKind::AuthRef,
                 target,
                 reason: Some("compromised".into()),
-                ts: current_unix_timestamp(),
+                ts: current_unix_timestamp()?,
                 ttl: Some(60),
             };
             let payload = encode_envelope(schema_revocation(), record.clone());
@@ -3438,35 +3452,39 @@ mod tests {
 
             let response = pipeline
                 .revocation_list(Some(RevocationKind::AuthRef), None, true, None)
-                .await;
+                .await?;
             assert_eq!(response.revocations.len(), 1);
             assert_eq!(response.revocations[0].kind, "auth-ref");
             assert_eq!(
                 response.revocations[0].reason.as_deref(),
                 Some("compromised")
             );
-        });
+            Ok(())
+        })?;
+        Ok(())
     }
 
     #[test]
-    fn readiness_report_ok_for_fresh_state() {
-        let rt = Runtime::new().unwrap();
+    fn readiness_report_ok_for_fresh_state() -> Result<()> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let temp = tempdir().unwrap();
             let pipeline = init_pipeline(temp.path()).await;
 
-            let report = pipeline.readiness_report().await;
+            let report = pipeline.readiness_report().await?;
             assert!(report.ok, "fresh pipeline must be ready");
             assert!(report.state_dir_accessible);
             assert!(report.indexes_initialised);
             assert!(report.details.is_empty());
             assert!(report.authority_view.ok);
-        });
+            Ok(())
+        })?;
+        Ok(())
     }
 
     #[test]
-    fn readiness_report_detects_stale_authority() {
-        let rt = Runtime::new().unwrap();
+    fn readiness_report_detects_stale_authority() -> Result<()> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let temp = tempdir().unwrap();
             let pipeline = init_pipeline(temp.path()).await;
@@ -3485,19 +3503,21 @@ mod tests {
             let payload = encode_envelope(schema_fed_authority(), record);
             pipeline.publish_authority(&payload).await.unwrap();
 
-            let report = pipeline.readiness_report().await;
+            let report = pipeline.readiness_report().await?;
             assert!(!report.ok, "stale authority view must fail readiness");
             assert!(!report.authority_view.ok);
             assert!(report
                 .details
                 .iter()
                 .any(|detail| detail.contains("authority")));
-        });
+            Ok(())
+        })?;
+        Ok(())
     }
 
     #[test]
-    fn readiness_report_detects_index_divergence() {
-        let rt = Runtime::new().unwrap();
+    fn readiness_report_detects_index_divergence() -> Result<()> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let temp = tempdir().unwrap();
             let overrides = HubConfigOverrides {
@@ -3506,7 +3526,7 @@ mod tests {
             };
             let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
             let stream = "core/readiness";
-            allow_stream_for_hub(&pipeline, stream, "ready").await;
+            allow_stream_for_hub(&pipeline, stream, "ready").await?;
 
             let request = SubmitRequest {
                 stream: stream.to_string(),
@@ -3534,11 +3554,13 @@ mod tests {
                 runtime.state.messages.push(dup);
             }
 
-            let report = pipeline.readiness_report().await;
+            let report = pipeline.readiness_report().await?;
             assert!(!report.ok, "divergent indexes must fail readiness");
             assert!(!report.indexes_initialised);
             assert!(report.details.iter().any(|detail| detail.contains(stream)));
-        });
+            Ok(())
+        })?;
+        Ok(())
     }
 
     #[test]
@@ -3574,8 +3596,8 @@ mod tests {
     }
 
     #[test]
-    fn submit_rejects_when_hub_not_authorised() {
-        let rt = Runtime::new().unwrap();
+    fn submit_rejects_when_hub_not_authorised() -> Result<()> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let temp = tempdir().unwrap();
             let overrides = HubConfigOverrides {
@@ -3593,7 +3615,7 @@ mod tests {
                 primary_hub: HubId::new([0xAA; 32]),
                 replica_hubs: Vec::new(),
                 policy: AuthorityPolicy::SinglePrimary,
-                ts: current_unix_timestamp(),
+                ts: current_unix_timestamp()?,
                 ttl: 600,
             };
             let payload = encode_envelope(schema_fed_authority(), record);
@@ -3622,12 +3644,14 @@ mod tests {
                 }
                 other => panic!("unexpected error: {other:?}"),
             }
-        });
+            Ok(())
+        })?;
+        Ok(())
     }
 
     #[test]
-    fn submit_accepts_for_multi_primary_replica() {
-        let rt = Runtime::new().unwrap();
+    fn submit_accepts_for_multi_primary_replica() -> Result<()> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let temp = tempdir().unwrap();
             let overrides = HubConfigOverrides {
@@ -3645,7 +3669,7 @@ mod tests {
                 primary_hub: HubId::new([0xAA; 32]),
                 replica_hubs: vec![pipeline.identity.hub_id],
                 policy: AuthorityPolicy::MultiPrimary,
-                ts: current_unix_timestamp(),
+                ts: current_unix_timestamp()?,
                 ttl: 600,
             };
             let payload = encode_envelope(schema_fed_authority(), record);
@@ -3664,12 +3688,14 @@ mod tests {
             };
 
             pipeline.submit(request).await.expect("submit to succeed");
-        });
+            Ok(())
+        })?;
+        Ok(())
     }
 
     #[test]
-    fn submit_rejects_duplicate_leaf_hash() {
-        let rt = Runtime::new().unwrap();
+    fn submit_rejects_duplicate_leaf_hash() -> Result<()> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let temp = tempdir().unwrap();
             let overrides = HubConfigOverrides {
@@ -3677,7 +3703,7 @@ mod tests {
                 ..HubConfigOverrides::default()
             };
             let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
-            allow_stream_for_hub(&pipeline, "core/dup", "dup").await;
+            allow_stream_for_hub(&pipeline, "core/dup", "dup").await?;
 
             let request = SubmitRequest {
                 stream: "core/dup".to_string(),
@@ -3712,12 +3738,14 @@ mod tests {
                     assert!(!leaf_hash.is_empty());
                 }
             }
-        });
+            Ok(())
+        })?;
+        Ok(())
     }
 
     #[test]
-    fn duplicate_detector_is_seeded_from_persisted_messages() {
-        let rt = Runtime::new().unwrap();
+    fn duplicate_detector_is_seeded_from_persisted_messages() -> Result<()> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let temp = tempdir().unwrap();
             let overrides = HubConfigOverrides {
@@ -3725,7 +3753,7 @@ mod tests {
                 ..HubConfigOverrides::default()
             };
             let pipeline = init_pipeline_with_overrides(temp.path(), overrides.clone()).await;
-            allow_stream_for_hub(&pipeline, "core/dup-seed", "dup-seed").await;
+            allow_stream_for_hub(&pipeline, "core/dup-seed", "dup-seed").await?;
 
             let request = SubmitRequest {
                 stream: "core/dup-seed".to_string(),
@@ -3768,7 +3796,9 @@ mod tests {
                 .await
                 .expect_err("duplicate submit should fail after restart");
             assert!(err.downcast_ref::<SubmitError>().is_some());
-        });
+            Ok(())
+        })?;
+        Ok(())
     }
 
     #[test]
@@ -3871,8 +3901,8 @@ mod tests {
     }
 
     #[test]
-    fn submit_rejects_payload_body_over_limit() {
-        let rt = Runtime::new().unwrap();
+    fn submit_rejects_payload_body_over_limit() -> Result<()> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let temp = tempdir().unwrap();
             let overrides = HubConfigOverrides {
@@ -3880,7 +3910,7 @@ mod tests {
                 ..HubConfigOverrides::default()
             };
             let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
-            allow_stream_for_hub(&pipeline, "core/limit-body", "limit-body").await;
+            allow_stream_for_hub(&pipeline, "core/limit-body", "limit-body").await?;
 
             let body = "x".repeat(MAX_BODY_BYTES + 1);
             let request = SubmitRequest {
@@ -3906,12 +3936,14 @@ mod tests {
                 }
                 other => panic!("unexpected error: {other:?}"),
             }
-        });
+            Ok(())
+        })?;
+        Ok(())
     }
 
     #[test]
-    fn submit_rejects_attachment_count_over_limit() {
-        let rt = Runtime::new().unwrap();
+    fn submit_rejects_attachment_count_over_limit() -> Result<()> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let temp = tempdir().unwrap();
             let overrides = HubConfigOverrides {
@@ -3919,7 +3951,7 @@ mod tests {
                 ..HubConfigOverrides::default()
             };
             let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
-            allow_stream_for_hub(&pipeline, "core/limit-attachments", "limit-attachments").await;
+            allow_stream_for_hub(&pipeline, "core/limit-attachments", "limit-attachments").await?;
 
             let attachment = AttachmentUpload {
                 name: None,
@@ -3950,12 +3982,14 @@ mod tests {
                 }
                 other => panic!("unexpected error: {other:?}"),
             }
-        });
+            Ok(())
+        })?;
+        Ok(())
     }
 
     #[test]
-    fn submit_rejects_total_message_size_over_limit() {
-        let rt = Runtime::new().unwrap();
+    fn submit_rejects_total_message_size_over_limit() -> Result<()> {
+        let rt = Runtime::new()?;
         rt.block_on(async {
             let temp = tempdir().unwrap();
             let overrides = HubConfigOverrides {
@@ -3963,7 +3997,7 @@ mod tests {
                 ..HubConfigOverrides::default()
             };
             let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
-            allow_stream_for_hub(&pipeline, "core/limit-total", "limit-total").await;
+            allow_stream_for_hub(&pipeline, "core/limit-total", "limit-total").await?;
 
             // Body well below limit so that attachments trigger the overflow.
             let body = serde_json::json!({"text": "small"});
@@ -3997,6 +4031,8 @@ mod tests {
                 }
                 other => panic!("unexpected error: {other:?}"),
             }
-        });
+            Ok(())
+        })?;
+        Ok(())
     }
 }
