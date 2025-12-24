@@ -4,7 +4,7 @@ use std::env;
 use std::fmt;
 use std::fs::OpenOptions as StdOpenOptions;
 use std::io::{Cursor, Write as StdWrite};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command as StdCommand, Stdio};
 use std::str::FromStr;
@@ -310,7 +310,8 @@ struct GlobalOptions {
     name = "veen",
     version,
     about = "VEEN v0.0.1 command line interface",
-    long_about = None
+    long_about = None,
+    disable_help_subcommand = true
 )]
 struct Cli {
     #[command(flatten)]
@@ -11539,7 +11540,7 @@ mod tests {
 
         let challenge_hex = "0abc".to_string();
         handle_send(SendArgs {
-            hub: HubLocatorArgs::from_url(url.clone()),
+            hub: HubLocatorArgs::from_url(url.to_string()),
             client: client_dir.path().to_path_buf(),
             stream: "pow".to_string(),
             body: json!({ "msg": "pow" }).to_string(),
@@ -11589,7 +11590,7 @@ mod tests {
         let solved = super::solve_pow_cookie(challenge_bytes.clone(), 5)?;
 
         handle_send(SendArgs {
-            hub: HubLocatorArgs::from_url(url.clone()),
+            hub: HubLocatorArgs::from_url(url.to_string()),
             client: client_dir.path().to_path_buf(),
             stream: "pow".to_string(),
             body: json!({ "msg": "provided" }).to_string(),
@@ -11626,7 +11627,8 @@ mod tests {
         })
         .await?;
 
-        let client = HubHttpClient::new(Url::parse("http://localhost")?, build_http_client()?);
+        let url = Url::parse("http://localhost")?;
+        let client = HubHttpClient::new(url.clone(), build_http_client_for_url(&url)?);
 
         let args = SendArgs {
             hub: HubLocatorArgs::from_url("http://localhost".to_string()),
@@ -11923,9 +11925,10 @@ mod tests {
         });
 
         let url = format!("http://{}", addr);
-        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
+        let url = Url::parse(&url)?;
+        let client = HubHttpClient::new(url.clone(), build_http_client_for_url(&url)?);
         let args = FedAuthorityPublishArgs {
-            hub: HubLocatorArgs::from_url(url.clone()),
+            hub: HubLocatorArgs::from_url(url.to_string()),
             signer: signer_dir.path().to_path_buf(),
             realm: realm_hex,
             stream: stream_name,
@@ -11971,9 +11974,10 @@ mod tests {
         .await?;
 
         let (url, mut body_rx, server) = spawn_cbor_capture_server("/label-class").await?;
-        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
+        let url = Url::parse(&url)?;
+        let client = HubHttpClient::new(url.clone(), build_http_client_for_url(&url)?);
         let args = LabelClassSetArgs {
-            hub: HubLocatorArgs::from_url(url.clone()),
+            hub: HubLocatorArgs::from_url(url.to_string()),
             signer: signer_dir.path().to_path_buf(),
             realm: "default".to_string(),
             label: "chat/general".to_string(),
@@ -12154,10 +12158,11 @@ mod tests {
         .await?;
 
         let (url, mut body_rx, server) = spawn_cbor_capture_server("/schema").await?;
-        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
+        let url = Url::parse(&url)?;
+        let client = HubHttpClient::new(url.clone(), build_http_client_for_url(&url)?);
         let schema_id_hex = hex::encode([0xAAu8; SCHEMA_ID_LEN]);
         let args = SchemaRegisterArgs {
-            hub: HubLocatorArgs::from_url(url.clone()),
+            hub: HubLocatorArgs::from_url(url.to_string()),
             signer: signer_dir.path().to_path_buf(),
             schema_id: schema_id_hex.clone(),
             name: "wallet.transfer.v1".to_string(),
@@ -12204,11 +12209,12 @@ mod tests {
         .await?;
 
         let (url, mut body_rx, server) = spawn_cbor_capture_server("/wallet/transfer").await?;
-        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
+        let url = Url::parse(&url)?;
+        let client = HubHttpClient::new(url.clone(), build_http_client_for_url(&url)?);
         let wallet_hex = hex::encode([0x55u8; WALLET_ID_LEN]);
         let to_wallet_hex = hex::encode([0x66u8; WALLET_ID_LEN]);
         let args = WalletTransferArgs {
-            hub: HubLocatorArgs::from_url(url.clone()),
+            hub: HubLocatorArgs::from_url(url.to_string()),
             signer: signer_dir.path().to_path_buf(),
             wallet_id: wallet_hex.clone(),
             to_wallet_id: to_wallet_hex.clone(),
@@ -12373,10 +12379,11 @@ mod tests {
         .await?;
 
         let (url, mut body_rx, server) = spawn_cbor_capture_server("/revoke").await?;
-        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
+        let url = Url::parse(&url)?;
+        let client = HubHttpClient::new(url.clone(), build_http_client_for_url(&url)?);
         let target_hex = hex::encode([0x77u8; REVOCATION_TARGET_LEN]);
         let args = RevokePublishArgs {
-            hub: HubLocatorArgs::from_url(url.clone()),
+            hub: HubLocatorArgs::from_url(url.to_string()),
             signer: signer_dir.path().to_path_buf(),
             kind: RevocationKindValue::ClientId,
             target: target_hex.clone(),
@@ -12425,7 +12432,8 @@ mod tests {
         };
         let body_bytes = serde_json::to_vec(&vec![descriptor.clone()])?;
         let (url, server) = spawn_fixed_response_server("/schema", body_bytes).await?;
-        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
+        let url = Url::parse(&url)?;
+        let client = HubHttpClient::new(url.clone(), build_http_client_for_url(&url)?);
         let fetched = fetch_schema_descriptors(&client).await?;
         server.abort();
         assert_eq!(fetched, vec![descriptor]);
@@ -12457,7 +12465,8 @@ mod tests {
         let body_bytes = serde_json::to_vec(&response)?;
         let path = Box::leak(format!("/schema/{schema_hex}").into_boxed_str());
         let (url, server) = spawn_fixed_response_server(path, body_bytes).await?;
-        let client = HubHttpClient::new(Url::parse(&url)?, build_http_client()?);
+        let url = Url::parse(&url)?;
+        let client = HubHttpClient::new(url.clone(), build_http_client_for_url(&url)?);
         let fetched = fetch_schema_registry_entry(&client, &schema_hex).await?;
         server.abort();
         assert_eq!(fetched, response);
@@ -12811,7 +12820,7 @@ fn parse_hub_reference(reference: &str) -> Result<HubReference> {
             Url::parse(reference).with_context(|| format!("parsing hub endpoint {reference}"))?;
         match url.scheme() {
             "http" | "https" => {
-                let client = build_http_client()?;
+                let client = build_http_client_for_url(&url)?;
                 return Ok(HubReference::Remote(HubHttpClient::new(url, client)));
             }
             other => {
@@ -12823,10 +12832,24 @@ fn parse_hub_reference(reference: &str) -> Result<HubReference> {
     Ok(HubReference::Local(PathBuf::from(reference)))
 }
 
-fn build_http_client() -> Result<HttpClient> {
+fn is_loopback_host(url: &Url) -> bool {
+    match url.host_str() {
+        Some(host) if host.eq_ignore_ascii_case("localhost") => true,
+        Some(host) => host
+            .parse::<IpAddr>()
+            .map(|addr| addr.is_loopback())
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
+fn build_http_client_for_url(url: &Url) -> Result<HttpClient> {
     let mut builder = HttpClient::builder();
     if let Some(timeout_ms) = global_options().timeout_ms {
         builder = builder.timeout(Duration::from_millis(timeout_ms));
+    }
+    if is_loopback_host(url) {
+        builder = builder.no_proxy();
     }
     builder
         .build()
