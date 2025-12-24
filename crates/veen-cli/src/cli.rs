@@ -15,7 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use ciborium::{de::Error as CborDeError, ser::Error as CborSerError, value::Value as CborValue};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use rand::{rngs::OsRng, RngCore};
@@ -763,6 +763,8 @@ enum Command {
     /// Hub lifecycle and observability commands.
     #[command(subcommand)]
     Hub(HubCommand),
+    /// Show help for a command or subcommand.
+    Help(HelpArgs),
     /// Generate a new VEEN client identity bundle.
     Keygen(KeygenArgs),
     /// Inspect or rotate client identity material.
@@ -851,6 +853,12 @@ enum Command {
     /// Audit and compliance helpers.
     #[command(subcommand)]
     Audit(AuditCommand),
+}
+
+#[derive(Debug, Args)]
+struct HelpArgs {
+    #[arg(value_name = "COMMAND", num_args = 0.., trailing_var_arg = true)]
+    command: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -3070,6 +3078,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 handle_hub_checkpoint_range(args).await.map(|_| ())
             }
         },
+        Command::Help(args) => handle_help(args),
         Command::Keygen(args) => handle_keygen(args).await,
         Command::Id(cmd) => match cmd {
             IdCommand::Show(args) => handle_id_show(args).await,
@@ -3208,6 +3217,27 @@ async fn run_cli(cli: Cli) -> Result<()> {
             SelftestCommand::PlusPlus => handle_selftest_plus_plus().await,
         },
     }
+}
+
+fn handle_help(args: HelpArgs) -> Result<()> {
+    let mut command = Cli::command();
+    if args.command.is_empty() {
+        command.print_long_help()?;
+        println!();
+        return Ok(());
+    }
+
+    let mut target = &mut command;
+    for segment in &args.command {
+        match target.find_subcommand_mut(segment) {
+            Some(sub) => target = sub,
+            None => bail_usage!("unknown help topic: {}", args.command.join(" ")),
+        }
+    }
+
+    target.print_long_help()?;
+    println!();
+    Ok(())
 }
 
 fn handle_parse_error(err: clap::Error, args: &[std::ffi::OsString]) -> i32 {
@@ -10694,6 +10724,18 @@ mod tests {
 
         let no_flag = vec![OsString::from("veen"), OsString::from("hub")];
         assert!(!super::args_request_json_output(&no_flag));
+    }
+
+    #[test]
+    fn help_command_parses_subcommand_path() {
+        let cli = Cli::parse_from(["veen", "help", "hub", "tls-info"]);
+
+        match cli.command {
+            Command::Help(args) => {
+                assert_eq!(args.command, vec!["hub".to_string(), "tls-info".to_string()]);
+            }
+            _ => panic!("unexpected command parsed"),
+        }
     }
 
     #[test]
