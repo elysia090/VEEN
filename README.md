@@ -89,6 +89,14 @@ independently. The implementation guarantees:
   Kubernetes manifests ensure operators can attest to the exact bits running in
   production when presenting compliance evidence.
 
+### Deduplication scope
+
+The hub runtime performs message deduplication per stream. Submissions are
+rejected as duplicates only when the same stream has already committed an
+identical leaf hash. The runtime keys its deduplication cache on the tuple of
+`(stream, leaf_hash)` so identical payloads in different streams are evaluated
+independently.
+
 ## Project status
 
 The v0.0.1 protocol release focuses on verifiable message delivery and overlay
