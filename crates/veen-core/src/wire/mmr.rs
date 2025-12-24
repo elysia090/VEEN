@@ -29,56 +29,52 @@ impl Mmr {
 
     /// Appends a new leaf hash and returns the updated `(stream_seq, mmr_root)` pair.
     pub fn append(&mut self, leaf: LeafHash) -> (u64, MmrRoot) {
-        self.seq = self.seq.checked_add(1).expect("stream_seq overflow");
-        let mut carry = MmrNode::from(leaf);
-        let mut seq = self.seq;
-
-        while seq & 1 == 0 {
-            let left = self.peaks.pop().expect("folding requires an existing peak");
-            carry = MmrNode::combine(&left, &carry);
-            seq >>= 1;
-        }
-
-        self.peaks.push(carry);
-        let root = MmrRoot::from_peaks(&self.peaks).expect("peaks must be non-empty");
-        (self.seq, root)
+        let (seq, root, _) = self.append_leaf(leaf, false);
+        (seq, root)
     }
 
     /// Appends a new leaf hash and returns the updated `(stream_seq, mmr_root, proof)` tuple.
     pub fn append_with_proof(&mut self, leaf: LeafHash) -> (u64, MmrRoot, MmrProof) {
-        self.seq = self.seq.checked_add(1).expect("stream_seq overflow");
-        let mut carry = MmrNode::from(leaf);
-        let mut seq = self.seq;
-        let mut path = Vec::new();
-
-        while seq & 1 == 0 {
-            let left = self.peaks.pop().expect("folding requires an existing peak");
-            path.push(MmrPathNode {
-                dir: Direction::Left,
-                sib: left,
-            });
-            carry = MmrNode::combine(&left, &carry);
-            seq >>= 1;
-        }
-
-        let peaks_after: Vec<MmrNode> = self.peaks.to_vec();
-        self.peaks.push(carry);
-        let root = MmrRoot::from_peaks(&self.peaks).expect("peaks must be non-empty");
-
-        let proof = MmrProof {
-            ver: PROOF_VERSION,
-            leaf_hash: leaf,
-            path,
-            peaks_after,
-        };
-
-        (self.seq, root, proof)
+        let (seq, root, proof) = self.append_leaf(leaf, true);
+        (seq, root, proof.expect("proof requested"))
     }
 
     /// Computes the current MMR root if any leaves have been appended.
     #[must_use]
     pub fn root(&self) -> Option<MmrRoot> {
         MmrRoot::from_peaks(&self.peaks)
+    }
+
+    fn append_leaf(&mut self, leaf: LeafHash, with_proof: bool) -> (u64, MmrRoot, Option<MmrProof>) {
+        self.seq = self.seq.checked_add(1).expect("stream_seq overflow");
+        let mut carry = MmrNode::from(leaf);
+        let mut seq = self.seq;
+        let mut path = with_proof.then(Vec::new);
+
+        while seq & 1 == 0 {
+            let left = self.peaks.pop().expect("folding requires an existing peak");
+            if let Some(path) = path.as_mut() {
+                path.push(MmrPathNode {
+                    dir: Direction::Left,
+                    sib: left.clone(),
+                });
+            }
+            carry = MmrNode::combine(&left, &carry);
+            seq >>= 1;
+        }
+
+        let peaks_after = path.as_ref().map(|_| self.peaks.clone());
+        self.peaks.push(carry);
+        let root = MmrRoot::from_peaks(&self.peaks).expect("peaks must be non-empty");
+
+        let proof = path.map(|path| MmrProof {
+            ver: PROOF_VERSION,
+            leaf_hash: leaf,
+            path,
+            peaks_after: peaks_after.unwrap_or_default(),
+        });
+
+        (self.seq, root, proof)
     }
 }
 
