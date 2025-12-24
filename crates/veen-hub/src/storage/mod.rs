@@ -28,6 +28,7 @@ pub const REVOCATIONS_FILE: &str = "revocations.json";
 pub const AUTHORITY_FILE: &str = "authority_records.json";
 pub const LABEL_CLASS_FILE: &str = "label_classes.json";
 pub const SCHEMA_REGISTRY_FILE: &str = "schema_descriptors.json";
+pub const RECENT_LEAF_HASHES_FILE: &str = "recent_leaf_hashes.json";
 
 #[derive(Clone)]
 pub struct HubStorage {
@@ -103,6 +104,10 @@ impl HubStorage {
 
     pub fn tls_info_path(&self) -> PathBuf {
         self.state_dir().join(TLS_INFO_FILE)
+    }
+
+    pub fn recent_leaf_hashes_path(&self) -> PathBuf {
+        self.state_dir().join(RECENT_LEAF_HASHES_FILE)
     }
 
     pub async fn flush(&self) -> Result<()> {

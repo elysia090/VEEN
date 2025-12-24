@@ -166,6 +166,14 @@ impl DuplicateDetector {
     fn confirm_unique(&mut self, hash: &LeafHash) {
         self.insert(hash);
     }
+
+    fn recent_hashes(&self) -> Vec<LeafHash> {
+        self.recent
+            .iter()
+            .rev()
+            .map(|(hash, _)| *hash)
+            .collect()
+    }
 }
 
 const MAX_ADMISSION_EVENTS: usize = 512;
@@ -189,7 +197,14 @@ impl HubPipeline {
         let schema_registry = build_schema_registry(&schema_descriptors);
         let identity = load_hub_identity(storage).await?;
         let mut dedup_detector = DuplicateDetector::new(&config.dedup);
-        let recent_hashes = collect_recent_leaf_hashes(&streams, &config.dedup)?;
+        let recent_hashes = match load_recent_leaf_hash_cache(storage, &config.dedup).await? {
+            Some(hashes) => hashes,
+            None => {
+                let hashes = collect_recent_leaf_hashes(&streams, &config.dedup)?;
+                persist_recent_leaf_hash_cache(storage, &hashes).await?;
+                hashes
+            }
+        };
         dedup_detector.seed(recent_hashes);
         let state = HubState {
             streams,
@@ -602,6 +617,14 @@ impl HubPipeline {
             update_capability_store(&self.storage, &store).await?;
         }
 
+        if let Err(err) = self
+            .persist_recent_leaf_hash_cache()
+            .await
+            .context("persisting recent leaf hash cache")
+        {
+            tracing::warn!(error = ?err, "failed to persist recent leaf hash cache");
+        }
+
         self.observability.record_submit_ok();
 
         Ok(SubmitResponse {
@@ -621,6 +644,14 @@ impl HubPipeline {
         drop(guard);
         update_capability_store(&self.storage, &snapshot).await?;
         Err(anyhow::Error::new(err))
+    }
+
+    async fn persist_recent_leaf_hash_cache(&self) -> Result<()> {
+        let hashes = {
+            let dedup = self.dedup.lock().await;
+            dedup.recent_hashes()
+        };
+        persist_recent_leaf_hash_cache(&self.storage, &hashes).await
     }
 
     pub async fn bridge_ingest(
@@ -2379,6 +2410,47 @@ fn collect_recent_leaf_hashes(
     }
 
     Ok(entries.into_iter().map(|(_, _, leaf)| leaf).collect())
+}
+
+async fn load_recent_leaf_hash_cache(
+    storage: &HubStorage,
+    config: &DedupConfig,
+) -> Result<Option<Vec<LeafHash>>> {
+    let path = storage.recent_leaf_hashes_path();
+    let data = match fs::read(&path).await {
+        Ok(data) => data,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("reading recent leaf hash cache from {}", path.display()))
+        }
+    };
+    let encoded: Vec<String> = serde_json::from_slice(&data)
+        .with_context(|| format!("decoding recent leaf hash cache from {}", path.display()))?;
+    let limit = config.bloom_capacity.max(config.lru_capacity);
+    let mut hashes = Vec::with_capacity(encoded.len());
+    for hex_value in encoded {
+        let hash = LeafHash::from_str(&hex_value)
+            .with_context(|| format!("parsing cached leaf hash {}", hex_value))?;
+        hashes.push(hash);
+    }
+    if hashes.len() > limit {
+        hashes.drain(0..hashes.len().saturating_sub(limit));
+    }
+    Ok(Some(hashes))
+}
+
+async fn persist_recent_leaf_hash_cache(storage: &HubStorage, hashes: &[LeafHash]) -> Result<()> {
+    let path = storage.recent_leaf_hashes_path();
+    let encoded: Vec<String> = hashes
+        .iter()
+        .map(|hash| hex::encode(hash.as_bytes()))
+        .collect();
+    let data = serde_json::to_vec(&encoded)
+        .with_context(|| format!("encoding recent leaf hash cache for {}", path.display()))?;
+    fs::write(&path, data)
+        .await
+        .with_context(|| format!("writing recent leaf hash cache to {}", path.display()))
 }
 
 fn leaf_hash_exists(
