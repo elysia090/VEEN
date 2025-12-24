@@ -166,15 +166,6 @@ impl<'a> SelftestReporter<'a> {
 
 /// Execute the core protocol self-test invariants described in the CLI goal.
 pub async fn run_core(reporter: &mut SelftestReporter<'_>) -> Result<()> {
-    let registrations = vec![
-        "protocol invariant checks",
-        "process harness integration suite",
-    ];
-    ensure!(
-        !registrations.is_empty(),
-        "core self-test registered no cases"
-    );
-
     let prereqs =
         process_harness::core_suite_prereqs().context("checking core suite prerequisites")?;
     if !prereqs.ready() {
