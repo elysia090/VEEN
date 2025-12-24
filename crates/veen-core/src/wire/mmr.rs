@@ -60,7 +60,7 @@ impl Mmr {
             if let Some(path) = path.as_mut() {
                 path.push(MmrPathNode {
                     dir: Direction::Left,
-                    sib: left.clone(),
+                    sib: left,
                 });
             }
             carry = MmrNode::combine(&left, &carry);
