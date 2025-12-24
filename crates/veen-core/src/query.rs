@@ -123,10 +123,7 @@ impl QueryFilter {
 
             let mut normalized = Vec::with_capacity(event_types.len());
             for value in event_types {
-                normalized.push(normalize_non_empty(
-                    &value,
-                    QueryError::InvalidEventTypes,
-                )?);
+                normalized.push(normalize_non_empty(&value, QueryError::InvalidEventTypes)?);
             }
 
             self.event_type = Some(normalized);
