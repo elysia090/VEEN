@@ -208,11 +208,7 @@ async fn handle_submit(
                 (StatusCode::CONFLICT, submit_err.to_string()).into_response()
             } else {
                 tracing::warn!(error = ?err, "submit failed");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    err.to_string(),
-                )
-                    .into_response()
+                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
             }
         }
     }
@@ -410,7 +406,10 @@ async fn handle_authority_view(
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
 
-    match pipeline.authority_view_descriptor(realm_id, stream_id).await {
+    match pipeline
+        .authority_view_descriptor(realm_id, stream_id)
+        .await
+    {
         Ok(descriptor) => (StatusCode::OK, Json(descriptor)).into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "authority view failed");
