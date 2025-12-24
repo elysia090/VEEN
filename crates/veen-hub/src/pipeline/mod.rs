@@ -120,6 +120,12 @@ struct DuplicateDetector {
     recent: LruCache<LeafHash, ()>,
 }
 
+enum DedupCheck {
+    RecentDuplicate,
+    BloomHit,
+    New,
+}
+
 impl DuplicateDetector {
     fn new(config: &DedupConfig) -> Self {
         let bloom_capacity = config.bloom_capacity.max(1);
@@ -142,16 +148,23 @@ impl DuplicateDetector {
         self.recent.put(*hash, ());
     }
 
-    fn check_and_insert(&mut self, hash: &LeafHash) -> bool {
+    fn check_and_insert(&mut self, hash: &LeafHash) -> DedupCheck {
         if self.recent.get(hash).is_some() {
-            return true;
+            return DedupCheck::RecentDuplicate;
         }
         if self.bloom.check(hash.as_bytes()) {
-            self.recent.put(*hash, ());
-            return true;
+            return DedupCheck::BloomHit;
         }
         self.insert(hash);
-        false
+        DedupCheck::New
+    }
+
+    fn confirm_duplicate(&mut self, hash: &LeafHash) {
+        self.recent.put(*hash, ());
+    }
+
+    fn confirm_unique(&mut self, hash: &LeafHash) {
+        self.insert(hash);
     }
 }
 
@@ -500,23 +513,40 @@ impl HubPipeline {
 
         let leaf = leaf_hash_for(&stored_message)?;
         let leaf_hex = hex::encode(leaf.as_bytes());
-        {
+        let mut confirmed_duplicate = false;
+        let dedup_result = {
             let mut dedup = self.dedup.lock().await;
-            if dedup.check_and_insert(&leaf) {
-                tracing::warn!(
-                    stream = %stream,
-                    client_id = %client_id,
-                    leaf_hash = %leaf_hex,
-                    "dropping duplicate message by leaf hash"
-                );
-                drop(guard);
-                self.observability.record_submit_err("E.DUP");
-                self.record_admission_failure(&stream, &client_id, "E.DUP", "duplicate leaf hash")
-                    .await?;
-                return Err(anyhow::Error::new(SubmitError::Duplicate {
-                    leaf_hash: leaf_hex,
-                }));
+            dedup.check_and_insert(&leaf)
+        };
+        match dedup_result {
+            DedupCheck::RecentDuplicate => {
+                confirmed_duplicate = true;
             }
+            DedupCheck::BloomHit => {
+                confirmed_duplicate = leaf_hash_exists(&guard.streams, &leaf)?;
+                let mut dedup = self.dedup.lock().await;
+                if confirmed_duplicate {
+                    dedup.confirm_duplicate(&leaf);
+                } else {
+                    dedup.confirm_unique(&leaf);
+                }
+            }
+            DedupCheck::New => {}
+        }
+        if confirmed_duplicate {
+            tracing::warn!(
+                stream = %stream,
+                client_id = %client_id,
+                leaf_hash = %leaf_hex,
+                "dropping duplicate message by leaf hash"
+            );
+            drop(guard);
+            self.observability.record_submit_err("E.DUP");
+            self.record_admission_failure(&stream, &client_id, "E.DUP", "duplicate leaf hash")
+                .await?;
+            return Err(anyhow::Error::new(SubmitError::Duplicate {
+                leaf_hash: leaf_hex,
+            }));
         }
         let (computed_seq, mmr_root, proof) = stream_runtime.mmr.append_with_proof(leaf);
         debug_assert_eq!(computed_seq, seq, "stream mmr seq must match message seq");
@@ -2349,6 +2379,20 @@ fn collect_recent_leaf_hashes(
     }
 
     Ok(entries.into_iter().map(|(_, _, leaf)| leaf).collect())
+}
+
+fn leaf_hash_exists(
+    streams: &HashMap<String, StreamRuntime>,
+    leaf_hash: &LeafHash,
+) -> Result<bool> {
+    for runtime in streams.values() {
+        for message in &runtime.state.messages {
+            if &leaf_hash_for(message)? == leaf_hash {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 async fn rebuild_attachment_ref_counts(
