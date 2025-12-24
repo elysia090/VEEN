@@ -85,13 +85,13 @@ struct HubState {
 #[derive(Clone)]
 struct StreamRuntime {
     state: HubStreamState,
-    proven_messages: Vec<StreamMessageWithProof>,
+    proven_messages: VecDeque<StreamMessageWithProof>,
     mmr: Mmr,
 }
 
 impl StreamRuntime {
     fn new(state: HubStreamState, proven_messages: Vec<StreamMessageWithProof>) -> Result<Self> {
-        if state.messages.len() != proven_messages.len() {
+        if state.messages.len() < proven_messages.len() {
             bail!(
                 "stream state and proof history length mismatch: {} vs {}",
                 state.messages.len(),
@@ -103,15 +103,28 @@ impl StreamRuntime {
             let leaf = leaf_hash_for(message)?;
             mmr.append(leaf);
         }
-        Ok(Self {
+        let mut runtime = Self {
             state,
-            proven_messages,
+            proven_messages: VecDeque::from(proven_messages),
             mmr,
-        })
+        };
+        runtime.trim_proven_messages();
+        Ok(runtime)
     }
 
     fn empty() -> Self {
         Self::new(HubStreamState::default(), Vec::new()).expect("empty stream state")
+    }
+
+    fn push_proven(&mut self, message: StreamMessageWithProof) {
+        self.proven_messages.push_back(message);
+        self.trim_proven_messages();
+    }
+
+    fn trim_proven_messages(&mut self) {
+        while self.proven_messages.len() > PROVEN_MESSAGES_MEMORY_LIMIT {
+            self.proven_messages.pop_front();
+        }
     }
 }
 
@@ -177,6 +190,7 @@ impl DuplicateDetector {
 }
 
 const MAX_ADMISSION_EVENTS: usize = 512;
+const PROVEN_MESSAGES_MEMORY_LIMIT: usize = 2048;
 
 impl HubPipeline {
     pub async fn initialise(config: &HubRuntimeConfig, storage: &HubStorage) -> Result<Self> {
@@ -578,9 +592,7 @@ impl HubPipeline {
             receipt: receipt.clone(),
             proof: StreamProof::from(proof),
         };
-        stream_runtime
-            .proven_messages
-            .push(message_with_proof.clone());
+        stream_runtime.push_proven(message_with_proof.clone());
 
         let usage_applied_dirty =
             match apply_client_usage_update(&mut guard.capabilities, usage_update) {
@@ -743,9 +755,7 @@ impl HubPipeline {
             receipt: receipt.clone(),
             proof: StreamProof::from(proof),
         };
-        stream_runtime
-            .proven_messages
-            .push(message_with_proof.clone());
+        stream_runtime.push_proven(message_with_proof.clone());
 
         persist_message_bundle(&self.storage, &stream, message.seq, &message_with_proof).await?;
         stream_index::append_stream_index(
@@ -880,10 +890,26 @@ impl HubPipeline {
             return Ok(StreamResponse::Messages(messages));
         }
 
-        let proven = proven_messages
-            .into_iter()
-            .filter(|entry| entry.message.seq >= from)
-            .collect();
+        let window_start = proven_messages.front().map(|entry| entry.message.seq);
+        let last_seq = state.messages.last().map(|msg| msg.seq).unwrap_or(0);
+        let mut proven = Vec::new();
+        if let Some(window_start) = window_start {
+            if from < window_start {
+                let end = window_start.saturating_sub(1);
+                if from <= end {
+                    proven.extend(
+                        load_proven_messages_range(&self.storage, stream, from, end).await?,
+                    );
+                }
+            }
+            proven.extend(
+                proven_messages
+                    .into_iter()
+                    .filter(|entry| entry.message.seq >= from),
+            );
+        } else if from <= last_seq {
+            proven.extend(load_proven_messages_range(&self.storage, stream, from, last_seq).await?);
+        }
 
         Ok(StreamResponse::Proven(proven))
     }
@@ -2516,26 +2542,7 @@ async fn load_stream_state_from_index(
 
     for entry in entries {
         let bundle_path = stream_index::bundle_path(storage, &entry);
-        let data = fs::read(&bundle_path)
-            .await
-            .with_context(|| format!("reading message bundle from {}", bundle_path.display()))?;
-        let bundle: StoredMessageBundle = match serde_json::from_slice(&data) {
-            Ok(bundle) => bundle,
-            Err(parse_err) => {
-                let legacy: StoredMessage = serde_json::from_slice(&data).with_context(|| {
-                    format!(
-                        "decoding legacy message bundle from {} after error: {parse_err}",
-                        bundle_path.display()
-                    )
-                })?;
-                StoredMessageBundle {
-                    message: legacy,
-                    receipt: None,
-                    proof: None,
-                }
-            }
-        };
-
+        let bundle = read_message_bundle(&bundle_path).await?;
         let StoredMessageBundle {
             message,
             receipt,
@@ -2613,6 +2620,28 @@ async fn load_stream_state_from_index(
     })
 }
 
+async fn read_message_bundle(path: &Path) -> Result<StoredMessageBundle> {
+    let data = fs::read(path)
+        .await
+        .with_context(|| format!("reading message bundle from {}", path.display()))?;
+    match serde_json::from_slice(&data) {
+        Ok(bundle) => Ok(bundle),
+        Err(parse_err) => {
+            let legacy: StoredMessage = serde_json::from_slice(&data).with_context(|| {
+                format!(
+                    "decoding legacy message bundle from {} after error: {parse_err}",
+                    path.display()
+                )
+            })?;
+            Ok(StoredMessageBundle {
+                message: legacy,
+                receipt: None,
+                proof: None,
+            })
+        }
+    }
+}
+
 fn build_proven_messages(messages: &[StoredMessage]) -> Result<Vec<StreamMessageWithProof>> {
     let mut mmr = Mmr::new();
     let mut proven = Vec::with_capacity(messages.len());
@@ -2635,6 +2664,49 @@ fn build_proven_messages(messages: &[StoredMessage]) -> Result<Vec<StreamMessage
             message: message.clone(),
             receipt,
             proof: StreamProof::from(proof),
+        });
+    }
+    Ok(proven)
+}
+
+async fn load_proven_messages_range(
+    storage: &HubStorage,
+    stream: &str,
+    from: u64,
+    to: u64,
+) -> Result<Vec<StreamMessageWithProof>> {
+    if from > to {
+        return Ok(Vec::new());
+    }
+    let index_path = storage.stream_index_path(stream);
+    let entries = stream_index::load_stream_index(&index_path).await?;
+    let mut proven = Vec::new();
+    for entry in entries {
+        if entry.seq < from || entry.seq > to {
+            continue;
+        }
+        let bundle_path = stream_index::bundle_path(storage, &entry);
+        let bundle = read_message_bundle(&bundle_path).await?;
+        let StoredMessageBundle {
+            message,
+            receipt,
+            proof,
+        } = bundle;
+        let (receipt, proof) = match (receipt, proof) {
+            (Some(receipt), Some(proof)) => (receipt, proof),
+            _ => {
+                bail!(
+                    "missing receipt or proof in bundle for {}#{} at {}",
+                    stream,
+                    entry.seq,
+                    bundle_path.display()
+                );
+            }
+        };
+        proven.push(StreamMessageWithProof {
+            message,
+            receipt,
+            proof,
         });
     }
     Ok(proven)
