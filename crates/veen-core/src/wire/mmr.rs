@@ -45,7 +45,11 @@ impl Mmr {
         MmrRoot::from_peaks(&self.peaks)
     }
 
-    fn append_leaf(&mut self, leaf: LeafHash, with_proof: bool) -> (u64, MmrRoot, Option<MmrProof>) {
+    fn append_leaf(
+        &mut self,
+        leaf: LeafHash,
+        with_proof: bool,
+    ) -> (u64, MmrRoot, Option<MmrProof>) {
         self.seq = self.seq.checked_add(1).expect("stream_seq overflow");
         let mut carry = MmrNode::from(leaf);
         let mut seq = self.seq;
