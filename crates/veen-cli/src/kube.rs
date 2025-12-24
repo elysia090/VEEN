@@ -998,6 +998,10 @@ fn format_hub_url(service: &str) -> String {
     }
 }
 
+fn require_namespace_ref(namespace: Option<&str>) -> Result<&str> {
+    namespace.ok_or_else(|| CliUsageError::new("namespace required for job manifest".into()).into())
+}
+
 struct CliJobConfig<'a> {
     namespace: &'a str,
     generate_name: &'a str,
@@ -1009,10 +1013,7 @@ struct CliJobConfig<'a> {
 }
 
 fn build_job_send_manifest(args: &KubeJobSendArgs, env: &[EnvVar]) -> Result<Job> {
-    let namespace = args
-        .namespace
-        .as_deref()
-        .ok_or_else(|| CliUsageError::new("namespace required for job manifest".into()))?;
+    let namespace = require_namespace_ref(args.namespace.as_deref())?;
     build_cli_job(
         CliJobConfig {
             namespace,
@@ -1028,10 +1029,7 @@ fn build_job_send_manifest(args: &KubeJobSendArgs, env: &[EnvVar]) -> Result<Job
 }
 
 fn build_job_stream_manifest(args: &KubeJobStreamArgs, env: &[EnvVar]) -> Result<Job> {
-    let namespace = args
-        .namespace
-        .as_deref()
-        .ok_or_else(|| CliUsageError::new("namespace required for job manifest".into()))?;
+    let namespace = require_namespace_ref(args.namespace.as_deref())?;
     build_cli_job(
         CliJobConfig {
             namespace,
@@ -1046,20 +1044,24 @@ fn build_job_stream_manifest(args: &KubeJobStreamArgs, env: &[EnvVar]) -> Result
     )
 }
 
-fn build_send_command_args(args: &KubeJobSendArgs) -> Vec<String> {
-    let mut command = vec![
+fn build_job_command_base(subcommand: &str, hub_service: &str, stream: &str) -> Vec<String> {
+    vec![
         "placeholder".to_string(),
         "veen".to_string(),
-        "send".to_string(),
+        subcommand.to_string(),
         "--hub".to_string(),
-        format_hub_url(&args.hub_service),
+        format_hub_url(hub_service),
         "--client".to_string(),
         CLIENT_STATE_PATH.to_string(),
         "--stream".to_string(),
-        args.stream.clone(),
-        "--body".to_string(),
-        args.body.clone(),
-    ];
+        stream.to_string(),
+    ]
+}
+
+fn build_send_command_args(args: &KubeJobSendArgs) -> Vec<String> {
+    let mut command = build_job_command_base("send", &args.hub_service, &args.stream);
+    command.push("--body".to_string());
+    command.push(args.body.clone());
     if let Some(profile) = &args.profile_id {
         command.push("--profile-id".to_string());
         command.push(profile.clone());
@@ -1076,17 +1078,7 @@ fn build_send_command_args(args: &KubeJobSendArgs) -> Vec<String> {
 }
 
 fn build_stream_command_args(args: &KubeJobStreamArgs) -> Vec<String> {
-    let mut command = vec![
-        "placeholder".to_string(),
-        "veen".to_string(),
-        "stream".to_string(),
-        "--hub".to_string(),
-        format_hub_url(&args.hub_service),
-        "--client".to_string(),
-        CLIENT_STATE_PATH.to_string(),
-        "--stream".to_string(),
-        args.stream.clone(),
-    ];
+    let mut command = build_job_command_base("stream", &args.hub_service, &args.stream);
     if let Some(from) = args.from {
         command.push("--from".to_string());
         command.push(from.to_string());
