@@ -1013,7 +1013,7 @@ impl IntegrationHarness {
             .context("fetching recorder stream with proofs")?;
         ensure!(!messages.is_empty(), "recorder stream emitted no messages");
         ensure!(
-            messages.len() >= cli_events.len() + 1,
+            messages.len() > cli_events.len(),
             "recorder stream missing expected messages"
         );
 
