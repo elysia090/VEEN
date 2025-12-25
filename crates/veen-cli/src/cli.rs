@@ -344,8 +344,30 @@ fn global_options() -> GlobalOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputPreference {
+    Json,
+    Text,
+    Quiet,
+}
+
+fn output_preference(explicit_json: bool) -> OutputPreference {
+    let global = global_options();
+    if explicit_json || global.json {
+        OutputPreference::Json
+    } else if global.quiet {
+        OutputPreference::Quiet
+    } else {
+        OutputPreference::Text
+    }
+}
+
 fn json_output_enabled(explicit: bool) -> bool {
-    explicit || global_options().json
+    matches!(output_preference(explicit), OutputPreference::Json)
+}
+
+fn stdout_output_enabled(use_json: bool) -> bool {
+    !global_options().quiet || use_json
 }
 
 fn cli_binary_name() -> String {
@@ -776,8 +798,22 @@ fn format_schema_descriptor_output(
 }
 
 #[cfg(test)]
+fn output_preference_with(explicit_json: bool, global: &GlobalOptions) -> OutputPreference {
+    if explicit_json || global.json {
+        OutputPreference::Json
+    } else if global.quiet {
+        OutputPreference::Quiet
+    } else {
+        OutputPreference::Text
+    }
+}
+
+#[cfg(test)]
 fn json_output_enabled_with(explicit: bool, global: &GlobalOptions) -> bool {
-    explicit || global.json
+    matches!(
+        output_preference_with(explicit, global),
+        OutputPreference::Json
+    )
 }
 
 #[derive(Subcommand)]
@@ -3814,79 +3850,84 @@ async fn handle_hub_verify_rotation(args: HubVerifyRotationArgs) -> Result<()> {
 
 async fn handle_hub_health(args: HubHealthArgs) -> Result<()> {
     let use_json = json_output_enabled(args.json);
+    let stdout_enabled = stdout_output_enabled(use_json);
     let resolved = hub_reference_from_locator(&args.hub, "hub health").await?;
     match resolved.into_reference() {
         HubReference::Local(data_dir) => {
             let state = load_hub_state(&data_dir).await?;
             let now = current_unix_timestamp()?;
 
-            if use_json {
-                let rendered = render_local_health_json(&state, now);
-                println!("{}", pretty_json(rendered));
-            } else {
-                if state.running {
-                    println!("status: running");
-                    println!("uptime_sec: {}", state.uptime(now));
+            if stdout_enabled {
+                if use_json {
+                    let rendered = render_local_health_json(&state, now);
+                    println!("{}", pretty_json(rendered));
                 } else {
-                    println!("status: stopped");
-                    if let Some(stopped_at) = state.stopped_at {
-                        println!("stopped_at: {stopped_at}");
+                    if state.running {
+                        println!("status: running");
+                        println!("uptime_sec: {}", state.uptime(now));
+                    } else {
+                        println!("status: stopped");
+                        if let Some(stopped_at) = state.stopped_at {
+                            println!("stopped_at: {stopped_at}");
+                        }
                     }
-                }
 
-                if let Some(ref profile_id) = state.profile_id {
-                    println!("profile_id: {profile_id}");
-                }
-                if let Some(ref hub_id) = state.hub_id {
-                    println!("hub_id: {hub_id}");
+                    if let Some(ref profile_id) = state.profile_id {
+                        println!("profile_id: {profile_id}");
+                    }
+                    if let Some(ref hub_id) = state.hub_id {
+                        println!("hub_id: {hub_id}");
+                    }
                 }
             }
         }
         HubReference::Remote(client) => {
             let health: RemoteHealthStatus = client.get_json("/healthz", &[]).await?;
-            if use_json {
-                let rendered = render_remote_health_json(&health)?;
-                println!("{}", pretty_json(rendered));
-            } else {
-                println!("status: {}", if health.ok { "running" } else { "error" });
-                println!("uptime_sec: {}", health.uptime.as_secs());
-                println!("role: {}", health.role);
-                println!("peaks_count: {}", health.peaks_count);
-                if let Some(profile_id) = health.profile_id.as_deref() {
-                    println!("profile_id: {profile_id}");
-                }
-                if let Some(hub_id) = health.hub_id.as_deref() {
-                    println!("hub_id: {hub_id}");
-                }
-                if let Some(hub_pk) = health.hub_public_key.as_deref() {
-                    println!("hub_pk: {hub_pk}");
-                }
-                println!("submit_ok_total: {}", health.submit_ok_total);
-                if health.submit_err_total.is_empty() {
-                    println!("submit_err_total: (none)");
+            if stdout_enabled {
+                if use_json {
+                    let rendered = render_remote_health_json(&health)?;
+                    println!("{}", pretty_json(rendered));
                 } else {
-                    println!("submit_err_total:");
-                    for (code, count) in health.submit_err_total.iter() {
-                        println!("  {code}: {count}");
+                    println!("status: {}", if health.ok { "running" } else { "error" });
+                    println!("uptime_sec: {}", health.uptime.as_secs());
+                    println!("role: {}", health.role);
+                    println!("peaks_count: {}", health.peaks_count);
+                    if let Some(profile_id) = health.profile_id.as_deref() {
+                        println!("profile_id: {profile_id}");
                     }
-                }
-                if health.last_stream_seq.is_empty() {
-                    println!("last_stream_seq: (none)");
-                } else {
-                    println!("last_stream_seq:");
-                    for (label, seq) in health.last_stream_seq.iter() {
-                        println!("  {label}: {seq}");
+                    if let Some(hub_id) = health.hub_id.as_deref() {
+                        println!("hub_id: {hub_id}");
                     }
-                }
-                if health.mmr_roots.is_empty() {
-                    println!("mmr_roots: (none)");
-                } else {
-                    println!("mmr_roots:");
-                    for (label, root) in health.mmr_roots.iter() {
-                        println!("  {label}: {root}");
+                    if let Some(hub_pk) = health.hub_public_key.as_deref() {
+                        println!("hub_pk: {hub_pk}");
                     }
+                    println!("submit_ok_total: {}", health.submit_ok_total);
+                    if health.submit_err_total.is_empty() {
+                        println!("submit_err_total: (none)");
+                    } else {
+                        println!("submit_err_total:");
+                        for (code, count) in health.submit_err_total.iter() {
+                            println!("  {code}: {count}");
+                        }
+                    }
+                    if health.last_stream_seq.is_empty() {
+                        println!("last_stream_seq: (none)");
+                    } else {
+                        println!("last_stream_seq:");
+                        for (label, seq) in health.last_stream_seq.iter() {
+                            println!("  {label}: {seq}");
+                        }
+                    }
+                    if health.mmr_roots.is_empty() {
+                        println!("mmr_roots: (none)");
+                    } else {
+                        println!("mmr_roots:");
+                        for (label, root) in health.mmr_roots.iter() {
+                            println!("  {label}: {root}");
+                        }
+                    }
+                    println!("data_dir: {}", health.data_dir);
                 }
-                println!("data_dir: {}", health.data_dir);
             }
         }
     }
@@ -4077,7 +4118,9 @@ async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
     };
 
     let output = format_hub_profile_output(ok, &version, &profile_id, &hub_id, &features, use_json);
-    println!("{output}");
+    if stdout_output_enabled(use_json) {
+        println!("{output}");
+    }
 
     log_cli_goal("CLI.V0_0_1_PP.PROFILE");
     Ok(())
@@ -4150,7 +4193,9 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
     }
 
     let output = format_hub_role_output(ok, &hub_id, &role, stream_info.as_ref(), use_json);
-    println!("{output}");
+    if stdout_output_enabled(use_json) {
+        println!("{output}");
+    }
 
     log_cli_goal("CLI.AUTH1.ROLE");
     Ok(())
@@ -4225,6 +4270,10 @@ fn render_kex_policy(descriptor: &RemoteKexPolicyDescriptor, use_json: bool) {
         process::exit(4);
     }
 
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     if use_json {
         let output = json!({
             "ok": true,
@@ -4280,6 +4329,10 @@ fn render_admission_report(report: &RemoteAdmissionReport, use_json: bool) {
         process::exit(4);
     }
 
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     if use_json {
         let output = json!({ "ok": true, "stages": report.stages });
         match serde_json::to_string_pretty(&output) {
@@ -4323,6 +4376,10 @@ fn render_admission_log(response: &RemoteAdmissionLogResponse, use_json: bool) {
             use_json,
         );
         process::exit(4);
+    }
+
+    if !stdout_output_enabled(use_json) {
+        return;
     }
 
     if use_json {
@@ -4724,6 +4781,10 @@ async fn handle_id_usage(args: IdUsageArgs) -> Result<()> {
 }
 
 fn render_id_usage(entries: &[IdUsageEntry], use_json: bool) {
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     if use_json {
         let rendered: Vec<_> = entries
             .iter()
@@ -5221,6 +5282,10 @@ async fn load_local_revocations(data_dir: &Path) -> Result<Vec<RevocationRecord>
 }
 
 fn render_revocations(entries: &[RenderedRevocation], use_json: bool) {
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     if use_json {
         let output = json!({ "ok": true, "revocations": entries });
         match serde_json::to_string_pretty(&output) {
@@ -5660,6 +5725,10 @@ fn render_cap_status(response: &RemoteCapStatusResponse, auth_ref_hex: &str, use
         process::exit(4);
     }
 
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     let local_status = "unknown";
     if use_json {
         let output = json!({
@@ -5751,6 +5820,10 @@ fn render_pow_challenge(descriptor: &RemotePowChallenge, use_json: bool) {
         process::exit(4);
     }
 
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     if use_json {
         let output = json!({
             "ok": true,
@@ -5768,6 +5841,10 @@ fn render_pow_challenge(descriptor: &RemotePowChallenge, use_json: bool) {
 }
 
 fn render_pow_solution(cookie: &PowCookie, use_json: bool) {
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     if use_json {
         let output = json!({
             "ok": true,
@@ -5910,7 +5987,7 @@ async fn handle_federate_mirror_plan(args: FederateMirrorPlanArgs) -> Result<()>
 async fn handle_federate_mirror_run(args: FederateMirrorRunArgs) -> Result<()> {
     let use_json = json_output_enabled(args.plan.json);
     let context = compute_federate_mirror_plan(&args.plan).await?;
-    if !use_json {
+    if !use_json && stdout_output_enabled(use_json) {
         println!("mirror plan:");
         render_federate_mirror_plan(&context.plan, false);
     }
@@ -5990,6 +6067,10 @@ struct FederateMirrorRunOutput {
 }
 
 fn render_federate_mirror_plan(plan: &FederateMirrorPlanOutput, use_json: bool) {
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     if use_json {
         match serde_json::to_string_pretty(plan) {
             Ok(rendered) => println!("{rendered}"),
@@ -6038,6 +6119,10 @@ fn render_federate_mirror_plan(plan: &FederateMirrorPlanOutput, use_json: bool) 
 }
 
 fn render_federate_mirror_run_output(output: &FederateMirrorRunOutput, use_json: bool) {
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     if use_json {
         match serde_json::to_string_pretty(output) {
             Ok(rendered) => println!("{rendered}"),
@@ -6440,6 +6525,10 @@ fn render_authority_record(descriptor: &RemoteAuthorityRecordDescriptor, use_jso
         process::exit(4);
     }
 
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     let output = format_authority_record_output(descriptor, use_json);
     println!("{output}");
 }
@@ -6452,6 +6541,10 @@ fn render_label_authority(descriptor: &RemoteLabelAuthorityDescriptor, use_json:
             use_json,
         );
         process::exit(4);
+    }
+
+    if !stdout_output_enabled(use_json) {
+        return;
     }
 
     let output = format_label_authority_output(descriptor, use_json);
@@ -6468,6 +6561,10 @@ fn render_label_class_descriptor(descriptor: &RemoteLabelClassDescriptor, use_js
         process::exit(4);
     }
 
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     let output = format_label_class_descriptor_output(descriptor, use_json);
     println!("{output}");
 }
@@ -6480,6 +6577,10 @@ fn render_label_class_list(list: &RemoteLabelClassList, use_json: bool) {
             use_json,
         );
         process::exit(4);
+    }
+
+    if !stdout_output_enabled(use_json) {
+        return;
     }
 
     let output = format_label_class_list_output(list, use_json);
@@ -6507,6 +6608,10 @@ fn render_schema_descriptor(response: &RemoteSchemaRegistryEntry, use_json: bool
             process::exit(4);
         }
     };
+
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
 
     let output = format_schema_descriptor_output(descriptor, response.usage.as_ref(), use_json);
     println!("{output}");
@@ -6953,6 +7058,10 @@ fn render_wallet_ledger(
     account: Option<&str>,
     use_json: bool,
 ) {
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     if use_json {
         let output = json!({
             "stream": stream,
@@ -7246,6 +7355,10 @@ where
 }
 
 fn render_agreement_status(output: &AgreementStatusOutput, use_json: bool) {
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     if use_json {
         match serde_json::to_string_pretty(output) {
             Ok(rendered) => println!("{rendered}"),
@@ -7442,6 +7555,10 @@ impl RecoveryTimelineEntryKind {
 }
 
 fn render_recovery_timeline(output: &RecoveryTimelineOutput, use_json: bool) {
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     if use_json {
         match serde_json::to_string_pretty(output) {
             Ok(rendered) => println!("{rendered}"),
@@ -7785,6 +7902,10 @@ async fn derive_operation_submission(
 }
 
 fn render_operation_submission(result: &OperationSubmissionResult, use_json: bool) {
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     if use_json {
         let output = json!({
             "ok": true,
@@ -8483,6 +8604,10 @@ fn render_snapshot_verify(
     wallet_state: Option<&WalletLedgerSnapshotState>,
     use_json: bool,
 ) -> Result<()> {
+    if !stdout_output_enabled(use_json) {
+        return Ok(());
+    }
+
     if use_json {
         match serde_json::to_string_pretty(output) {
             Ok(rendered) => println!("{rendered}"),
@@ -9589,6 +9714,10 @@ impl StreamMessageCache {
 }
 
 fn render_audit_query_rows(rows: &[AuditQueryRow], use_json: bool) {
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     if use_json {
         let payload: Vec<JsonValue> = rows
             .iter()
@@ -9629,6 +9758,10 @@ fn render_audit_query_rows(rows: &[AuditQueryRow], use_json: bool) {
 }
 
 fn render_audit_summary(rows: &[AuditStreamSummaryRow], use_json: bool) {
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     if use_json {
         let payload: Vec<JsonValue> = rows
             .iter()
@@ -9686,6 +9819,10 @@ fn render_audit_summary(rows: &[AuditStreamSummaryRow], use_json: bool) {
 }
 
 fn render_policy_check(violations: &[String], use_json: bool) {
+    if !stdout_output_enabled(use_json) {
+        return;
+    }
+
     if use_json {
         let output = json!({
             "ok": violations.is_empty(),
@@ -11132,6 +11269,14 @@ mod tests {
         };
         assert!(super::json_output_enabled_with(true, &global_text));
         assert!(!super::json_output_enabled_with(false, &global_text));
+
+        let global_quiet = GlobalOptions {
+            json: false,
+            quiet: true,
+            timeout_ms: None,
+        };
+        assert!(super::json_output_enabled_with(true, &global_quiet));
+        assert!(!super::json_output_enabled_with(false, &global_quiet));
     }
 
     #[test]
