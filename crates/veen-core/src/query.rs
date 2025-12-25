@@ -585,23 +585,12 @@ fn validate_evidence_summary(
         return Err(QueryError::EvidenceModeMismatch);
     }
 
-    if let Some(value) = summary_obj.get("query_id").and_then(Value::as_str) {
-        if value.trim() != query_id {
-            return Err(QueryError::EvidenceIdentifierMismatch);
-        }
-    }
-
-    if let Some(value) = summary_obj.get("result_id").and_then(Value::as_str) {
-        if value.trim() != result_id {
-            return Err(QueryError::EvidenceIdentifierMismatch);
-        }
-    }
-
     match policy.mode {
         EvidenceMode::None => {
             if summary_obj.contains_key("sample_rate") {
                 return Err(QueryError::UnexpectedSampleRate);
             }
+            validate_summary_identifiers(summary_obj, query_id, result_id, false)?;
             validate_verified_entries(summary_obj.get("verified"))?;
         }
         EvidenceMode::Spot => {
@@ -615,20 +604,7 @@ fn validate_evidence_summary(
                 return Err(QueryError::EvidenceSampleRateMismatch);
             }
 
-            let summary_query_id = summary_obj
-                .get("query_id")
-                .and_then(Value::as_str)
-                .ok_or(QueryError::InvalidEvidenceSummary)?
-                .trim();
-            let summary_result_id = summary_obj
-                .get("result_id")
-                .and_then(Value::as_str)
-                .ok_or(QueryError::InvalidEvidenceSummary)?
-                .trim();
-
-            if summary_query_id != query_id || summary_result_id != result_id {
-                return Err(QueryError::EvidenceIdentifierMismatch);
-            }
+            validate_summary_identifiers(summary_obj, query_id, result_id, true)?;
 
             let verified = summary_obj
                 .get("verified")
@@ -640,25 +616,45 @@ fn validate_evidence_summary(
                 return Err(QueryError::UnexpectedSampleRate);
             }
 
-            let summary_query_id = summary_obj
-                .get("query_id")
-                .and_then(Value::as_str)
-                .ok_or(QueryError::InvalidEvidenceSummary)?
-                .trim();
-            let summary_result_id = summary_obj
-                .get("result_id")
-                .and_then(Value::as_str)
-                .ok_or(QueryError::InvalidEvidenceSummary)?
-                .trim();
-
-            if summary_query_id != query_id || summary_result_id != result_id {
-                return Err(QueryError::EvidenceIdentifierMismatch);
-            }
+            validate_summary_identifiers(summary_obj, query_id, result_id, true)?;
 
             let verified = summary_obj
                 .get("verified")
                 .ok_or(QueryError::InvalidEvidenceSummary)?;
             validate_verified_entries(Some(verified))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_summary_identifiers(
+    summary_obj: &JsonMap<String, Value>,
+    query_id: &str,
+    result_id: &str,
+    required: bool,
+) -> Result<(), QueryError> {
+    let summary_query_id = summary_obj.get("query_id").and_then(Value::as_str);
+    let summary_result_id = summary_obj.get("result_id").and_then(Value::as_str);
+
+    if required {
+        let summary_query_id = summary_query_id.ok_or(QueryError::InvalidEvidenceSummary)?;
+        let summary_result_id = summary_result_id.ok_or(QueryError::InvalidEvidenceSummary)?;
+        if summary_query_id.trim() != query_id || summary_result_id.trim() != result_id {
+            return Err(QueryError::EvidenceIdentifierMismatch);
+        }
+        return Ok(());
+    }
+
+    if let Some(value) = summary_query_id {
+        if value.trim() != query_id {
+            return Err(QueryError::EvidenceIdentifierMismatch);
+        }
+    }
+
+    if let Some(value) = summary_result_id {
+        if value.trim() != result_id {
+            return Err(QueryError::EvidenceIdentifierMismatch);
         }
     }
 
