@@ -97,6 +97,14 @@ identical leaf hash. The runtime keys its deduplication cache on the tuple of
 `(stream, leaf_hash)` so identical payloads in different streams are evaluated
 independently.
 
+### Stream index recovery behavior
+
+Stream index files are append-only JSONL logs. On load, the hub tolerates
+partial writes: a trailing line without a newline delimiter is ignored to avoid
+ingesting half-written records. If a newline-delimited entry in the middle of
+the file is malformed (invalid UTF-8 or JSON), the hub logs a warning and skips
+that line while continuing to load the remaining entries.
+
 ## Project status
 
 The v0.0.1 protocol release focuses on verifiable message delivery and overlay
