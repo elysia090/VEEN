@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tracing::warn;
 
 use super::HubStorage;
 
@@ -55,18 +56,52 @@ pub async fn load_stream_index(path: &Path) -> Result<Vec<StreamIndexEntry>> {
     let file = File::open(path)
         .await
         .with_context(|| format!("opening stream index {}", path.display()))?;
-    let mut lines = BufReader::new(file).lines();
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .with_context(|| format!("reading stream index {}", path.display()))?
-    {
-        if line.is_empty() {
+    let mut reader = BufReader::new(file);
+    let mut buffer = Vec::new();
+    let mut line_number = 0usize;
+    loop {
+        buffer.clear();
+        let bytes_read = reader
+            .read_until(b'\n', &mut buffer)
+            .await
+            .with_context(|| format!("reading stream index {}", path.display()))?;
+        if bytes_read == 0 {
+            break;
+        }
+        if !buffer.ends_with(b"\n") {
+            break;
+        }
+        line_number += 1;
+        buffer.pop();
+        if buffer.last() == Some(&b'\r') {
+            buffer.pop();
+        }
+        if buffer.is_empty() {
             continue;
         }
-        let entry: StreamIndexEntry = serde_json::from_str(&line)
-            .with_context(|| format!("decoding stream index entry from {}", path.display()))?;
-        entries.push(entry);
+        let line = match std::str::from_utf8(&buffer) {
+            Ok(line) => line,
+            Err(error) => {
+                warn!(
+                    "Skipping stream index line {} in {} due to invalid UTF-8: {}",
+                    line_number,
+                    path.display(),
+                    error
+                );
+                continue;
+            }
+        };
+        match serde_json::from_str::<StreamIndexEntry>(line) {
+            Ok(entry) => entries.push(entry),
+            Err(error) => {
+                warn!(
+                    "Skipping stream index line {} in {} due to invalid JSON: {}",
+                    line_number,
+                    path.display(),
+                    error
+                );
+            }
+        }
     }
 
     Ok(entries)
