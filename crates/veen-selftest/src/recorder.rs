@@ -19,6 +19,7 @@ pub async fn run_recorder(reporter: &mut SelftestReporter<'_>) -> Result<()> {
         invariants: vec![
             "recorder streams accept CLI and HTTP events".into(),
             "recorder events include subject, principal, type, and time fields".into(),
+            "recorder events include expected types and principals".into(),
             "checkpoint log root matches stream MMR root".into(),
             "inclusion proofs validate against checkpoint".into(),
         ],

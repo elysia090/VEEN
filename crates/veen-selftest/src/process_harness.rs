@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs as stdfs;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -91,6 +92,13 @@ pub struct RecorderRecoveryResult {
     pub checkpoint_root: String,
     pub replay_from_seq: u64,
     pub validated_seqs: Vec<u64>,
+}
+
+struct RecorderEvent {
+    subject_id: String,
+    principal_id: String,
+    event_type: String,
+    event_time: u64,
 }
 
 pub struct HardenedResult {
@@ -1004,9 +1012,33 @@ impl IntegrationHarness {
             .await
             .context("fetching recorder stream with proofs")?;
         ensure!(!messages.is_empty(), "recorder stream emitted no messages");
+        ensure!(
+            messages.len() >= cli_events.len() + 1,
+            "recorder stream missing expected messages"
+        );
 
+        let mut event_types = HashSet::new();
+        let mut principals = HashSet::new();
         for entry in &messages {
-            validate_recorder_fields(entry).context("validating recorded event fields")?;
+            let event = parse_recorder_event(entry).context("parsing recorded event fields")?;
+            validate_recorder_event(&event, entry).context("validating recorded event fields")?;
+            event_types.insert(event.event_type);
+            principals.insert(event.principal_id);
+        }
+
+        let expected_events = ["login", "download", "health_check"];
+        for event in expected_events {
+            ensure!(
+                event_types.contains(event),
+                "recorder missing expected event_type {event}"
+            );
+        }
+        let expected_principals = ["principal-cli-1", "principal-http"];
+        for principal in expected_principals {
+            ensure!(
+                principals.contains(principal),
+                "recorder missing expected principal_id {principal}"
+            );
         }
 
         let metrics = self.fetch_metrics(&hub_url).await?;
@@ -1025,9 +1057,10 @@ impl IntegrationHarness {
             .await
             .context("appending recorder checkpoint")?;
 
-        let sample: Vec<StreamMessageWithProof> = messages.iter().take(2).cloned().collect();
-        verify_stream_proofs(&sample, &checkpoint.mmr_root)
+        verify_stream_proofs(&messages, &checkpoint.mmr_root)
             .context("verifying proofs against checkpoint root")?;
+
+        let sample: Vec<StreamMessageWithProof> = messages.iter().take(2).cloned().collect();
 
         #[cfg(unix)]
         let _ = hub
@@ -2308,7 +2341,19 @@ where
     Ok(())
 }
 
-fn validate_recorder_fields(entry: &StreamMessageWithProof) -> Result<()> {
+fn validate_recorder_event(event: &RecorderEvent, entry: &StreamMessageWithProof) -> Result<()> {
+    ensure!(!event.subject_id.is_empty(), "subject_id must not be empty");
+    ensure!(
+        !event.principal_id.is_empty() && !entry.message.client_id.is_empty(),
+        "principal identifier fields must be present"
+    );
+    ensure!(!event.event_type.is_empty(), "event_type must not be empty");
+    ensure!(event.event_time > 0, "event_time must be positive");
+
+    Ok(())
+}
+
+fn parse_recorder_event(entry: &StreamMessageWithProof) -> Result<RecorderEvent> {
     let body_text = entry
         .message
         .body
@@ -2334,15 +2379,12 @@ fn validate_recorder_fields(entry: &StreamMessageWithProof) -> Result<()> {
         .and_then(|value| value.as_u64())
         .ok_or_else(|| anyhow!("recorder body missing numeric event_time"))?;
 
-    ensure!(!subject_id.is_empty(), "subject_id must not be empty");
-    ensure!(
-        !principal_id.is_empty() && !entry.message.client_id.is_empty(),
-        "principal identifier fields must be present"
-    );
-    ensure!(!event_type.is_empty(), "event_type must not be empty");
-    ensure!(event_time > 0, "event_time must be positive");
-
-    Ok(())
+    Ok(RecorderEvent {
+        subject_id: subject_id.to_string(),
+        principal_id: principal_id.to_string(),
+        event_type: event_type.to_string(),
+        event_time,
+    })
 }
 
 fn message_leaf_hash(message: &StoredMessage) -> Result<LeafHash> {
