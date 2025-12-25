@@ -10,6 +10,7 @@ This is the “first hour” guide for the VEEN CLI and its companion binaries (
 - Commands written with `target/release/` assume you built locally. Drop the prefix when using packaged binaries or when already inside Docker/Kubernetes.
 - Replace placeholders like `<PROFILE_ID>` with your own values. Flags in backticks are literal.
 - Use temporary paths such as `/tmp/veen-hub` for experiments; for long-lived hubs see “Manual installation” for persistent directories.
+- Output precedence: explicit output flags (for example `--json` on a subcommand) win over global defaults, and `--json` overrides `--quiet`. When `--quiet` is set without JSON output enabled, successful command output is suppressed (errors still print).
 - If something fails, re-run with `--verbose` to see detailed logs. Most first-run issues relate to filesystem permissions on the chosen data directory.
 
 **Fast navigation**
