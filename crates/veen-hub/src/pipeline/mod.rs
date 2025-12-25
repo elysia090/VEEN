@@ -2503,9 +2503,8 @@ async fn load_recent_dedup_cache(
     let limit = config.bloom_capacity.max(config.lru_capacity);
     let mut keys = Vec::with_capacity(encoded.len());
     for entry in encoded {
-        let leaf_hash = LeafHash::from_str(&entry.leaf_hash).with_context(|| {
-            format!("parsing cached leaf hash {}", entry.leaf_hash)
-        })?;
+        let leaf_hash = LeafHash::from_str(&entry.leaf_hash)
+            .with_context(|| format!("parsing cached leaf hash {}", entry.leaf_hash))?;
         keys.push(DedupKey::new(entry.stream, leaf_hash));
     }
     if keys.len() > limit {
@@ -2514,10 +2513,7 @@ async fn load_recent_dedup_cache(
     Ok(Some(keys))
 }
 
-async fn persist_recent_dedup_cache(
-    storage: &HubStorage,
-    entries: &[DedupKey],
-) -> Result<()> {
+async fn persist_recent_dedup_cache(storage: &HubStorage, entries: &[DedupKey]) -> Result<()> {
     let path = storage.recent_leaf_hashes_path();
     let encoded: Vec<DedupCacheEntry> = entries.iter().map(DedupCacheEntry::from).collect();
     let data = serde_json::to_vec(&encoded)
