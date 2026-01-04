@@ -115,9 +115,11 @@ Complete these steps in order the first time you run VEEN. Create a disposable w
    target/release/veen keygen --out /tmp/veen-client
    ```
 
-   The command creates `client.json` (public key material) and `client.secret.json` (private key). Keep the secret file outside version control and back it up securely.
+   The command creates `identity_card.pub` (public key material), `keystore.enc`
+   (private key material), and `state.json` (client ack/rotation state). Keep
+   `keystore.enc` outside version control and back it up securely.
 
-3. **Send an encrypted message**
+3. **Send a message**
    ```shell
    target/release/veen send \
      --hub /tmp/veen-hub \
@@ -125,9 +127,9 @@ Complete these steps in order the first time you run VEEN. Create a disposable w
      --stream core/main \
      --body '{"text":"hello-veens"}'
    ```
-   Expected result: the terminal prints the committed sequence number and the hub writes a JSON bundle under the data directory. Add `--cap <PATH>` to attach a capability token or `--attachment <FILE>` to bundle binary payloads; each flag may be repeated. Errors such as `unable to open hub` usually mean the path after `--hub` is wrong or the hub from step 1 has stopped.
+   Expected result: the terminal prints the committed sequence number and the hub writes a JSON bundle under the data directory. Add `--cap <PATH>` to attach a capability token or `--attach <FILE>` to bundle binary payloads; each flag may be repeated. Errors such as `unable to open hub` usually mean the path after `--hub` is wrong or the hub from step 1 has stopped.
 
-4. **Stream and decrypt messages**
+4. **Stream messages**
    ```shell
    target/release/veen stream \
      --hub /tmp/veen-hub \
@@ -135,7 +137,7 @@ Complete these steps in order the first time you run VEEN. Create a disposable w
      --stream core/main \
      --from 0
    ```
-   Displays decrypted bodies, attachment metadata, and received sequence numbers. ACK state is maintained client-side.
+   Displays message bodies, attachment metadata, and received sequence numbers. ACK state is maintained client-side.
 
    Add `--with-proof` to request cryptographic proofs for each record or `--follow` to keep streaming new messages.
 

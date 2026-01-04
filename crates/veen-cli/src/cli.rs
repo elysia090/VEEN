@@ -825,11 +825,11 @@ enum Command {
     /// Inspect or rotate client identity material.
     #[command(subcommand)]
     Id(IdCommand),
-    /// Send an encrypted message to a stream.
+    /// Send a message to a stream.
     Send(SendArgs),
     /// Authorize a capability token with the hub.
     Authorize(CapAuthorizeArgs),
-    /// Stream and decrypt messages from the hub.
+    /// Stream messages from the hub.
     Stream(StreamArgs),
     /// Attachment tooling.
     #[command(subcommand)]

@@ -201,7 +201,7 @@ exchange messages locally:
    ```shell
    target/release/veen keygen --out /tmp/veen-client
    ```
-3. **Send an encrypted message** to the hub
+3. **Send a message** to the hub
    ```shell
    target/release/veen send \
      --hub /tmp/veen-hub \
@@ -211,7 +211,7 @@ exchange messages locally:
    ```
    The CLI persists a JSON message bundle under the hub data directory and
    prints the committed sequence number.
-4. **Stream and decrypt messages**
+4. **Stream messages**
    ```shell
    target/release/veen stream \
      --hub /tmp/veen-hub \
@@ -219,7 +219,7 @@ exchange messages locally:
      --stream core/main \
      --from 0
    ```
-   Output includes the decrypted body, attachment metadata (if any), and the
+   Output includes the body, attachment metadata (if any), and the
    observed sequence numbers. Acknowledgement state is tracked in the client
    directory.
 5. **Inspect hub status and keys**
@@ -499,7 +499,7 @@ veen kube job stream \
   --image registry.example.com/ops/veen-cli:v1
 ```
 
-The CLI watches the Job status, relays pod logs (so decrypted payloads and
+The CLI watches the Job status, relays pod logs (so payloads and
 receipt summaries appear immediately), and returns a non-zero exit code when the
 Job fails to complete successfully.
 
