@@ -67,11 +67,13 @@ Ciphertext formation:
 	3.	k_body = HPKE.Export(ctx, “veen/body-k”, 32).
 	4.	nonce = Trunc_24(Ht(“veen/nonce”, label || u64be(prev_ack) || client_id || u64be(client_seq))).
 	5.	aead_ct_body = AEAD_Encrypt(k_body, nonce, “”, body).
-	6.	ciphertext = enc || hpke_ct_hdr || aead_ct_body.
-	7.	If pad_block > 0, right-pad ciphertext with zero bytes so that len(ciphertext) is a multiple of pad_block.
-	8.	ct_hash = H(ciphertext).
-	9.	leaf_hash = Ht(“veen/leaf”, label || profile_id || ct_hash || client_id || u64be(client_seq)).
-	10.	msg_id = leaf_hash.
+	6.	hdr_len = u32be(len(hpke_ct_hdr)).
+	7.	body_len = u32be(len(aead_ct_body)).
+	8.	ciphertext = enc || hdr_len || body_len || hpke_ct_hdr || aead_ct_body.
+	9.	If pad_block > 0, right-pad ciphertext with zero bytes so that len(ciphertext) is a multiple of pad_block. Receivers MUST treat padding bytes as unauthenticated zeros and MUST strip them before AEAD_Decrypt.
+	10.	ct_hash = H(ciphertext).
+	11.	leaf_hash = Ht(“veen/leaf”, label || profile_id || ct_hash || client_id || u64be(client_seq)).
+	12.	msg_id = leaf_hash.
 
 RECEIPT fields (in order):
 	•	ver: uint (MUST be 1)
@@ -95,7 +97,7 @@ CHECKPOINT fields (in order):
 For each label, stream_seq is defined as the number of accepted messages (leaves) for that label. The first accepted MSG under a label has stream_seq = 1, the second has stream_seq = 2, and so on. This stream_seq is the MMR leaf index used for that label (see section 7).
 	6.	Payload header (encrypted, hub-blind)
 
-CBOR(payload_hdr) is the first item inside the ciphertext and is AEAD-authenticated. Fields (in order):
+CBOR(payload_hdr) is the first item inside the ciphertext and is AEAD-authenticated. payload_hdr is HPKE-encrypted as hpke_ct_hdr and is length-delimited by hdr_len (section 5); aead_ct_body is length-delimited by body_len. Fields (in order):
 	•	schema: bstr(32) (application-defined schema identifier)
 	•	parent_id: bstr(32)? (optional, parent msg_id)
 	•	att_root: bstr(32)? (optional attachment Merkle root; see section 10)
@@ -151,6 +153,7 @@ Receive:
 	2.	Verify hub_sig and invariants I1..I12.
 	3.	Update local MMR for the label to match mmr_root and stream_seq, validating any provided mmr_proof if with_proof was requested.
 	4.	Decrypt:
+	•	Split ciphertext into enc (HPKE encapsulated key), hdr_len, body_len, hpke_ct_hdr, and aead_ct_body as in section 5. If pad_block > 0, verify any remaining padding bytes are zero and strip them.
 	•	Reconstruct k_body from HPKE ctx or re-establish ctx via HPKE.Seal/Open if needed.
 	•	Recompute nonce as in section 5.
 	•	AEAD_Decrypt with k_body, nonce, and associated data “” to recover body and payload_hdr.
@@ -166,13 +169,13 @@ For attachment i (0-based or 1-based index, implementation MUST choose one conve
 	3.	c = AEAD_Encrypt(k_att, n_att, “”, b) where b is the attachment plaintext.
 	4.	coid = H(c).
 
-att_root is a Merkle root over the set of coids with:
+att_root is a Merkle root over the ordered list of coids (sorted by attachment index i ascending) with:
 	•	Internal node: Ht(“veen/att-node”, left || right)
 	•	Root: Ht(“veen/att-root”, peak1 || …)
 
 where peaks are ordered and combined similarly to section 7.
 
-att_root is placed into payload_hdr.att_root. Verification requires recomputing the coid set and the Merkle root and checking equality with att_root.
+att_root is placed into payload_hdr.att_root. Verification requires recomputing the ordered coid list and the Merkle root and checking equality with att_root.
 	11.	Capability tokens and admission
 
 cap_token is a CBOR map:
@@ -207,7 +210,7 @@ cap_ref is defined as:
 
 cap_ref = auth_ref
 
-If payload_hdr.cap_ref is present, it MUST equal MSG.auth_ref (when MSG.auth_ref is present) to bind the encrypted payload to the same capability used for admission.
+If payload_hdr.cap_ref is present, MSG.auth_ref MUST be present and MUST equal payload_hdr.cap_ref to bind the encrypted payload to the same capability used for admission.
 
 Hubs MUST, at admission time, verify every signature in sig_chain back to the root (prev_link_hash = zeros). Any verification failure yields E.CAP. Hubs MAY cache validated cap_tokens keyed by auth_ref for performance.
 
@@ -226,7 +229,7 @@ I3. mmr_root equals the MMR root obtained by appending leaf_hash at position str
 
 I4. profile_id is supported by both client and hub.
 
-I5. If att_root exists in payload_hdr, it matches exactly the Merkle root of the set of coids for attachments, as defined in section 10.
+I5. If att_root exists in payload_hdr, it matches exactly the Merkle root of the ordered coid list for attachments, as defined in section 10.
 
 I6. prev_ack <= last observed stream_seq for the label at the hub at the time of acceptance.
 
