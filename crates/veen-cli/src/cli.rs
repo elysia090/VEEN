@@ -351,8 +351,7 @@ enum OutputPreference {
     Quiet,
 }
 
-fn output_preference(explicit_json: bool) -> OutputPreference {
-    let global = global_options();
+fn output_preference_from(explicit_json: bool, global: &GlobalOptions) -> OutputPreference {
     if explicit_json || global.json {
         OutputPreference::Json
     } else if global.quiet {
@@ -360,6 +359,10 @@ fn output_preference(explicit_json: bool) -> OutputPreference {
     } else {
         OutputPreference::Text
     }
+}
+
+fn output_preference(explicit_json: bool) -> OutputPreference {
+    output_preference_from(explicit_json, &global_options())
 }
 
 fn json_output_enabled(explicit: bool) -> bool {
@@ -799,13 +802,7 @@ fn format_schema_descriptor_output(
 
 #[cfg(test)]
 fn output_preference_with(explicit_json: bool, global: &GlobalOptions) -> OutputPreference {
-    if explicit_json || global.json {
-        OutputPreference::Json
-    } else if global.quiet {
-        OutputPreference::Quiet
-    } else {
-        OutputPreference::Text
-    }
+    output_preference_from(explicit_json, global)
 }
 
 #[cfg(test)]
