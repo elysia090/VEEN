@@ -4,7 +4,7 @@ Verifiable End-to-End Network (VEEN) v0.0.1 - Core plus Operational and Upper-La
 Endpoints hold semantics and cryptography; the hub provides ordering and reachability only. Accepted messages yield signed receipts and are committed into an append-only Merkle Mountain Range (MMR) with logarithmic inclusion proofs. Authority is carried by portable capability tokens. Transport is abstract (HTTP, QUIC, NATS, file). This document restates the immutable v0.0.1 core succinctly and adds operational and upper-layer profiles that do not modify the wire format. Sections 5 to 8 define the v0.0.1 wire objects and proof format. All later sections are additive and do not change bytes on the wire.
 	1.	Notation
 
-Byte concatenation is ||. u64be(n) is the 8-byte big-endian encoding of n. u32be(n) is the 4-byte big-endian encoding of n. Trunc_24(x) is the first 24 bytes of x. H is SHA-256. HKDF is HKDF-SHA256. AEAD is XChaCha20-Poly1305 (24-byte nonce). Ed25519 is used for signatures; X25519 for Diffie-Hellman (DH). HPKE is RFC 9180 base mode: KEM X25519HKDF-SHA256, KDF HKDF-SHA256, AEAD ChaCha20-Poly1305, exporter interface is used. Ht(tag, x) = H(ascii(tag) || 0x00 || x). Deterministic CBOR: maps with the exact field order listed in this document; minimal-length unsigned integers; definite-length arrays and byte strings only; no floats; no CBOR tags; fixed-length bstr fields are exact size; unknown keys are rejected.
+Byte concatenation is ||. u64be(n) is the 8-byte big-endian encoding of n. u32be(n) is the 4-byte big-endian encoding of n. Trunc_24(x) is the first 24 bytes of x. H is SHA-256. HKDF is HKDF-SHA256. AEAD (for message bodies and attachments) is XChaCha20-Poly1305 (24-byte nonce). Ed25519 is used for signatures; X25519 for Diffie-Hellman (DH). HPKE is RFC 9180 base mode: KEM X25519HKDF-SHA256, KDF HKDF-SHA256, AEAD ChaCha20-Poly1305 (12-byte nonce) for payload_hdr encapsulation only; exporter interface is used. Ht(tag, x) = H(ascii(tag) || 0x00 || x). Deterministic CBOR: maps with the exact field order listed in this document; minimal-length unsigned integers; definite-length arrays and byte strings only; no floats; no CBOR tags; fixed-length bstr fields are exact size; unknown keys are rejected.
 	2.	Cryptographic profile
 
 profile = {
@@ -71,7 +71,7 @@ Ciphertext formation:
 	7.	body_len = u32be(len(aead_ct_body)).
 	8.	ciphertext = enc || hdr_len || body_len || hpke_ct_hdr || aead_ct_body.
 	9.	If pad_block > 0, right-pad ciphertext with zero bytes so that len(ciphertext) is a multiple of pad_block. Receivers MUST treat padding bytes as unauthenticated zeros and MUST strip them before AEAD_Decrypt.
-	10.	ct_hash = H(ciphertext).
+	10.	ct_hash = H(ciphertext). The hash covers the ciphertext including any right-padding bytes.
 	11.	leaf_hash = Ht(“veen/leaf”, label || profile_id || ct_hash || client_id || u64be(client_seq)).
 	12.	msg_id = leaf_hash.
 
@@ -132,7 +132,7 @@ path: [ { dir: 0|1, sib: bstr(32) }, … ],
 peaks_after: [ bstr(32), … ]
 }
 
-Verification folds leaf_hash and path according to dir (0 for left, 1 for right) using Ht(“veen/mmr-node”, left || right) to reconstruct the relevant peak, and then folds peaks_after using Ht(“veen/mmr-root”, …) to yield mmr_root. The verifier checks that this mmr_root matches the mmr_root in some RECEIPT or CHECKPOINT.
+Verification folds leaf_hash and path according to dir (0 for left, 1 for right) using Ht(“veen/mmr-node”, left || right) to reconstruct the relevant peak, and then folds peaks_after (ordered by increasing tree size, as in section 7) using Ht(“veen/mmr-root”, …) to yield mmr_root. The verifier checks that this mmr_root matches the mmr_root in some RECEIPT or CHECKPOINT.
 	9.	Client algorithms
 
 Send:
@@ -163,7 +163,7 @@ Receive:
 Failure to progress prev_ack across R attempts (RECOMMENDED R = 3) SHOULD trigger HPKE refresh and prekey fetch as per RESYNC0 (section 23).
 	10.	Attachments
 
-For attachment i (0-based or 1-based index, implementation MUST choose one convention and apply it consistently):
+For attachment i (0-based index, contiguous starting at 0 and ascending by 1):
 	1.	k_att = HPKE.Export(ctx, “veen/att-k” || u64be(i), 32).
 	2.	n_att = Trunc_24(Ht(“veen/att-nonce”, msg_id || u64be(i))).
 	3.	c = AEAD_Encrypt(k_att, n_att, “”, b) where b is the attachment plaintext.
