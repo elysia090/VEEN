@@ -4,7 +4,7 @@ Verifiable End-to-End Network (VEEN) v0.0.1 - Core plus Operational and Upper-La
 Endpoints hold semantics and cryptography; the hub provides ordering and reachability only. Accepted messages yield signed receipts and are committed into an append-only Merkle Mountain Range (MMR) with logarithmic inclusion proofs. Authority is carried by portable capability tokens. Transport is abstract (HTTP, QUIC, NATS, file). This document restates the immutable v0.0.1 core succinctly and adds operational and upper-layer profiles that do not modify the wire format. Sections 5 to 8 define the v0.0.1 wire objects and proof format. All later sections are additive and do not change bytes on the wire.
 	1.	Notation
 
-Byte concatenation is ||. u64be(n) is the 8-byte big-endian encoding of n. H is SHA-256. HKDF is HKDF-SHA256. AEAD is XChaCha20-Poly1305 (24-byte nonce). Ed25519 is used for signatures; X25519 for Diffie-Hellman (DH). HPKE is RFC 9180 base mode: KEM X25519HKDF-SHA256, KDF HKDF-SHA256, AEAD ChaCha20-Poly1305, exporter interface is used. Ht(tag, x) = H(ascii(tag) || 0x00 || x). Deterministic CBOR: maps with the exact field order listed in this document; minimal-length unsigned integers; definite-length arrays and byte strings only; no floats; no CBOR tags; fixed-length bstr fields are exact size; unknown keys are rejected.
+Byte concatenation is ||. u64be(n) is the 8-byte big-endian encoding of n. u32be(n) is the 4-byte big-endian encoding of n. Trunc_24(x) is the first 24 bytes of x. H is SHA-256. HKDF is HKDF-SHA256. AEAD is XChaCha20-Poly1305 (24-byte nonce). Ed25519 is used for signatures; X25519 for Diffie-Hellman (DH). HPKE is RFC 9180 base mode: KEM X25519HKDF-SHA256, KDF HKDF-SHA256, AEAD ChaCha20-Poly1305, exporter interface is used. Ht(tag, x) = H(ascii(tag) || 0x00 || x). Deterministic CBOR: maps with the exact field order listed in this document; minimal-length unsigned integers; definite-length arrays and byte strings only; no floats; no CBOR tags; fixed-length bstr fields are exact size; unknown keys are rejected.
 	2.	Cryptographic profile
 
 profile = {
@@ -153,10 +153,10 @@ Receive:
 	2.	Verify hub_sig and invariants I1..I12.
 	3.	Update local MMR for the label to match mmr_root and stream_seq, validating any provided mmr_proof if with_proof was requested.
 	4.	Decrypt:
-	•	Split ciphertext into enc (HPKE encapsulated key), hdr_len, body_len, hpke_ct_hdr, and aead_ct_body as in section 5. If pad_block > 0, verify any remaining padding bytes are zero and strip them.
-	•	Reconstruct k_body from HPKE ctx or re-establish ctx via HPKE.Seal/Open if needed.
+	•	Split ciphertext into enc (HPKE encapsulated key), hdr_len, body_len, hpke_ct_hdr, and aead_ct_body as in section 5. If pad_block > 0, verify any trailing padding bytes are zero and strip them after parsing the length-delimited header/body.
+	•	Use HPKE.Open with enc to recover payload_hdr, and derive k_body via HPKE.Export(ctx, “veen/body-k”, 32). If ctx is not cached, reconstruct it via HPKE.SetupBaseR with enc and the receiver private key.
 	•	Recompute nonce as in section 5.
-	•	AEAD_Decrypt with k_body, nonce, and associated data “” to recover body and payload_hdr.
+	•	AEAD_Decrypt with k_body, nonce, and associated data “” to recover body.
 	5.	Deliver decrypted payload to the application if all checks pass.
 	6.	Accept epochs E in [E_local - CLOCK_SKEW_EPOCHS, E_local + CLOCK_SKEW_EPOCHS] for labels.
 
