@@ -203,9 +203,17 @@ auth_ref = Ht(“veen/cap”, CBOR(cap_token))
 
 auth_ref is placed into MSG.auth_ref when the client uses this cap_token.
 
+cap_ref is defined as:
+
+cap_ref = auth_ref
+
+If payload_hdr.cap_ref is present, it MUST equal MSG.auth_ref (when MSG.auth_ref is present) to bind the encrypted payload to the same capability used for admission.
+
 Hubs MUST, at admission time, verify every signature in sig_chain back to the root (prev_link_hash = zeros). Any verification failure yields E.CAP. Hubs MAY cache validated cap_tokens keyed by auth_ref for performance.
 
 Hubs MAY enforce admission via /authorize (section 16). A successful authorization installs an admission record keyed by auth_ref.
+
+Stream scoping note: cap_token.allow.stream_ids refers to the stream_id inputs used to derive labels. Hub-side enforcement of allow.stream_ids requires a deployment-defined stream_id_for_label(label) mapping (for example by sharing routing_key with the hub or providing an out-of-band mapping service). If such a mapping is not available, hubs MUST document that they cannot enforce allow.stream_ids and MUST NOT claim OP0 admission gating for stream scoping; receivers SHOULD enforce stream scoping after decrypt by checking payload_hdr.cap_ref against the expected stream_id policy.
 	12.	Invariants (MUST on accepted (RECEIPT, MSG))
 
 For any accepted (MSG, RECEIPT) pair, hubs and clients MUST enforce:
@@ -226,6 +234,7 @@ I7. Capability constraints via auth_ref (on the hub) and cap_ref (inside the pay
 	•	ttl not expired,
 	•	allowed stream_ids containing the label’s stream_id, and
 	•	rate limits not exceeded (see OP0.2 and OP0.3).
+Hub enforcement covers auth_ref, ttl, rate limits, and any stream_id policy only if stream_id_for_label(label) is available. Receiver enforcement covers payload_hdr.cap_ref (if present) and any application-level stream_id policy.
 
 I8. Within a label, (client_id, client_seq) is unique across all accepted MSG.
 
@@ -393,6 +402,8 @@ Hubs SHOULD require /authorize for write access. The authorization record keyed 
 	•	subject_pk: expected subject public key
 
 Missing record yields E.AUTH. Expired record yields E.CAP. Rate overflow yields E.RATE.
+
+If the hub cannot derive stream_id from label (for example because routing_key is not shared with the hub), it MUST document that allowed_stream_ids are not enforced at admission time and MUST NOT represent itself as enforcing stream scoping under OP0.2.
 
 OP0.3 Rate limiting RL0:
 
