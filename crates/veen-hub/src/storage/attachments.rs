@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use tokio::fs;
@@ -34,7 +35,8 @@ pub async fn rewrite_all_refcounts(
         if *count == 0 {
             continue;
         }
-        write_refcount(storage, digest, *count).await?;
+        let path = storage.attachment_ref_path(digest);
+        write_refcount_file(&path, *count).await?;
     }
 
     Ok(())
@@ -62,9 +64,7 @@ pub async fn write_refcount(storage: &HubStorage, digest: &str, count: u64) -> R
         return Ok(());
     }
 
-    fs::write(&path, count.to_string())
-        .await
-        .with_context(|| format!("writing attachment ref {}", path.display()))?;
+    write_refcount_file(&path, count).await?;
     Ok(())
 }
 
@@ -85,4 +85,11 @@ pub async fn read_refcount(storage: &HubStorage, digest: &str) -> Result<Option<
         .parse::<u64>()
         .with_context(|| format!("parsing attachment ref {}", path.display()))?;
     Ok(Some(value))
+}
+
+async fn write_refcount_file(path: &Path, count: u64) -> Result<()> {
+    fs::write(path, count.to_string())
+        .await
+        .with_context(|| format!("writing attachment ref {}", path.display()))?;
+    Ok(())
 }
