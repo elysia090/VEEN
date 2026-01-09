@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::io::{self, Write as _};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value};
@@ -546,10 +547,11 @@ fn hash_evidence_summary(summary: &Value) -> Result<String, QueryError> {
 }
 
 fn hash_json_value(value: &Value) -> Result<String, QueryError> {
-    let bytes =
-        serde_json::to_vec(value).map_err(|err| QueryError::CanonicalJson(err.to_string()))?;
-    let digest = Sha256::digest(bytes);
-    Ok(hex::encode(digest))
+    let mut hasher = Sha256::new();
+    let mut writer = HashWriter::new(&mut hasher);
+    serde_json::to_writer(&mut writer, value)
+        .map_err(|err| QueryError::CanonicalJson(err.to_string()))?;
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn validate_rows(rows: &[Value]) -> Result<(), QueryError> {
@@ -693,6 +695,30 @@ fn canonicalize_value(value: &Value) -> Value {
         }
         Value::Array(values) => Value::Array(values.iter().map(canonicalize_value).collect()),
         _ => value.clone(),
+    }
+}
+
+struct HashWriter<'a, D> {
+    hasher: &'a mut D,
+}
+
+impl<'a, D> HashWriter<'a, D> {
+    fn new(hasher: &'a mut D) -> Self {
+        Self { hasher }
+    }
+}
+
+impl<D> io::Write for HashWriter<'_, D>
+where
+    D: Digest,
+{
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.hasher.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
