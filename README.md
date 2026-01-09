@@ -227,11 +227,12 @@ exchange messages locally:
    target/release/veen hub status --hub /tmp/veen-hub
    target/release/veen hub key --hub /tmp/veen-hub
    ```
-6. **Stop the hub gracefully** when running in the background without
-   `--foreground`
-   ```shell
-   target/release/veen hub stop --data-dir /tmp/veen-hub
-   ```
+6. **Stop the hub gracefully**
+   - If you started the hub with `--foreground`, press `Ctrl+C`.
+   - If you started it in the background (omit `--foreground`), run:
+     ```shell
+     target/release/veen hub stop --data-dir /tmp/veen-hub
+     ```
 
 The same CLI also covers capability issuance/authorization, attachment
 verification, resynchronisation, overlay management (RPC, CRDT, wallet,
@@ -594,7 +595,9 @@ them automatically on success or failure.
 
 ## Further reading
 
-- [`doc/CLI-GOALS.txt`](doc/CLI-GOALS.txt) – operational contract for the CLI
+- [`doc/CLI-GOALS-1.txt`](doc/CLI-GOALS-1.txt),
+  [`doc/CLI-GOALS-2.txt`](doc/CLI-GOALS-2.txt), and
+  [`doc/CLI-GOALS-3.txt`](doc/CLI-GOALS-3.txt) – operational contract for the CLI
 - [`doc/OS-GOALS.txt`](doc/OS-GOALS.txt) – host operating system expectations
 - [`doc/Design-Philosophy.txt`](doc/Design-Philosophy.txt) – guiding principles
 - [`doc/wallet-spec.txt`](doc/wallet-spec.txt) and related documents describing
