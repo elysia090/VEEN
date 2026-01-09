@@ -118,16 +118,11 @@ impl QueryFilter {
         }
 
         if let Some(event_types) = self.event_type {
-            if event_types.is_empty() {
-                return Err(QueryError::InvalidEventTypes);
-            }
-
-            let mut normalized = Vec::with_capacity(event_types.len());
-            for value in event_types {
-                normalized.push(normalize_non_empty(&value, QueryError::InvalidEventTypes)?);
-            }
-
-            self.event_type = Some(normalized);
+            self.event_type = Some(normalize_required_list(
+                event_types,
+                QueryError::InvalidEventTypes,
+                QueryError::InvalidEventTypes,
+            )?);
         }
 
         if let Some(from) = self.time.from.as_ref() {
@@ -152,28 +147,15 @@ pub struct Aggregate {
 
 impl Aggregate {
     fn normalize(mut self) -> Result<Self, QueryError> {
-        if self.metrics.is_empty() {
-            return Err(QueryError::MissingMetrics);
-        }
-
-        let mut normalized_group_by = Vec::with_capacity(self.group_by.len());
-        for value in self.group_by.into_iter() {
-            normalized_group_by.push(normalize_non_empty(
-                &value,
-                QueryError::InvalidAggregateGroupBy,
-            )?);
-        }
-
-        let mut normalized_metrics = Vec::with_capacity(self.metrics.len());
-        for value in self.metrics.into_iter() {
-            normalized_metrics.push(normalize_non_empty(
-                &value,
-                QueryError::InvalidAggregateMetrics,
-            )?);
-        }
-
-        self.group_by = normalized_group_by;
-        self.metrics = normalized_metrics;
+        self.group_by = normalize_optional_list(
+            self.group_by,
+            QueryError::InvalidAggregateGroupBy,
+        )?;
+        self.metrics = normalize_required_list(
+            self.metrics,
+            QueryError::MissingMetrics,
+            QueryError::InvalidAggregateMetrics,
+        )?;
 
         Ok(self)
     }
@@ -200,8 +182,33 @@ pub struct QueryDescriptor {
     pub meta: Option<JsonMap<String, Value>>,
 }
 
+fn normalize_list_in_place(
+    values: &mut Vec<String>,
+    invalid_error: QueryError,
+) -> Result<(), QueryError> {
+    for value in values.iter_mut() {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(invalid_error);
+        }
+        if trimmed.len() != value.len() {
+            *value = trimmed.to_string();
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_optional_list(
+    mut values: Vec<String>,
+    invalid_error: QueryError,
+) -> Result<Vec<String>, QueryError> {
+    normalize_list_in_place(&mut values, invalid_error)?;
+    Ok(values)
+}
+
 fn normalize_required_list(
-    values: Vec<String>,
+    mut values: Vec<String>,
     empty_error: QueryError,
     invalid_error: QueryError,
 ) -> Result<Vec<String>, QueryError> {
@@ -209,16 +216,8 @@ fn normalize_required_list(
         return Err(empty_error);
     }
 
-    let mut normalized = Vec::with_capacity(values.len());
-    for value in values {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            return Err(invalid_error);
-        }
-        normalized.push(trimmed.to_string());
-    }
-
-    Ok(normalized)
+    normalize_list_in_place(&mut values, invalid_error)?;
+    Ok(values)
 }
 
 fn normalize_non_empty(value: &str, error: QueryError) -> Result<String, QueryError> {
