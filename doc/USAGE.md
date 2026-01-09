@@ -85,7 +85,7 @@ sudo install -m 0755 target/release/veen-selftest /usr/local/bin/veen-selftest
 sudo install -m 0755 target/release/veen-bridge /usr/local/bin/veen-bridge
 ```
 
-When packaging for production hosts, prefer copying the four binaries into `/usr/local/bin` as a single step using your configuration manager (Ansible, Chef, etc.). All binaries are static and require no extra runtime dependencies beyond glibc and OpenSSL.
+When packaging for production hosts, prefer copying the four binaries into `/usr/local/bin` as a single step using your configuration manager (Ansible, Chef, etc.). The binaries are dynamically linked to glibc and OpenSSL, so ensure the target hosts provide those libraries.
 
 Recommended directories:
 
@@ -152,7 +152,7 @@ Complete these steps in order the first time you run VEEN. Create a disposable w
    ```shell
    target/release/veen hub stop --data-dir /tmp/veen-hub
    ```
-   This sends a shutdown signal to the backgrounded hub and waits for a clean exit.
+   This sends a shutdown signal to the backgrounded hub and waits for a clean exit. `hub stop` is only available on Unix-like hosts; on Windows, terminate the background process manually.
 
 7. **Clean up**
 

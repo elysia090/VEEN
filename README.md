@@ -233,6 +233,8 @@ exchange messages locally:
      ```shell
      target/release/veen hub stop --data-dir /tmp/veen-hub
      ```
+     `hub stop` is only available on Unix-like hosts; on Windows, terminate the
+     background process manually.
 
 The same CLI also covers capability issuance/authorization, attachment
 verification, resynchronisation, overlay management (RPC, CRDT, wallet,
