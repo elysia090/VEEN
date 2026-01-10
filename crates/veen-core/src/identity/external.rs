@@ -97,6 +97,7 @@ struct ExternalEntry {
 #[derive(Debug, Clone, Default)]
 pub struct ExternalLinkDirectory {
     providers: HashMap<String, HashMap<String, ExternalEntry>>,
+    len: usize,
 }
 
 impl ExternalLinkDirectory {
@@ -109,18 +110,19 @@ impl ExternalLinkDirectory {
     /// Removes all stored linkages.
     pub fn clear(&mut self) {
         self.providers.clear();
+        self.len = 0;
     }
 
     /// Returns the number of stored linkages.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.providers.values().map(HashMap::len).sum()
+        self.len
     }
 
     /// Returns `true` if the directory is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.providers.values().all(HashMap::is_empty)
+        self.len == 0
     }
 
     /// Inserts a record, applying the `(ts, stream_seq)` precedence rule.
@@ -132,6 +134,7 @@ impl ExternalLinkDirectory {
         match provider_map.entry(subject_key) {
             Entry::Vacant(slot) => {
                 slot.insert(ExternalEntry { record, stream_seq });
+                self.len += 1;
             }
             Entry::Occupied(mut slot) => {
                 let replace =
