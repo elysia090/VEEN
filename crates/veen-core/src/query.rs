@@ -1,5 +1,5 @@
 use std::fmt::Write as _;
-use std::io::{self, Write as _};
+use std::io;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value};
@@ -181,7 +181,7 @@ pub struct QueryDescriptor {
 }
 
 fn normalize_list_in_place(
-    values: &mut Vec<String>,
+    values: &mut [String],
     invalid_error: QueryError,
 ) -> Result<(), QueryError> {
     for value in values.iter_mut() {

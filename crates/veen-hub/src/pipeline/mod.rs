@@ -1634,7 +1634,7 @@ impl HubPipeline {
                 .label_class_records
                 .iter()
                 .filter(|record| {
-                    if let Some(ref filter) = class_filter {
+                    if let Some(filter) = class_filter {
                         record.class.eq_ignore_ascii_case(filter)
                     } else {
                         true
