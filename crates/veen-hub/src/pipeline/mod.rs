@@ -386,10 +386,8 @@ impl HubPipeline {
             &attachments,
             payload_json.len(),
         )?;
-        let stored_attachments = prepared_attachments
-            .iter()
-            .map(|attachment| attachment.stored.clone())
-            .collect::<Vec<_>>();
+        let stored_attachments = prepared_attachments.stored;
+        let prepared_attachments = prepared_attachments.prepared;
         let submitted_at = current_unix_timestamp()?;
         let submitted_at_ms = current_unix_timestamp_millis()?;
         let client_id_value = ClientId::from_str(&client_id)
@@ -1911,9 +1909,14 @@ pub struct StoredAttachment {
 }
 
 struct PreparedAttachment {
-    stored: StoredAttachment,
+    digest: String,
     path: PathBuf,
     data: Vec<u8>,
+}
+
+struct PreparedAttachments {
+    prepared: Vec<PreparedAttachment>,
+    stored: Vec<StoredAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2851,13 +2854,17 @@ fn prepare_attachments_for_storage(
     stream: &str,
     attachments: &[AttachmentUpload],
     initial_bytes: usize,
-) -> Result<Vec<PreparedAttachment>> {
+) -> Result<PreparedAttachments> {
     if attachments.is_empty() {
-        return Ok(Vec::new());
+        return Ok(PreparedAttachments {
+            prepared: Vec::new(),
+            stored: Vec::new(),
+        });
     }
 
     let mut total_bytes = initial_bytes;
     let mut prepared = Vec::with_capacity(attachments.len());
+    let mut stored = Vec::with_capacity(attachments.len());
     for (index, attachment) in attachments.iter().enumerate() {
         let data = BASE64_STANDARD
             .decode(&attachment.data)
@@ -2880,7 +2887,7 @@ fn prepare_attachments_for_storage(
         let digest_hex = hex::encode(digest);
         let file_name = format!("{digest_hex}.bin");
         let path = storage.attachments_dir().join(&file_name);
-        let stored = StoredAttachment {
+        let stored_attachment = StoredAttachment {
             name: attachment
                 .name
                 .clone()
@@ -2889,10 +2896,15 @@ fn prepare_attachments_for_storage(
             size: data.len() as u64,
             stored_path: file_name,
         };
-        prepared.push(PreparedAttachment { stored, path, data });
+        prepared.push(PreparedAttachment {
+            digest: stored_attachment.digest.clone(),
+            path,
+            data,
+        });
+        stored.push(stored_attachment);
     }
 
-    Ok(prepared)
+    Ok(PreparedAttachments { prepared, stored })
 }
 
 async fn persist_attachments(
@@ -2942,15 +2954,15 @@ async fn persist_attachments(
         }
 
         let mut counts = ref_counts.lock().await;
-        let counter = counts.entry(attachment.stored.digest.clone()).or_insert(0);
+        let counter = counts.entry(attachment.digest.clone()).or_insert(0);
         *counter = counter.checked_add(1).ok_or_else(|| {
             anyhow!(
                 "attachment refcount overflow for {}",
-                attachment.stored.digest
+                attachment.digest
             )
         })?;
         if let Err(err) =
-            attachments::write_refcount(storage, &attachment.stored.digest, *counter).await
+            attachments::write_refcount(storage, &attachment.digest, *counter).await
         {
             *counter = counter.saturating_sub(1);
             return Err(err);
