@@ -2955,15 +2955,10 @@ async fn persist_attachments(
 
         let mut counts = ref_counts.lock().await;
         let counter = counts.entry(attachment.digest.clone()).or_insert(0);
-        *counter = counter.checked_add(1).ok_or_else(|| {
-            anyhow!(
-                "attachment refcount overflow for {}",
-                attachment.digest
-            )
-        })?;
-        if let Err(err) =
-            attachments::write_refcount(storage, &attachment.digest, *counter).await
-        {
+        *counter = counter
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("attachment refcount overflow for {}", attachment.digest))?;
+        if let Err(err) = attachments::write_refcount(storage, &attachment.digest, *counter).await {
             *counter = counter.saturating_sub(1);
             return Err(err);
         }

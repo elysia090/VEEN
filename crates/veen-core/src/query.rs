@@ -147,10 +147,8 @@ pub struct Aggregate {
 
 impl Aggregate {
     fn normalize(mut self) -> Result<Self, QueryError> {
-        self.group_by = normalize_optional_list(
-            self.group_by,
-            QueryError::InvalidAggregateGroupBy,
-        )?;
+        self.group_by =
+            normalize_optional_list(self.group_by, QueryError::InvalidAggregateGroupBy)?;
         self.metrics = normalize_required_list(
             self.metrics,
             QueryError::MissingMetrics,
