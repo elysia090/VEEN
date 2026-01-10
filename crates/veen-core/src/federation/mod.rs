@@ -63,6 +63,13 @@ fn record_precedence(a: &AuthorityRecord, b: &AuthorityRecord) -> Ordering {
         .then_with(|| a.primary_hub.as_bytes().cmp(b.primary_hub.as_bytes()))
 }
 
+fn active_record<'a>(records: &'a [AuthorityRecord], time: u64) -> Option<&'a AuthorityRecord> {
+    records
+        .iter()
+        .filter(|record| record.is_active_at(time))
+        .min_by(|a, b| record_precedence(a, b))
+}
+
 type AuthorityKey = (RealmId, StreamId);
 
 /// In-memory materialization of FED1 authority records keyed by
@@ -134,12 +141,7 @@ impl AuthorityView {
     ) -> Option<&AuthorityRecord> {
         self.records
             .get(&(realm_id, stream_id))
-            .and_then(|records| {
-                records
-                    .iter()
-                    .filter(|record| record.is_active_at(time))
-                    .min_by(|a, b| record_precedence(a, b))
-            })
+            .and_then(|records| active_record(records, time))
     }
 
     /// Computes the [`LabelAuthority`] for a stream with an optional realm.
@@ -168,34 +170,45 @@ impl AuthorityView {
         }
     }
 
-    fn best_realm_for_stream(&self, stream_id: StreamId, time: u64) -> Option<RealmId> {
+    fn best_record_for_stream(
+        &self,
+        stream_id: StreamId,
+        time: u64,
+    ) -> Option<(RealmId, &AuthorityRecord)> {
         self.records
             .iter()
             .filter_map(|(&(realm_id, record_stream), records)| {
                 if record_stream != stream_id {
                     return None;
                 }
-                let active = records
-                    .iter()
-                    .filter(|record| record.is_active_at(time))
-                    .min_by(|a, b| record_precedence(a, b))?;
+                let active = active_record(records, time)?;
                 Some((realm_id, active))
             })
             .min_by(|(realm_a, record_a), (realm_b, record_b)| {
                 record_precedence(record_a, record_b)
                     .then_with(|| realm_a.as_bytes().cmp(realm_b.as_bytes()))
             })
-            .map(|(realm_id, _)| realm_id)
     }
 
     /// Computes the [`LabelAuthority`] for a stream identifier without requiring
     /// an explicit realm mapping.
     #[must_use]
     pub fn label_authority_for_stream(&self, stream_id: StreamId, time: u64) -> LabelAuthority {
-        if let Some(realm_id) = self.best_realm_for_stream(stream_id, time) {
-            self.label_authority(stream_id, Some(realm_id), time)
-        } else {
-            self.label_authority(stream_id, None, time)
+        match self.best_record_for_stream(stream_id, time) {
+            Some((realm_id, record)) => LabelAuthority {
+                realm_id: Some(realm_id),
+                stream_id,
+                primary_hub: Some(record.primary_hub),
+                replica_hubs: record.replica_hubs.clone(),
+                policy: LabelPolicy::from(record.policy),
+            },
+            None => LabelAuthority {
+                realm_id: None,
+                stream_id,
+                primary_hub: None,
+                replica_hubs: Vec::new(),
+                policy: LabelPolicy::Unspecified,
+            },
         }
     }
 
