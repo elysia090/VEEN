@@ -1627,7 +1627,7 @@ impl HubPipeline {
         class_filter: Option<String>,
     ) -> HubLabelClassList {
         let _ = realm;
-        let class_filter = class_filter.map(|value| value.to_ascii_lowercase());
+        let class_filter = class_filter.as_deref();
         let entries = {
             let guard = self.inner.read().await;
             let mut entries = guard
@@ -1635,7 +1635,7 @@ impl HubPipeline {
                 .iter()
                 .filter(|record| {
                     if let Some(ref filter) = class_filter {
-                        record.class.to_ascii_lowercase() == *filter
+                        record.class.eq_ignore_ascii_case(filter)
                     } else {
                         true
                     }
