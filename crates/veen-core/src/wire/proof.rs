@@ -125,7 +125,7 @@ impl MmrProof {
         }
 
         let mut peaks = Vec::with_capacity(1 + self.peaks_after.len());
-        peaks.extend(self.peaks_after.iter().cloned());
+        peaks.extend_from_slice(&self.peaks_after);
         peaks.push(acc);
 
         match MmrRoot::from_peaks(&peaks) {
