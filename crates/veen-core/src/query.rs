@@ -689,15 +689,12 @@ fn validate_verified_entries(value: Option<&Value>) -> Result<(), QueryError> {
 fn canonicalize_value(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
-            let mut entries: Vec<(String, Value)> = Vec::with_capacity(map.len());
-            for (key, value) in map {
-                entries.push((key.clone(), canonicalize_value(value)));
-            }
+            let mut entries: Vec<(&String, &Value)> = map.iter().collect();
             entries.sort_unstable_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
 
             let mut sorted = JsonMap::with_capacity(map.len());
             for (key, value) in entries {
-                sorted.insert(key, value);
+                sorted.insert(key.clone(), canonicalize_value(value));
             }
 
             Value::Object(sorted)
