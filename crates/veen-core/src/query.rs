@@ -185,12 +185,12 @@ fn normalize_list_in_place(
     invalid_error: QueryError,
 ) -> Result<(), QueryError> {
     for value in values.iter_mut() {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
+        let trimmed_len = value.trim().len();
+        if trimmed_len == 0 {
             return Err(invalid_error);
         }
-        if trimmed.len() != value.len() {
-            *value = trimmed.to_string();
+        if trimmed_len != value.len() {
+            trim_string_in_place(value);
         }
     }
 
@@ -225,6 +225,15 @@ fn normalize_non_empty(value: &str, error: QueryError) -> Result<String, QueryEr
     } else {
         Ok(trimmed.to_string())
     }
+}
+
+fn trim_string_in_place(value: &mut String) {
+    let start = value.len() - value.trim_start().len();
+    let end = value.trim_end().len();
+    if start > 0 {
+        value.drain(..start);
+    }
+    value.truncate(end - start);
 }
 
 impl QueryDescriptor {
