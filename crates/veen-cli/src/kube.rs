@@ -375,11 +375,7 @@ async fn handle_render(args: KubeRenderArgs) -> Result<()> {
         ),
         None => None,
     };
-    let env_vars = if let Some(ref path) = env_file {
-        parse_env_file(path).await?
-    } else {
-        Vec::new()
-    };
+    let env_vars = load_env_vars(env_file.as_deref()).await?;
     let pod_annotations = if let Some(ref path) = pod_annotations {
         parse_annotations_file(path).await?
     } else {
@@ -741,10 +737,7 @@ async fn handle_restore(args: KubeRestoreArgs) -> Result<()> {
 }
 
 async fn handle_job_send(mut args: KubeJobSendArgs) -> Result<()> {
-    let env = match args.env_file.as_ref() {
-        Some(path) => parse_env_file(path).await?,
-        None => Vec::new(),
-    };
+    let env = load_env_vars(args.env_file.as_deref()).await?;
     let (cluster_context, namespace) =
         resolve_cluster_and_namespace(&args.env, &args.cluster_context, &args.namespace, true)
             .await?;
@@ -756,10 +749,7 @@ async fn handle_job_send(mut args: KubeJobSendArgs) -> Result<()> {
 }
 
 async fn handle_job_stream(mut args: KubeJobStreamArgs) -> Result<()> {
-    let env = match args.env_file.as_ref() {
-        Some(path) => parse_env_file(path).await?,
-        None => Vec::new(),
-    };
+    let env = load_env_vars(args.env_file.as_deref()).await?;
     let (cluster_context, namespace) =
         resolve_cluster_and_namespace(&args.env, &args.cluster_context, &args.namespace, true)
             .await?;
@@ -850,6 +840,13 @@ async fn parse_env_file(path: &Path) -> Result<Vec<EnvVar>> {
         }
     }
     Ok(vars)
+}
+
+async fn load_env_vars(env_file: Option<&Path>) -> Result<Vec<EnvVar>> {
+    match env_file {
+        Some(path) => parse_env_file(path).await,
+        None => Ok(Vec::new()),
+    }
 }
 
 async fn run_job(cluster_context: &str, job: Job) -> Result<()> {
