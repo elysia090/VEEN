@@ -79,27 +79,24 @@ pub async fn load_stream_index(path: &Path) -> Result<Vec<StreamIndexEntry>> {
         if buffer.is_empty() {
             continue;
         }
-        let line = match std::str::from_utf8(&buffer) {
-            Ok(line) => line,
-            Err(error) => {
-                warn!(
-                    "Skipping stream index line {} in {} due to invalid UTF-8: {}",
-                    line_number,
-                    path.display(),
-                    error
-                );
-                continue;
-            }
-        };
-        match serde_json::from_str::<StreamIndexEntry>(line) {
+        match serde_json::from_slice::<StreamIndexEntry>(&buffer) {
             Ok(entry) => entries.push(entry),
             Err(error) => {
-                warn!(
-                    "Skipping stream index line {} in {} due to invalid JSON: {}",
-                    line_number,
-                    path.display(),
-                    error
-                );
+                if let Err(utf8_error) = std::str::from_utf8(&buffer) {
+                    warn!(
+                        "Skipping stream index line {} in {} due to invalid UTF-8: {}",
+                        line_number,
+                        path.display(),
+                        utf8_error
+                    );
+                } else {
+                    warn!(
+                        "Skipping stream index line {} in {} due to invalid JSON: {}",
+                        line_number,
+                        path.display(),
+                        error
+                    );
+                }
             }
         }
     }
