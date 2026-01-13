@@ -63,7 +63,7 @@ fn record_precedence(a: &AuthorityRecord, b: &AuthorityRecord) -> Ordering {
         .then_with(|| a.primary_hub.as_bytes().cmp(b.primary_hub.as_bytes()))
 }
 
-fn active_record<'a>(records: &'a [AuthorityRecord], time: u64) -> Option<&'a AuthorityRecord> {
+fn active_record(records: &[AuthorityRecord], time: u64) -> Option<&AuthorityRecord> {
     records
         .iter()
         .filter(|record| record.is_active_at(time))
