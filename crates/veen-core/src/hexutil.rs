@@ -162,6 +162,18 @@ mod tests {
     }
 
     #[test]
+    fn decode_hex_array_rejects_non_empty_zero_length_input() {
+        let err = decode_hex_array::<0>("00").expect_err("non-empty input");
+        assert!(matches!(
+            err,
+            ParseHexError::InvalidLength {
+                expected: 0,
+                actual: 2
+            }
+        ));
+    }
+
+    #[test]
     fn decode_hex_array_rejects_too_long_input() {
         let err = decode_hex_array::<1>("abcd").expect_err("too long");
         assert!(matches!(
@@ -208,6 +220,24 @@ mod tests {
         let value = Dummy([0x00, 0x0f]);
         assert_eq!(format!("{value}"), "000f");
         assert_eq!(format!("{value:X}"), "000F");
+    }
+
+    #[test]
+    fn impl_hex_fmt_handles_empty_values() {
+        #[derive(Clone, Copy)]
+        struct Empty([u8; 0]);
+
+        impl AsRef<[u8]> for Empty {
+            fn as_ref(&self) -> &[u8] {
+                &self.0
+            }
+        }
+
+        crate::hexutil::impl_hex_fmt!(Empty);
+
+        let value = Empty([]);
+        assert_eq!(format!("{value}"), "");
+        assert_eq!(format!("{value:X}"), "");
     }
 
     #[test]
