@@ -150,6 +150,24 @@ mod tests {
     }
 
     #[test]
+    fn decode_hex_array_handles_zero_length_arrays() {
+        let value = decode_hex_array::<0>("").expect("zero length hex");
+        assert!(value.is_empty());
+    }
+
+    #[test]
+    fn decode_hex_array_rejects_too_long_input() {
+        let err = decode_hex_array::<1>("abcd").expect_err("too long");
+        assert!(matches!(
+            err,
+            ParseHexError::InvalidLength {
+                expected: 2,
+                actual: 4
+            }
+        ));
+    }
+
+    #[test]
     fn impl_hex_fmt_supports_lower_and_upper_hex() {
         #[derive(Clone, Copy)]
         struct Dummy([u8; 2]);
@@ -208,6 +226,29 @@ mod tests {
             ParseHexError::InvalidLength {
                 expected: 4,
                 actual: 3
+            }
+        );
+    }
+
+    #[test]
+    fn impl_fixed_hex_from_str_surfaces_invalid_character() {
+        #[derive(Debug, PartialEq)]
+        struct Token([u8; 1]);
+
+        impl From<[u8; 1]> for Token {
+            fn from(value: [u8; 1]) -> Self {
+                Self(value)
+            }
+        }
+
+        crate::hexutil::impl_fixed_hex_from_str!(Token, 1);
+
+        let err = Token::from_str("0g").expect_err("invalid character");
+        assert_eq!(
+            err,
+            ParseHexError::InvalidCharacter {
+                index: 1,
+                character: 'g'
             }
         );
     }
