@@ -2,6 +2,7 @@ use ciborium::{de::from_reader, ser::into_writer};
 use hex::ToHex;
 
 use super::{Label, StreamId, LABEL_LEN, STREAM_ID_LEN};
+use crate::hexutil::ParseHexError;
 
 #[test]
 fn stream_and_label_round_trip_via_strings() {
@@ -100,4 +101,36 @@ fn label_from_slice_enforces_exact_length() {
     let err = Label::from_slice(&bytes[..LABEL_LEN - 2]).expect_err("length error");
     assert_eq!(err.expected(), LABEL_LEN);
     assert_eq!(err.actual(), LABEL_LEN - 2);
+}
+
+#[test]
+fn stream_id_from_str_rejects_invalid_length() {
+    let err = "abcd".parse::<StreamId>().expect_err("length error");
+    assert!(matches!(
+        err,
+        ParseHexError::InvalidLength {
+            expected: 64,
+            actual: 4
+        }
+    ));
+}
+
+#[test]
+fn label_from_str_rejects_invalid_character() {
+    let input = format!("g{}", "0".repeat(63));
+    let err = input.parse::<Label>().expect_err("invalid character");
+    assert!(matches!(
+        err,
+        ParseHexError::InvalidCharacter {
+            index: 0,
+            character: 'g'
+        }
+    ));
+}
+
+#[test]
+fn stream_id_from_str_accepts_uppercase_hex() {
+    let input = "AA".repeat(STREAM_ID_LEN);
+    let parsed = input.parse::<StreamId>().expect("uppercase hex stream id");
+    assert_eq!(parsed.as_bytes(), &[0xaa; STREAM_ID_LEN]);
 }
