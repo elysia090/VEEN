@@ -150,6 +150,12 @@ mod tests {
     }
 
     #[test]
+    fn decode_hex_array_preserves_leading_zero_bytes() {
+        let value = decode_hex_array::<2>("0001").expect("leading zeros");
+        assert_eq!(value, [0x00, 0x01]);
+    }
+
+    #[test]
     fn decode_hex_array_handles_zero_length_arrays() {
         let value = decode_hex_array::<0>("").expect("zero length hex");
         assert!(value.is_empty());
@@ -184,6 +190,24 @@ mod tests {
         assert_eq!(format!("{value}"), "dead");
         assert_eq!(format!("{value:x}"), "dead");
         assert_eq!(format!("{value:X}"), "DEAD");
+    }
+
+    #[test]
+    fn impl_hex_fmt_formats_leading_zero_bytes() {
+        #[derive(Clone, Copy)]
+        struct Dummy([u8; 2]);
+
+        impl AsRef<[u8]> for Dummy {
+            fn as_ref(&self) -> &[u8] {
+                &self.0
+            }
+        }
+
+        crate::hexutil::impl_hex_fmt!(Dummy);
+
+        let value = Dummy([0x00, 0x0f]);
+        assert_eq!(format!("{value}"), "000f");
+        assert_eq!(format!("{value:X}"), "000F");
     }
 
     #[test]
@@ -251,5 +275,22 @@ mod tests {
                 character: 'g'
             }
         );
+    }
+
+    #[test]
+    fn impl_fixed_hex_from_str_accepts_uppercase() {
+        #[derive(Debug, PartialEq)]
+        struct Token([u8; 1]);
+
+        impl From<[u8; 1]> for Token {
+            fn from(value: [u8; 1]) -> Self {
+                Self(value)
+            }
+        }
+
+        crate::hexutil::impl_fixed_hex_from_str!(Token, 1);
+
+        let value = Token::from_str("FF").expect("uppercase hex");
+        assert_eq!(value, Token([0xff]));
     }
 }
