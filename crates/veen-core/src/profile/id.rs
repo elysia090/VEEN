@@ -102,3 +102,35 @@ impl<'de> Deserialize<'de> for ProfileId {
 }
 
 crate::hexutil::impl_fixed_hex_from_str!(ProfileId, 32);
+
+#[cfg(test)]
+mod tests {
+    use super::ProfileId;
+    use std::str::FromStr;
+
+    #[test]
+    fn profile_id_try_from_vec_enforces_length() {
+        let bytes = vec![0x11; 32];
+        let id = ProfileId::try_from(bytes.clone()).expect("valid profile id");
+        assert_eq!(id.as_ref(), bytes.as_slice());
+
+        let err = ProfileId::try_from(vec![0x22; 31]).expect_err("length error");
+        assert_eq!(err.expected(), 32);
+        assert_eq!(err.actual(), 31);
+    }
+
+    #[test]
+    fn profile_id_hex_formatting_matches_display() {
+        let id = ProfileId([0xde; 32]);
+        assert_eq!(format!("{id}"), "de".repeat(32));
+        assert_eq!(format!("{id:x}"), "de".repeat(32));
+        assert_eq!(format!("{id:X}"), "DE".repeat(32));
+    }
+
+    #[test]
+    fn profile_id_from_str_rejects_invalid_length() {
+        let err = ProfileId::from_str("abcd").expect_err("length error");
+        assert_eq!(err.expected(), 64);
+        assert_eq!(err.actual(), 4);
+    }
+}
