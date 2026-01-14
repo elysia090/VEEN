@@ -1238,6 +1238,14 @@ fn job_bootstrap_script(include_cap: bool) -> String {
     let mut script = format!(
         concat!(
             "set -euo pipefail\n",
+            "if [ ! -f {client_secret}/keystore.enc ]; then\n",
+            "  echo \"missing keystore.enc in {client_secret}\" >&2\n",
+            "  exit 1\n",
+            "fi\n",
+            "if [ ! -f {client_secret}/identity_card.pub ]; then\n",
+            "  echo \"missing identity_card.pub in {client_secret}\" >&2\n",
+            "  exit 1\n",
+            "fi\n",
             "mkdir -p {client_state}\n",
             "cp {client_secret}/keystore.enc {client_state}/keystore.enc\n",
             "cp {client_secret}/identity_card.pub {client_state}/identity_card.pub\n",
@@ -1251,6 +1259,10 @@ fn job_bootstrap_script(include_cap: bool) -> String {
     if include_cap {
         script.push_str(&format!(
             concat!(
+                "if [ ! -f {cap_secret}/cap.cbor ]; then\n",
+                "  echo \"missing cap.cbor in {cap_secret}\" >&2\n",
+                "  exit 1\n",
+                "fi\n",
                 "mkdir -p {cap_state}\n",
                 "cp -R {cap_secret}/. {cap_state}/\n"
             ),
