@@ -34,6 +34,12 @@ struct MetricsResponse {
 }
 
 const HUB_KEY_VERSION: u8 = 1;
+const RATE_LIMIT_TTL_SEC: u64 = 2;
+const RATE_LIMIT_EXPIRY_SLEEP_SEC: u64 = 2;
+const REVOCATION_TTL_SEC: u64 = 1;
+const REVOCATION_EXPIRY_SLEEP_SEC: u64 = 1;
+const CLIENT_LIFETIME_SEC: u64 = 2;
+const CLIENT_LIFETIME_EXPIRY_SLEEP_SEC: u64 = 2;
 
 #[derive(Serialize)]
 struct TestHubKeyMaterial {
@@ -195,6 +201,7 @@ async fn goals_core_pipeline() -> Result<()> {
 
     let cap_file = hub_dir.path().join("cap.cbor");
     cli_streams.push("core/capped".to_string());
+    let rate_limit_ttl = RATE_LIMIT_TTL_SEC.to_string();
     run_cli([
         "cap",
         "issue",
@@ -205,7 +212,7 @@ async fn goals_core_pipeline() -> Result<()> {
         "--stream",
         "core/capped",
         "--ttl",
-        "4",
+        &rate_limit_ttl,
         "--rate",
         "1,1",
         "--out",
@@ -370,7 +377,7 @@ async fn goals_core_pipeline() -> Result<()> {
         .await
         .context("parsing rate recovery response")?;
 
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    tokio::time::sleep(Duration::from_secs(RATE_LIMIT_EXPIRY_SLEEP_SEC)).await;
 
     let ttl_expired = http
         .post(&submit_endpoint)
@@ -852,7 +859,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         HubRole::Primary,
         HubConfigOverrides {
             capability_gating_enabled: Some(true),
-            max_client_id_lifetime_sec: Some(3),
+            max_client_id_lifetime_sec: Some(CLIENT_LIFETIME_SEC),
             max_msgs_per_client_id_per_label: Some(2),
             ..HubConfigOverrides::default()
         },
@@ -968,6 +975,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         "expected quota failure to return E.AUTH, got: {quota_body}"
     );
 
+    let revocation_ttl = REVOCATION_TTL_SEC.to_string();
     run_cli([
         "revoke",
         "publish",
@@ -980,7 +988,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         "--target",
         &client_revoke_id,
         "--ttl",
-        "1",
+        &revocation_ttl,
     ])
     .context("publishing client-id revocation")?;
 
@@ -1012,7 +1020,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         "expected client-id revocation to return E.AUTH, got: {revoked_body}"
     );
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(REVOCATION_EXPIRY_SLEEP_SEC)).await;
 
     let post_ttl = http
         .post(&submit_endpoint)
@@ -1130,7 +1138,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         .await
         .context("decoding initial lifetime submit response")?;
 
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    tokio::time::sleep(Duration::from_secs(CLIENT_LIFETIME_EXPIRY_SLEEP_SEC)).await;
 
     let lifetime_fail = http
         .post(&submit_endpoint)

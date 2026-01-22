@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::convert::TryInto;
 use std::io::{Cursor, ErrorKind};
 use std::num::NonZeroUsize;
@@ -993,6 +993,7 @@ impl HubPipeline {
             .iter()
             .map(|id| hex::encode(id.as_ref()))
             .collect();
+        let stream_id_set: HashSet<String> = stream_ids.iter().cloned().collect();
 
         tracing::info!(
             auth_ref = %auth_ref_hex,
@@ -1015,6 +1016,7 @@ impl HubPipeline {
         let record = CapabilityRecord {
             subject: subject_hex,
             stream_ids,
+            stream_id_set,
             expires_at,
             ttl: token.allow.ttl,
             rate: token.allow.rate.clone(),
@@ -1957,12 +1959,20 @@ impl CapabilityStore {
             }
         }
     }
+
+    fn rebuild_stream_indexes(&mut self) {
+        for record in self.records.values_mut() {
+            record.rebuild_stream_index();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CapabilityRecord {
     subject: String,
     stream_ids: Vec<String>,
+    #[serde(skip)]
+    stream_id_set: HashSet<String>,
     expires_at: u64,
     ttl: u64,
     rate: Option<CapTokenRate>,
@@ -2013,6 +2023,16 @@ impl TokenBucketState {
         if self.last_refill < 1_000_000_000_000 {
             self.last_refill = self.last_refill.saturating_mul(1_000);
         }
+    }
+}
+
+impl CapabilityRecord {
+    fn rebuild_stream_index(&mut self) {
+        self.stream_id_set = self.stream_ids.iter().cloned().collect();
+    }
+
+    fn allows_stream(&self, stream_hex: &str) -> bool {
+        self.stream_id_set.contains(stream_hex)
     }
 }
 
@@ -3178,11 +3198,7 @@ fn enforce_capability(
             source: err,
         })?;
     let stream_hex = hex::encode(stream_id.as_ref());
-    if !record
-        .stream_ids
-        .iter()
-        .any(|allowed| allowed == &stream_hex)
-    {
+    if !record.allows_stream(&stream_hex) {
         return Err(CapabilityError::StreamDenied {
             auth_ref: auth_ref.to_string(),
             stream: stream.to_string(),
@@ -3309,6 +3325,7 @@ async fn load_capabilities(storage: &HubStorage) -> Result<CapabilityStore> {
     let mut store: CapabilityStore = serde_json::from_slice(&data)
         .with_context(|| format!("parsing capability store from {}", path.display()))?;
     store.normalise_bucket_state();
+    store.rebuild_stream_indexes();
     Ok(store)
 }
 
@@ -3700,6 +3717,7 @@ mod tests {
                     CapabilityRecord {
                         subject: "client".into(),
                         stream_ids: vec!["core/test".into()],
+                        stream_id_set: ["core/test".to_string()].into_iter().collect(),
                         expires_at,
                         ttl: 600,
                         rate: None,
@@ -3718,6 +3736,43 @@ mod tests {
             Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
+    }
+
+    #[test]
+    fn retry_after_seconds_has_floor_of_one_second() {
+        let rate = CapTokenRate { burst: 1, per_sec: 1_000 };
+        let state = TokenBucketState {
+            tokens: 0,
+            last_refill: 10_000,
+        };
+        let now_ms = 10_000;
+
+        assert_eq!(retry_after_seconds(&rate, &state, now_ms), 1);
+    }
+
+    #[test]
+    fn capability_store_rebuilds_stream_index() {
+        let mut store = CapabilityStore {
+            records: HashMap::from([(
+                "deadbeef".to_string(),
+                CapabilityRecord {
+                    subject: "client".into(),
+                    stream_ids: vec!["deadbeef".into()],
+                    stream_id_set: HashSet::new(),
+                    expires_at: 1,
+                    ttl: 1,
+                    rate: None,
+                    bucket_state: None,
+                    uses: 0,
+                    token_hash: None,
+                },
+            )]),
+            client_usage: HashMap::new(),
+        };
+
+        store.rebuild_stream_indexes();
+        let record = store.records.get("deadbeef").expect("record exists");
+        assert!(record.allows_stream("deadbeef"));
     }
 
     #[test]
