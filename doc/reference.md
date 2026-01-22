@@ -97,6 +97,66 @@ To prevent implicit coupling across layers, the following boundaries are REQUIRE
 Any implementation that leaks overlay behavior into the core, or relies on overlay-specific storage shortcuts,
 is non-conformant.
 
+### Scaling, distribution, and multi-hub correctness (normative)
+VEEN is explicitly designed for large-scale, distributed deployments. The following invariants are REQUIRED to
+avoid hidden global bottlenecks and to keep multi-hub deployments verifiable:
+
+- **Label-local ordering:** The label is the unit of total order. No hub or client may infer or enforce a global
+  order across labels. Any cross-label correlation MUST be derived from application semantics or explicit joins
+  defined by overlays.
+- **Shard by label/bucket:** Implementations MUST shard storage, indexing, and admission concurrency by label or
+  deterministic buckets of labels. A shard failure MUST not block unrelated labels.
+- **Bounded fanout for distributed queries:** Any operation that spans multiple labels or shards MUST enforce an
+  explicit, documented fanout budget and return continuation tokens when results are incomplete. Unbounded
+  scatter/gather is non-compliant.
+- **Single-primary or deterministic multi-primary:** For any `(realm_id, label)` pair, the authority policy MUST
+  be either single-primary (one hub admits) or multi-primary with a deterministic, non-ambiguous tie-breaking
+  rule defined by AUTH1 (for example, stable ordering on `(hub_id, stream_seq, leaf_hash)`). If tie-breaking is
+  not defined, single-primary is REQUIRED.
+- **Idempotent mirroring:** Bridge/mirror processes MUST be idempotent using `msg_id` and `stream_seq` as stable
+  deduplication keys. Replays MUST NOT create new receipts for the same underlying MSG.
+- **Backpressure visibility:** Admission throttling, rate limits, and queue backpressure MUST be observable and
+  externally measurable; hidden queues or retry storms are non-compliant.
+- **Isolation of failure domains:** Loss of a shard/replica MUST only impact its label bucket, and recovery MUST
+  follow the O(1)/polylog bounds (no full-history rebuild on the critical path).
+
+### Backward compatibility and evolution discipline (normative)
+The v0.0.1 wire format is immutable. All evolution MUST be additive and compatible with existing deployments:
+
+- **Wire immutability:** MSG/RECEIPT/CHECKPOINT/mmr_proof/cap_token fields and encodings defined in sections 5–8
+  MUST NOT change. Any change requires a new major spec and a distinct protocol identifier.
+- **Schema-based extensibility:** New features MUST be introduced as new encrypted payload schemas (new
+  `payload_hdr.schema` values) or as new overlay profiles. Existing schemas MUST remain valid indefinitely.
+- **Profile_id discipline:** Cryptographic or wire-profile changes MUST be expressed as a new `profile_id`. A
+  hub MUST explicitly declare which profile_id values it accepts and MUST reject any unrecognized profile_id
+  deterministically (E.PROFILE or equivalent).
+- **No silent downgrade:** When multiple profiles or overlays are supported, the hub MUST enforce a configured
+  preference order and MUST NOT accept weaker profiles unless explicitly configured. Clients MUST pin acceptable
+  profile_id values and MUST treat unexpected profile_id values as errors.
+- **Per-label profile consistency:** For a given label, all admitted messages MUST share the same profile_id.
+  Profile transitions MUST use a new label derivation (for example via a new routing_key or epoch change).
+- **Deprecation policy:** Any deprecation MUST specify a minimum overlap window where old and new profiles are
+  both accepted, and MUST provide an explicit migration path that preserves verifiability of past receipts.
+
+### Cryptographic resilience, agility, and post-quantum readiness (normative)
+Cryptographic robustness is enforced by strict profile boundaries and explicit upgrade paths:
+
+- **Algorithm agility via profile_id only:** No algorithm substitution is allowed within a single profile_id.
+  Any change to AEAD, DH, KDF, hash function H, or signature scheme MUST define a new profile and profile_id.
+- **Hash/tag domain separation:** All new hash tags MUST be unique and versioned. Reuse of tags across distinct
+  semantics is forbidden to avoid cross-protocol collisions.
+- **Deterministic nonces and uniqueness:** Clients MUST enforce `client_seq` monotonicity per `(label, client_id)`
+  to prevent nonce reuse. Hubs MUST reject any violation (E.SEQ or E.DUP).
+- **Key lifecycle guarantees:** Long-term keys MUST support rotation and revocation. Implementations MUST expose
+  auditable key-era boundaries and MUST NOT allow receipt signing with deprecated keys beyond the configured
+  overlap window.
+- **Post-quantum transition path:** PQ or hybrid KEM transitions MUST be introduced as new profiles (e.g., hybrid
+  X25519 + PQ KEM inside HPKE) and MUST be supported in parallel with legacy profiles for an overlap period. A
+  deployment MUST explicitly configure which profiles are allowed; clients MUST not accept PQ-to-legacy
+  downgrades without user consent.
+- **Side-channel hygiene:** Implementations SHOULD use constant-time crypto primitives and MUST avoid
+  data-dependent branching on secret material in admission, decryption, and verification paths.
+
 ### Strict asymptotics (O(1)/polylog n) and O(n) avoidance (normative)
 - Every externally visible API/CLI path MUST be O(1) or O(polylog n). O(n) work is forbidden on the request path.
 - If maintenance requires O(n) work, it MUST be incremental, bounded, and unobservable to external callers.
