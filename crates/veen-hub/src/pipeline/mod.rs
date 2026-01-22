@@ -43,8 +43,8 @@ use veen_core::{
 
 use thiserror::Error;
 
-use crate::config::{AdmissionConfig, DedupConfig, FederationConfig, HubRole, HubRuntimeConfig};
-use crate::observability::{HubObservability, ObservabilitySnapshot};
+use crate::runtime::{AdmissionConfig, DedupConfig, FederationConfig, HubRole, HubRuntimeConfig};
+use crate::runtime::{HubObservability, ObservabilitySnapshot};
 use crate::storage::{
     attachments,
     stream_index::{self, StreamIndexEntry},
@@ -3486,7 +3486,7 @@ fn identifier_prefix(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::HubConfigOverrides;
+    use crate::runtime::HubConfigOverrides;
     use anyhow::Context;
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;

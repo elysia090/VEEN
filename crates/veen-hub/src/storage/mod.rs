@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use sha2::Digest;
 use tokio::fs::{self, OpenOptions};
 
-use crate::config::HubRuntimeConfig;
+use crate::runtime::HubRuntimeConfig;
 
 pub mod attachments;
 pub mod stream_index;

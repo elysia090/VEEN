@@ -66,8 +66,8 @@ use veen_core::{
     schema_wallet_transfer, REALM_ID_LEN, REVOCATION_TARGET_LEN, SCHEMA_ID_LEN, TRANSFER_ID_LEN,
     WALLET_ID_LEN,
 };
-use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::runtime::HubRuntime;
+use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::storage::{
     self, stream_index, ANCHORS_DIR, ATTACHMENTS_DIR, CHECKPOINTS_FILE, CRDT_DIR, HUB_KEY_FILE,
     HUB_PID_FILE, MESSAGES_DIR, PAYLOADS_FILE, RECEIPTS_FILE, REVOCATIONS_FILE, STATE_DIR,
@@ -10904,9 +10904,9 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::sleep;
     use veen_core::wire::types::{MmrRoot, Signature64};
-    use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
     use veen_hub::pipeline::StreamResponse;
     use veen_hub::runtime::HubRuntime;
+    use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 
     #[test]
     fn parse_label_map_entries_parses_pairs() -> anyhow::Result<()> {
