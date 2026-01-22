@@ -907,7 +907,7 @@ Deployment MUST define:
 
 Minimal replay interface:
 	•	Replay by range:
-	•	input: stream id, from_seq, to_seq (inclusive or half-open, specified)
+	•	input: stream id, from_seq, to_seq (inclusive range [from_seq, to_seq], 1-based, from_seq <= to_seq)
 	•	output: ordered events plus receipts
 	•	Replay by time window:
 	•	input: stream set, start_time, end_time
@@ -6402,7 +6402,8 @@ Behavior:
 Human-readable:
 
 hub_id: HEX32
-realm_id: HEX32
+role: “standalone” | “federated-primary” | “federated-replica” | “observer”
+realm_id: HEX32 or “unspecified”
 stream_id: HEX32
 label: HEX32
 policy: single-primary|multi-primary|unspecified
@@ -6414,13 +6415,18 @@ JSON:
 {
 “ok”: true,
 “hub_id”: “HEX32”,
-“realm_id”: “HEX32”,
-“stream_id”: “HEX32”,
-“label”: “HEX32”,
-“policy”: “single-primary”,
-“primary_hub”: “HEX32”,
-“local_is_primary”: true
+“role”: “observer”,
+“stream”: {
+  “realm_id”: “HEX32” or null,
+  “stream_id”: “HEX32”,
+  “label”: “HEX32”,
+  “policy”: “single-primary|multi-primary|unspecified”,
+  “primary_hub”: “HEX32” or null,
+  “local_is_primary”: true|false
 }
+}
+
+If –stream is omitted, JSON output includes only ok, hub_id, and role (no stream object).
 
 Constraints:
 	•	If AUTH1 is not enabled on the hub:
@@ -6502,6 +6508,7 @@ JSON with the same fields.
 
 Edge cases:
 	•	If no record exists, CLI prints policy: “unspecified” and active_now: false and exits 0.
+	•	In this case, primary_hub = “none” (null in JSON), replica_hubs = [], ts = 0, ttl = 0, and expires_at = 0 (null in JSON).
 
 3.3 Label authority by label
 
@@ -6522,6 +6529,8 @@ policy: single-primary|multi-primary|unspecified
 primary_hub: HEX32 or “none”
 local_hub_id: HEX32
 locally_authorized: true|false
+
+JSON includes the same fields plus replica_hubs: [HEX32,…] (possibly empty).
 
 Use case:
 	•	Diagnose “not primary for label” rejections and misconfigured federation.
