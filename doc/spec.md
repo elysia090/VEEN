@@ -93,6 +93,32 @@ Required structures:
 
 No internal linearity may be observable by external callers.
 
+### 3.4.1 Algorithm and data-structure optimization (normative)
+Implementations MUST employ the following algorithmic and storage strategies to meet the contract above. These requirements are not optional tuning; they are part of the wire-compatible performance behavior.
+
+**Admission + append (O(1)):**
+- Maintain a **per-label append cursor** storing `(stream_seq, mmr_peaks)` and the last `client_seq` per `(label, client_id)`.
+- Enforce admission ordering with **constant-time checks** against these cursors; no replay or scan of historical records.
+- Persist cursors in a **write-ahead journal** so recovery restores them without replaying the full log.
+
+**Proofs + receipts (O(log n)):**
+- Store MMR peaks in a **bounded-height array** keyed by label; updates are O(log n).
+- Cache **latest inclusion paths** in a small LRU keyed by `(label, stream_seq)` to serve hot proof requests.
+- Persist **peak snapshots** at fixed intervals so a proof can be reconstructed by O(log n) merges without scanning raw leaves.
+
+**Query + inspection (O(polylog n)):**
+- Every predicate MUST map to an **explicit index** (B-tree or LSM). Composite predicates MUST map to **composite keys**.
+- Use **covering indices** for inspection views so results are served without fetching payloads.
+- Maintain **time-bucketed partitions** (e.g., by day or epoch) with bounded fanout to guarantee polylog range scans.
+
+**Retention + pruning (O(polylog n)):**
+- Implement **tombstone indices** and **segment manifests** to delete or retain ranges without scanning live segments.
+- Keep a **manifest tree** keyed by `(label, epoch, seq_range)` to verify completeness without reading segments.
+
+**Determinism + bounds:**
+- All caches MUST be **size-bounded and deterministic**; eviction is LRU with fixed caps, and miss behavior is still within polylog bounds.
+- Any probabilistic structure (e.g., Bloom filters) MUST be **supplemental only** and never the sole correctness path.
+
 ### 3.5 Deterministic limits and sizing
 All size and time limits are **explicit, configuration-bound, and deterministic**. Implementations MUST define:
 - Max message size, header size, body size, attachment count, and attachment size.
