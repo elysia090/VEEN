@@ -282,6 +282,16 @@ linear rebuilds, or sequential dependency on the full history is **non-compliant
 - **Adversarial inputs:** Worst-case inputs (pathological keys, worst-label skew, maximal filter sizes) MUST still
   satisfy the stated bounds; implementations MAY use randomized structures only if they enforce a strict per-op
   cap and provide a deterministic fallback that still stays within O(polylog n).
+- **Micro-latency envelope:** Operational paths MUST be engineered so that steady-state request handling is
+  dominated by bounded, in-memory work and a fixed number of syscalls/IOs. Implementations MUST define
+  per-operation latency budgets in **ns–µs** for CPU implying no unbounded allocations, no unbounded locks,
+  and no dependence on kernel-global contention (e.g., page-fault storms). If a path cannot meet its budget,
+  it MUST fail fast with a precise error and actionable diagnostic.
+- **Time-source determinism:** Any timing, retry, or backoff logic MUST use monotonic clocks and deterministic
+  bounds. Wall-clock time MUST NOT be used to gate correctness or to mask performance regressions.
+- **Fast-path invariants:** Admission, proof, and inspection MUST each have a single, explicitly documented
+  fast path with no conditional branches that trigger unbounded work. Slow paths are permitted only for
+  offline tooling.
 
 **Mandatory large-scale data structures**
 - **Hierarchical summaries:** Implementations MUST persist checkpoints/snapshots and range summaries
@@ -349,9 +359,32 @@ linear rebuilds, or sequential dependency on the full history is **non-compliant
   are forbidden. Shard by label/stream or by bucket.
 - **No backfills on read:** Reads MUST NOT trigger backfill or repair that scales with history size. Backfills
   are offline maintenance only.
+- **Bounded allocation:** Per-request allocations MUST be bounded and preferably drawn from pools. Unbounded
+  heap growth or per-request initialization of large structures is non-compliant.
+- **Syscall budget:** Each externally visible operation MUST have a documented, fixed upper bound on syscalls
+  and network round trips in steady state. Any additional syscalls must be justified as part of the
+  deterministic bound and exposed in metrics.
 
 These constraints are **normative** and supersede any legacy text that implies or permits linear-time scans,
 full-log replays, or sequential-only folding in operational paths.
+
+### Operational difficulty elimination (normative requirements)
+Implementations MUST remove predictable operator toil by making critical behaviors self-validating and
+self-describing. The goal is to make deployment, recovery, and tuning safe in the face of human error.
+
+- **Self-auditing surfaces:** Every operational invariant (indexes present, cache warm, checkpoints current,
+  retention applied, proof cache bounds) MUST be machine-checkable via inspection commands and return
+  deterministic JSON outputs.
+- **Auto-guarded rollout:** Configuration changes MUST be validated against the spec and rejected if they
+  would introduce O(n) paths, remove required indexes, or exceed bounded fan-out limits.
+- **Predictable cold start:** Cold start MUST be fully automated and bounded; if required metadata is missing,
+  the hub MUST refuse to start with a clear diagnostic rather than entering degraded linear-time modes.
+- **Automatic remedial actions:** If a required index/checkpoint is stale or missing, the system MUST either
+  rebuild it via an offline maintenance path or refuse the online operation with a precise remediation
+  command. Implicit online rebuilds are forbidden.
+- **No manual performance tuning:** The system MUST expose and respect explicit bounds (cache sizes, batching
+  windows, proof cache limits) and SHOULD provide safe defaults that meet ns–µs budgets without operator
+  intervention.
 
 ## Protocol specifications
 
