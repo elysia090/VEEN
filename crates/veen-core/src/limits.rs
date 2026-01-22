@@ -1,6 +1,6 @@
 //! Default protocol limits defined by the VEEN v0.0.1 specification.
 //!
-//! Section 19 of `doc/spec-1.txt` establishes conservative upper bounds that
+//! Section 19 of `doc/spec.md` establishes conservative upper bounds that
 //! implementations must enforce when processing client traffic.  These values
 //! keep hub resource usage predictable while remaining configurable by higher
 //! level components when a deployment explicitly chooses different limits.

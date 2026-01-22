@@ -35,7 +35,7 @@ pub struct CapTokenAllow {
     pub rate: Option<CapTokenRate>,
 }
 
-/// Capability token as defined in section 11 of `doc/spec-1.txt`.
+/// Capability token as defined in section 11 of `doc/spec.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapToken {
