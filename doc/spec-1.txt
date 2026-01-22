@@ -62,7 +62,7 @@ MSG fields (in order):
 	•	sig: bstr(64) (Ed25519 signature over Ht(“veen/sig”, CBOR(MSG without sig)))
 
 Ciphertext formation:
-	1.	(enc, ctx) = HPKE.SealSetup(pkR) where pkR is the receiver HPKE public key (for example derived from a prekey).
+	1.	(enc, ctx) = HPKE.SealSetup(pkR) where pkR is the receiver HPKE public key (for example derived from a prekey). For the fixed profile, enc is 32 bytes (X25519 KEM output).
 	2.	hpke_ct_hdr = HPKE.Seal(ctx, “”, CBOR(payload_hdr)).
 	3.	k_body = HPKE.Export(ctx, “veen/body-k”, 32).
 	4.	nonce = Trunc_24(Ht(“veen/nonce”, label || u64be(prev_ack) || client_id || u64be(client_seq))).
@@ -70,7 +70,7 @@ Ciphertext formation:
 	6.	hdr_len = u32be(len(hpke_ct_hdr)).
 	7.	body_len = u32be(len(aead_ct_body)).
 	8.	ciphertext = enc || hdr_len || body_len || hpke_ct_hdr || aead_ct_body.
-	9.	If pad_block > 0, right-pad ciphertext with zero bytes so that len(ciphertext) is a multiple of pad_block. Receivers MUST treat padding bytes as unauthenticated zeros and MUST strip them before AEAD_Decrypt.
+	9.	If pad_block > 0, right-pad ciphertext with zero bytes so that len(ciphertext) is a multiple of pad_block. Receivers MUST treat padding bytes as unauthenticated zeros and MUST strip them after parsing hdr_len/body_len and before AEAD_Decrypt.
 	10.	ct_hash = H(ciphertext). The hash covers the ciphertext including any right-padding bytes.
 	11.	leaf_hash = Ht(“veen/leaf”, label || profile_id || ct_hash || client_id || u64be(client_seq)).
 	12.	msg_id = leaf_hash.
@@ -153,7 +153,8 @@ Receive:
 	2.	Verify hub_sig and invariants I1..I12.
 	3.	Update local MMR for the label to match mmr_root and stream_seq, validating any provided mmr_proof if with_proof was requested.
 	4.	Decrypt:
-	•	Split ciphertext into enc (HPKE encapsulated key), hdr_len, body_len, hpke_ct_hdr, and aead_ct_body as in section 5. If pad_block > 0, verify any trailing padding bytes are zero and strip them after parsing the length-delimited header/body.
+	•	Split ciphertext into enc (32 bytes), hdr_len (4 bytes), body_len (4 bytes), hpke_ct_hdr, and aead_ct_body as in section 5. Reject if ciphertext is shorter than 40 bytes, if hdr_len/body_len exceed MAX_HDR_BYTES/MAX_BODY_BYTES, or if the remaining ciphertext is shorter than hdr_len + body_len.
+	•	After consuming hpke_ct_hdr and aead_ct_body, any remaining bytes are padding. If pad_block > 0, verify remaining bytes are all zero and strip them; if pad_block == 0, reject any remaining bytes as E.SIZE.
 	•	Use HPKE.Open with enc to recover payload_hdr, and derive k_body via HPKE.Export(ctx, “veen/body-k”, 32). If ctx is not cached, reconstruct it via HPKE.SetupBaseR with enc and the receiver private key.
 	•	Recompute nonce as in section 5.
 	•	AEAD_Decrypt with k_body, nonce, and associated data “” to recover body.
