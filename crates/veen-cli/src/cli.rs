@@ -1799,10 +1799,22 @@ struct LabelClassSetArgs {
     hub: HubLocatorArgs,
     #[arg(long)]
     signer: PathBuf,
-    #[arg(long)]
-    realm: String,
-    #[arg(long)]
-    label: String,
+    /// Explicit label identifier (hex-encoded).
+    #[arg(
+        long = "label",
+        value_name = "HEX32",
+        required_unless_present = "stream",
+        conflicts_with = "stream"
+    )]
+    label_hex: Option<String>,
+    /// Stream label used to derive the label identifier.
+    #[arg(
+        long,
+        value_name = "STREAM",
+        required_unless_present = "label_hex",
+        conflicts_with = "label_hex"
+    )]
+    stream: Option<String>,
     #[arg(long)]
     class: String,
     #[arg(long)]
@@ -1815,8 +1827,22 @@ struct LabelClassSetArgs {
 struct LabelClassShowArgs {
     #[command(flatten)]
     hub: HubLocatorArgs,
-    #[arg(long, value_name = "HEX32")]
-    label: String,
+    /// Hex-encoded label identifier.
+    #[arg(
+        long = "label",
+        value_name = "HEX32",
+        required_unless_present = "stream",
+        conflicts_with = "stream"
+    )]
+    label_hex: Option<String>,
+    /// Stream label used to derive the label identifier.
+    #[arg(
+        long,
+        value_name = "STREAM",
+        required_unless_present = "label_hex",
+        conflicts_with = "label_hex"
+    )]
+    stream: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -1825,8 +1851,6 @@ struct LabelClassShowArgs {
 struct LabelClassListArgs {
     #[command(flatten)]
     hub: HubLocatorArgs,
-    #[arg(long, value_name = "HEX32")]
-    realm: Option<String>,
     #[arg(long)]
     class: Option<String>,
     #[arg(long)]
@@ -6499,13 +6523,9 @@ async fn fetch_label_class_descriptor(
 
 async fn fetch_label_class_list(
     client: &HubHttpClient,
-    realm: Option<String>,
     class: Option<String>,
 ) -> Result<RemoteLabelClassList> {
     let mut query = Vec::new();
-    if let Some(realm) = realm {
-        query.push(("realm", realm));
-    }
     if let Some(class) = class {
         query.push(("class", class));
     }
@@ -6716,6 +6736,22 @@ fn parse_metadata_value(input: Option<String>) -> Result<Option<CborValue>> {
     }
 }
 
+fn parse_label_hex(label_hex: &str) -> Result<Label> {
+    let label_bytes = hex::decode(label_hex)
+        .map_err(|err| CliUsageError::new(format!("label must be hex encoded: {err}")))?;
+    Label::from_slice(&label_bytes).map_err(|err| {
+        anyhow!(CliUsageError::new(format!(
+            "label must encode a 32-byte identifier: {err}"
+        )))
+    })
+}
+
+fn derive_label_from_stream(stream_label: &str) -> Result<Label> {
+    let stream_id = cap_stream_id_from_label(stream_label)
+        .with_context(|| format!("deriving stream identifier for {stream_label}"))?;
+    Ok(Label::derive([], stream_id, 0))
+}
+
 async fn handle_label_class_set(args: LabelClassSetArgs) -> Result<()> {
     let resolved = hub_reference_from_locator(&args.hub, "label-class set").await?;
     match resolved.into_reference() {
@@ -6731,9 +6767,19 @@ async fn handle_label_class_set_remote(
     args: LabelClassSetArgs,
 ) -> Result<()> {
     let signing_key = load_signing_key_from_dir(&args.signer).await?;
-    let stream_id = cap_stream_id_from_label(&args.label)
-        .with_context(|| format!("deriving stream identifier for {}", args.label))?;
-    let label = Label::derive([], stream_id, 0);
+    let (label, label_hex, stream_label) = if let Some(label_hex) = &args.label_hex {
+        let label = parse_label_hex(label_hex)?;
+        (label, hex::encode(label.as_bytes()), None)
+    } else if let Some(stream_label) = &args.stream {
+        let label = derive_label_from_stream(stream_label)?;
+        (
+            label,
+            hex::encode(label.as_bytes()),
+            Some(stream_label.clone()),
+        )
+    } else {
+        unreachable!("label arguments validated by clap")
+    };
 
     let record = LabelClassRecord {
         label,
@@ -6746,7 +6792,10 @@ async fn handle_label_class_set_remote(
     submit_signed_payload(&client, "/label-class", &payload).await?;
 
     println!("published label class");
-    println!("  label: {}", args.label);
+    println!("  label: {label_hex}");
+    if let Some(stream_label) = stream_label {
+        println!("  stream: {stream_label}");
+    }
     println!("  class: {}", args.class);
     if let Some(sensitivity) = &args.sensitivity {
         println!("  sensitivity: {sensitivity}");
@@ -6759,7 +6808,12 @@ async fn handle_label_class_set_remote(
 }
 
 async fn handle_label_class_show(args: LabelClassShowArgs) -> Result<()> {
-    let LabelClassShowArgs { hub, label, json } = args;
+    let LabelClassShowArgs {
+        hub,
+        label_hex,
+        stream,
+        json,
+    } = args;
     let resolved = hub_reference_from_locator(&hub, "label-class show").await?;
     let client = match resolved.into_reference() {
         HubReference::Remote(client) => client,
@@ -6768,11 +6822,13 @@ async fn handle_label_class_show(args: LabelClassShowArgs) -> Result<()> {
         }
     };
 
-    let label_bytes = hex::decode(&label)
-        .map_err(|err| CliUsageError::new(format!("label must be hex encoded: {err}")))?;
-    let label_value = Label::from_slice(&label_bytes).map_err(|err| {
-        CliUsageError::new(format!("label must encode a 32-byte identifier: {err}"))
-    })?;
+    let label_value = if let Some(label_hex) = label_hex {
+        parse_label_hex(&label_hex)?
+    } else if let Some(stream_label) = stream {
+        derive_label_from_stream(&stream_label)?
+    } else {
+        unreachable!("label arguments validated by clap")
+    };
     let label_hex = hex::encode(label_value.as_bytes());
     let descriptor = fetch_label_class_descriptor(&client, &label_hex)
         .await
@@ -6783,14 +6839,8 @@ async fn handle_label_class_show(args: LabelClassShowArgs) -> Result<()> {
 }
 
 async fn handle_label_class_list(args: LabelClassListArgs) -> Result<()> {
-    let LabelClassListArgs {
-        hub,
-        realm,
-        class,
-        json,
-    } = args;
+    let LabelClassListArgs { hub, class, json } = args;
     let resolved = require_hub(&hub, "label-class list").await?;
-    let resolved_realm = resolved.realm_id().map(ToString::to_string);
     let client = match resolved.into_reference() {
         HubReference::Remote(client) => client,
         HubReference::Local(_) => {
@@ -6798,7 +6848,7 @@ async fn handle_label_class_list(args: LabelClassListArgs) -> Result<()> {
         }
     };
 
-    let list = fetch_label_class_list(&client, realm.or(resolved_realm), class.clone())
+    let list = fetch_label_class_list(&client, class.clone())
         .await
         .map_err(map_label_class_http_error)?;
     render_label_class_list(&list, json_output_enabled(json));
@@ -12147,8 +12197,8 @@ mod tests {
         let args = LabelClassSetArgs {
             hub: HubLocatorArgs::from_url(url.to_string()),
             signer: signer_dir.path().to_path_buf(),
-            realm: "default".to_string(),
-            label: "chat/general".to_string(),
+            label_hex: None,
+            stream: Some("chat/general".to_string()),
             class: "user".to_string(),
             sensitivity: Some("medium".to_string()),
             retention_hint: Some(86_400),
@@ -12235,7 +12285,8 @@ mod tests {
         let url = format!("http://{addr}");
         handle_label_class_show(LabelClassShowArgs {
             hub: HubLocatorArgs::from_url(url),
-            label: expected_label.clone(),
+            label_hex: Some(expected_label.clone()),
+            stream: None,
             json: true,
         })
         .await?;
@@ -12249,8 +12300,7 @@ mod tests {
     async fn label_class_list_fetches_entries() -> anyhow::Result<()> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let addr = listener.local_addr()?;
-        let realm = hex::encode([0x22u8; 32]);
-        let expected_query = format!("realm={realm}&class=user");
+        let expected_query = "class=user".to_string();
         let (query_tx, mut query_rx) = mpsc::channel(1);
         let expected_query_for_server = expected_query.clone();
         let handle = tokio::spawn(async move {
@@ -12306,7 +12356,6 @@ mod tests {
         let url = format!("http://{addr}");
         handle_label_class_list(LabelClassListArgs {
             hub: HubLocatorArgs::from_url(url),
-            realm: Some(realm.clone()),
             class: Some("user".to_string()),
             json: true,
         })

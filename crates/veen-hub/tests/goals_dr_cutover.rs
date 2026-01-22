@@ -64,7 +64,7 @@ async fn goals_dr_cutover() -> Result<()> {
     )
     .await?;
 
-    let http = Client::new();
+    let http = Client::builder().no_proxy().build()?;
     let stream = "dr/cutover";
     let client_id = hex::encode(generate_client_id());
 

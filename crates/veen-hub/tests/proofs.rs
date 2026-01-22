@@ -49,7 +49,7 @@ async fn stream_proof_reuses_stored_entries() -> Result<()> {
     .await?;
 
     let runtime = HubRuntime::start(config.clone()).await?;
-    let client = Client::new();
+    let client = Client::builder().no_proxy().build()?;
     let base = format!("http://{}", runtime.listen_addr());
     let stream = "proofs/constant";
     let client_id = hex::encode([0x11; 32]);
@@ -105,7 +105,7 @@ async fn legacy_bundles_are_migrated() -> Result<()> {
     .await?;
 
     let runtime = HubRuntime::start(config.clone()).await?;
-    let client = Client::new();
+    let client = Client::builder().no_proxy().build()?;
     let base = format!("http://{}", runtime.listen_addr());
     let stream = "proofs/migrate";
     let client_id = hex::encode([0x33; 32]);

@@ -125,7 +125,6 @@ struct LabelAuthorityQuery {
 
 #[derive(Debug, Deserialize)]
 struct LabelClassListQuery {
-    realm: Option<String>,
     class: Option<String>,
 }
 
@@ -462,9 +461,7 @@ async fn handle_label_class_list(
     State(pipeline): State<HubPipeline>,
     Query(query): Query<LabelClassListQuery>,
 ) -> impl IntoResponse {
-    let descriptor = pipeline
-        .label_class_list(query.realm.clone(), query.class.clone())
-        .await;
+    let descriptor = pipeline.label_class_list(query.class.clone()).await;
     (StatusCode::OK, Json(descriptor)).into_response()
 }
 

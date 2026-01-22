@@ -1621,12 +1621,7 @@ impl HubPipeline {
         }
     }
 
-    pub async fn label_class_list(
-        &self,
-        realm: Option<String>,
-        class_filter: Option<String>,
-    ) -> HubLabelClassList {
-        let _ = realm;
+    pub async fn label_class_list(&self, class_filter: Option<String>) -> HubLabelClassList {
         let class_filter = class_filter.as_deref();
         let entries = {
             let guard = self.inner.read().await;
@@ -4093,9 +4088,7 @@ mod tests {
         let payload = encode_envelope(schema_label_class(), record);
         pipeline.publish_label_class(&payload).await?;
 
-        let list = pipeline
-            .label_class_list(None, Some("user".to_string()))
-            .await;
+        let list = pipeline.label_class_list(Some("user".to_string())).await;
         assert_eq!(list.entries.len(), 1);
         let entry = &list.entries[0];
         assert_eq!(entry.class, "user");

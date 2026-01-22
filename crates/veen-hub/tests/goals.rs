@@ -103,7 +103,7 @@ async fn goals_core_pipeline() -> Result<()> {
 
     let client_id = read_client_id(&client_dir.join("identity_card.pub"))?;
 
-    let http = Client::new();
+    let http = Client::builder().no_proxy().build()?;
     let submit_endpoint = format!("http://{}/submit", runtime.listen_addr());
 
     let _main_response: SubmitResponse = http
@@ -520,7 +520,7 @@ async fn goals_pow_prefilter_enforced() -> Result<()> {
     let runtime = HubRuntime::start(config).await?;
 
     let client_id = read_client_id(&client_dir.join("identity_card.pub"))?;
-    let http = Client::new();
+    let http = Client::builder().no_proxy().build()?;
     let submit_endpoint = format!("http://{}/submit", runtime.listen_addr());
     let pow_stream = "core/pow";
 
@@ -635,7 +635,7 @@ async fn goals_capability_gating_persists() -> Result<()> {
         .map_err(|err| anyhow::anyhow!("issued capability failed verification: {err}"))?;
     let subject_client_id = hex::encode(cap_token.subject_pk.as_ref());
 
-    let http = Client::new();
+    let http = Client::builder().no_proxy().build()?;
     let authorize_response_bytes = http
         .post(format!("{base_url}/authorize"))
         .header("Content-Type", "application/cbor")
@@ -862,7 +862,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
     let runtime = HubRuntime::start(config).await?;
     let hub_url = format!("http://{}", runtime.listen_addr());
     let submit_endpoint = format!("{hub_url}/submit");
-    let http = Client::new();
+    let http = Client::builder().no_proxy().build()?;
 
     let cap_quota_bytes =
         std::fs::read(&cap_a_file).context("reading client A quota capability")?;
@@ -1201,6 +1201,14 @@ where
         .arg("veen-cli")
         .arg("--")
         .args(args)
+        .env_remove("HTTP_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("https_proxy")
+        .env_remove("ALL_PROXY")
+        .env_remove("all_proxy")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
         .status()
         .context("executing veen command")?;
     if !status.success() {

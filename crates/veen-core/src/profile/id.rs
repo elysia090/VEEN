@@ -130,7 +130,7 @@ mod tests {
     #[test]
     fn profile_id_from_str_rejects_invalid_length() {
         let err = ProfileId::from_str("abcd").expect_err("length error");
-        assert_eq!(err.expected(), 64);
-        assert_eq!(err.actual(), 4);
+        assert_eq!(err.expected(), Some(64));
+        assert_eq!(err.actual(), Some(4));
     }
 }
