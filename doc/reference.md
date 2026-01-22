@@ -219,6 +219,9 @@ linear rebuilds, or sequential dependency on the full history is **non-compliant
   non-compliant for operational paths and is only permitted for offline recovery tooling.
 - **Proof bound:** MMR or equivalent proof construction MUST be O(polylog n) using precomputed peaks/branches
   and bounded caches; scanning history to rebuild proofs is non-compliant.
+- **Adversarial inputs:** Worst-case inputs (pathological keys, worst-label skew, maximal filter sizes) MUST still
+  satisfy the stated bounds; implementations MAY use randomized structures only if they enforce a strict per-op
+  cap and provide a deterministic fallback that still stays within O(polylog n).
 
 **Mandatory large-scale data structures**
 - **Hierarchical summaries:** Implementations MUST persist checkpoints/snapshots and range summaries
@@ -230,6 +233,12 @@ linear rebuilds, or sequential dependency on the full history is **non-compliant
   with bounded fan-out (e.g., B-tree, LSM-tree, or equivalent). Full scans are forbidden.
 - **Per-label head index:** Maintain an O(1) head record per label/stream containing
   `(latest stream_seq, latest leaf_hash, last checkpoint reference)`.
+- **Two-tier indices:** Implementations MUST maintain a hot index (RAM/SSD-resident) for recent ranges and a cold
+  index (log-structured or chunked) for historical ranges, each independently queryable in O(polylog n).
+  The hot/cold split MUST be deterministic and based on `stream_seq` or time buckets, not on workload heuristics.
+- **Minimal perfect hashing (MPH) or static dictionaries:** For immutable key sets (schemas, realm IDs, label
+  prefixes, capability descriptors), implementations SHOULD use MPH tables or dense ID tables to guarantee
+  O(1) worst-case lookup without collision chains.
 
 **Refactored folding model (schema requirements)**
 - **Summary type:** Every schema that defines folding MUST define a summary type `S`.
@@ -239,6 +248,8 @@ linear rebuilds, or sequential dependency on the full history is **non-compliant
   computed by combining O(polylog n) summaries.
 - **Canonical tree shape:** Implementations MUST use a canonical range partitioning of `stream_seq`
   (balanced tree or fixed-size chunking with deterministic indexing) so identical inputs yield identical summaries.
+- **Summary indexability:** Summary objects MUST expose fixed-size keys (or bounded-size keys) for index lookups
+  so that summary retrieval never requires a scan over prior summaries.
 
 **Operational constraints (optimization-hard requirements)**
 - **Worst-case bounds only:** Amortized or probabilistic bounds are insufficient unless a strict per-request cap
@@ -249,6 +260,35 @@ linear rebuilds, or sequential dependency on the full history is **non-compliant
   without materializing full paths in memory; memory usage MUST be O(polylog n).
 - **Deterministic concurrency:** Parallel folding/proof construction MUST preserve canonical merge order and yield
   byte-identical outputs across executions.
+- **No implicit joins:** Any operation that conceptually joins two streams or indices MUST be implemented via
+  precomputed join indices or hash joins with bounded buckets. Nested-loop joins are forbidden.
+- **No unbounded compaction stalls:** Background compaction or index rebuilds MUST be incremental and bounded per
+  request. An implementation that blocks a request on full compaction is non-compliant.
+- **Monotone metadata:** Metadata indices MUST be append-only or versioned; destructive rewrites that scale with
+  history size are non-compliant.
+
+**O(1)/polylog enforcement patterns (normative, approved techniques)**
+- **Dense-ID frontiers:** Normalize `(realm_id, label, stream_id)` into dense integer IDs, then use arrays or
+  packed vectors for `head`, `checkpoint_ref`, and `authority` in O(1).
+- **Two-level MMR caching:** Persist peak arrays and branch caches keyed by `(label_id, stream_seq/segment)`;
+  constructing a proof MUST touch only O(log n) cached branches.
+- **Rank/select bitsets:** For boolean predicates (revoked, expired, seen), use bitsets with rank/select
+  acceleration to support O(1) membership and O(log n) range queries.
+- **Y-fast or vEB for ordered sets:** For predecessor/successor operations on large keyspaces, use y-fast tries,
+  vEB trees, or succinct B-trees to keep bounds polylog and avoid full scans.
+- **Static fan-out caps:** For any mapping that can explode in cardinality (label -> stream list), maintain
+  bounded sub-indices by time/seq buckets; never query a label without a bucket bound.
+
+**Constraint-avoidance checklist (normative prohibitions)**
+- **No hidden O(n):** Any algorithm that “usually” is O(1) but degrades under skew or adversarial inputs is
+  forbidden unless it enforces a strict per-operation cap with deterministic fallback.
+- **No unindexed predicate filters:** Every predicate in query/inspection endpoints MUST map to an index.
+- **No re-derivation from payloads:** Operational paths MUST NOT inspect decrypted payloads to build indexes
+  or compute derived state; such work MUST be performed at ingest time and stored in summaries/indices.
+- **No global locks on hot paths:** Locks that serialize all requests over a structure that grows with `n`
+  are forbidden. Shard by label/stream or by bucket.
+- **No backfills on read:** Reads MUST NOT trigger backfill or repair that scales with history size. Backfills
+  are offline maintenance only.
 
 These constraints are **normative** and supersede any legacy text that implies or permits linear-time scans,
 full-log replays, or sequential-only folding in operational paths.
