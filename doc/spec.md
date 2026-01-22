@@ -1,15 +1,43 @@
 # VEEN Specifications (SSOT)
 
-This document consolidates all spec-related documents into a single source of truth (SSOT).
+This document consolidates all VEEN specification and operational documents into a single source of truth (SSOT).
 Original spec files have been merged here and should no longer be referenced individually.
 
 **SSOT policy**
 - Update **only** this file for spec changes.
 - Keep sections aligned to prevent drift across implementations.
-- The sections below preserve the original spec content verbatim; only headings
-  and surrounding SSOT metadata were added during consolidation.
+- Any other file under `doc/` is a pointer to this SSOT and MUST NOT be edited for spec changes.
+- If any legacy text conflicts with the normalization rules below, the normalization rules take precedence.
 
-## Source index
+## Normalization and conflict resolution
+
+The documents consolidated here were authored at different times. To avoid implementation drift, the following
+normalization rules are authoritative and resolve any conflicts across legacy sections:
+
+- **Canonical CLI name:** `veen` is the primary CLI binary. References to `veen-cli` are legacy aliases of `veen`.
+- **Hub runtime:** `veen hub start` is the canonical hub start command. Legacy `veen-hub run` or `veen-hub start`
+  are accepted aliases with equivalent flags and behavior.
+- **Companion binaries:** `veen-bridge` and `veen-selftest` may ship as separate binaries. If a unified `veen bridge`
+  or `veen selftest` command exists, it MUST behave equivalently to the standalone binaries.
+- **Path vs URL targets:** `--hub` accepts either an HTTP(S) URL or a local hub data directory path; `--data-dir`
+  explicitly selects a local hub data directory when starting/stopping a hub.
+- **Environment naming:** “WSL” and “WSL2” are treated as the same environment class.
+- **Version layering:** v0.0.1 is the core spec; v0.0.1+ and v0.0.1++ are additive overlays and MUST NOT redefine
+  or contradict v0.0.1 semantics.
+
+## Source index (consolidated)
+
+### Current documents merged into this SSOT
+- doc/Design-Philosophy.txt
+- doc/Whyuse.txt
+- doc/USAGE.md
+- doc/CORE-GOALS.txt
+- doc/CLI-GOALS-1.txt
+- doc/CLI-GOALS-2.txt
+- doc/CLI-GOALS-3.txt
+- doc/OS-GOALS.txt
+
+### Legacy sources already embedded below
 - id-spec.txt
 - products-spec-1.txt
 - query-api-spec.txt
@@ -19,6 +47,7 @@ Original spec files have been merged here and should no longer be referenced ind
 - spec-4.txt
 - spec-5.txt
 - wallet-spec.txt
+
 
 ## id-spec.txt
 
@@ -4862,3 +4891,4326 @@ WAL v0.0.1 defines a compact, deterministic, account-based wallet overlay for VE
 	•	all semantics are encoded as end-to-end encrypted messages, not hub-visible state
 	•	bridging replicates events across hubs without any change in payload
 	•	auditability, non-repudiation, and portability are inherited from VEEN
+
+
+## Consolidated operational and guidance documents
+
+
+## CORE-GOALS.txt
+
+⸻
+
+0. Top-Level Structure
+
+You have three main entrypoints from WSL:
+	•	veen-hub – hub process (core + overlays)
+	•	veen-cli – client / admin / test driver
+	•	veen-selftest – orchestration for integration + unit/property/fuzz tests
+
+Top-level test goals
+
+From WSL, all of these must succeed:
+
+veen-selftest core        # v0.0.1 core (wire, crypto, MMR, invariants, RPC/CRDT/ANCHOR/OBS/COMP/SH0/DR0/TS0)
+veen-selftest overlays    # v0.0.1+ overlays (FED1, AUTH1, KEX1+, SH1+, LCLASS0, META0+)
+veen-selftest all         # runs both suites end-to-end
+
+If veen-selftest all is green on WSL, the implementation is considered complete.
+
+⸻
+
+1. Core Integration GOALs (VEEN v0.0.1)
+
+1.1 Core E2E messaging + receipts + verification
+
+GOAL: From WSL, you can spin up a single hub and do full E2E:
+	•	Generate keys for a client.
+	•	Send an encrypted MSG to a stream.
+	•	Receive the MSG and decrypt it.
+	•	Verify the RECEIPT and MMR root against the local view.
+
+Key flows:
+
+# Start hub
+veen-hub run \
+  --listen 127.0.0.1:8080 \
+  --data-dir ~/.veen/hub-core
+
+# Create a client
+veen-cli keygen --out ~/.veen/client1
+
+# Send a message
+veen-cli send \
+  --hub http://127.0.0.1:8080 \
+  --client ~/.veen/client1 \
+  --stream core/main \
+  --body '{"text":"hello-veens"}' \
+  --dump-raw msg.cbor receipt.cbor
+
+# Stream + decrypt
+veen-cli stream \
+  --hub http://127.0.0.1:8080 \
+  --client ~/.veen/client1 \
+  --stream core/main \
+  --from 1
+
+# Verify RECEIPT + MMR
+veen-cli verify-receipt --receipt receipt.cbor --stream core/main
+
+Acceptance:
+	•	MSG ciphertext is opaque to the hub (no plaintext in hub logs).
+	•	verify-receipt confirms I1–I3 and MMR root for that label.
+	•	Deterministic CBOR: re-encoding the same struct yields identical bytes.
+
+⸻
+
+1.2 Attachments (section 10)
+
+GOAL: Attachments are encrypted, committed via att_root, and verifiable.
+
+Flow:
+
+veen-cli send-with-attachment \
+  --hub http://127.0.0.1:8080 \
+  --client ~/.veen/client1 \
+  --stream core/att \
+  --file ./big.bin \
+  --dump-raw msg_att.cbor receipt_att.cbor
+
+veen-cli verify-attachment \
+  --msg msg_att.cbor \
+  --file ./big.bin
+
+Acceptance:
+	•	verify-attachment recomputes coid and att_root and matches payload_hdr.att_root.
+	•	Any mutation of attachment bytes or att_root leads to rejection or verification failure.
+
+⸻
+
+1.3 Capabilities + admission + error codes (sections 11, 13, 21)
+
+GOAL: Permissioned writes with rate limiting and correct E.* codes.
+
+Flow:
+
+# Admin identity
+veen-cli keygen --out ~/.veen/admin
+
+# Issue cap_token
+veen-cli cap issue \
+  --issuer ~/.veen/admin \
+  --subject ~/.veen/client1.pub \
+  --stream core/capped \
+  --ttl 600 \
+  --rate "5/s,10" \
+  --out cap_client1.cbor
+
+# Authorize on hub
+veen-cli cap authorize \
+  --hub http://127.0.0.1:8080 \
+  --cap cap_client1.cbor
+
+Tests:
+	1.	Write without cap → E.AUTH / HTTP 403
+	2.	Write with valid cap → success + RECEIPT
+	3.	Exceed rate → E.RATE / HTTP 429
+	4.	Use expired cap → E.CAP
+	5.	Unknown profile_id, profile mismatch, etc. → E.PROFILE / HTTP 400
+	6.	Dup (client_id, client_seq) → E.SEQ or E.DUP / HTTP 409
+
+All via veen-selftest core subtests.
+
+⸻
+
+1.4 RESYNC + durable client state (RESYNC0)
+
+GOAL: Client can lose its local state and fully reconstruct it from hub.
+
+Flow:
+
+# Load a stream with messages
+veen-cli bench send \
+  --hub http://127.0.0.1:8080 \
+  --client ~/.veen/client1 \
+  --stream core/resync \
+  --count 1000
+
+# Destroy local client state
+rm -rf ~/.veen/state/client1/*
+
+# Resync from hub
+veen-cli resync \
+  --hub http://127.0.0.1:8080 \
+  --client ~/.veen/client1 \
+  --stream core/resync
+
+# Verify local state vs hub
+veen-cli verify-state \
+  --hub http://127.0.0.1:8080 \
+  --client ~/.veen/client1 \
+  --stream core/resync
+
+Acceptance:
+	•	verify-state confirms last_stream_seq and last_mmr_root match the hub.
+	•	RESYNC uses stream?from= and CHECKPOINT correctly; no holes, no divergences.
+
+⸻
+
+1.5 RPC overlay (RPC0)
+
+GOAL: Request/response RPC over VEEN works end-to-end.
+
+Flow:
+
+veen-cli rpc call \
+  --hub http://127.0.0.1:8080 \
+  --client ~/.veen/client1 \
+  --stream rpc/main \
+  --method "add" \
+  --args '{"a":1,"b":2}' \
+  --timeout-ms 5000
+
+Acceptance:
+	•	Request uses schema = H("rpc.v1"), reply uses schema = H("rpc.res.v1").
+	•	Replies carry parent_id = request.msg_id.
+	•	ok:true => result present; ok:false => error present.
+	•	Idempotency: repeated (method, client_id, idem) yields the same result and no duplicate side-effects.
+
+⸻
+
+1.6 CRDT overlay (CRDT0)
+
+GOAL: LWW, OR-Set, and G-Counter semantics hold when replayed via VEEN logs.
+
+Examples:
+	•	LWW register:
+
+veen-cli crdt-lww set \
+  --hub http://127.0.0.1:8080 \
+  --client ~/.veen/client1 \
+  --stream crdt/main \
+  --key foo \
+  --value "A" \
+  --ts 1
+
+veen-cli crdt-lww set \
+  --hub http://127.0.0.1:8080 \
+  --client ~/.veen/client1 \
+  --stream crdt/main \
+  --key foo \
+  --value "B" \
+  --ts 2
+
+veen-cli crdt-lww get \
+  --hub http://127.0.0.1:8080 \
+  --stream crdt/main \
+  --key foo
+# => "B"
+
+	•	OR-Set, G-Counter have analogous flows.
+
+Acceptance:
+	•	Snapshots up to upto_seq are deterministic and match the CRDT spec.
+	•	Replaying from CHECKPOINT + receipts yields the same CRDT state.
+
+⸻
+
+1.7 Anchoring (ANCHOR0)
+
+GOAL: Hub anchors MMR roots externally and auditors can verify the binding.
+
+Flow:
+	•	Start hub with anchoring backend configured (file or dummy ledger).
+	•	Let hub run until it emits CHECKPOINTs with anchor_ref.
+	•	From WSL:
+
+veen-cli verify-anchor \
+  --checkpoint checkpoint.cbor
+
+Acceptance:
+	•	verify-anchor confirms mmr_root → anchor_ref → external backend is consistent.
+	•	Anchor cadence (K receipts or T minutes) is respected.
+
+⸻
+
+1.8 Observability / Compliance / Hardening (OBS0, COMP0, SH0, DR0)
+
+GOAL: Core operational edges exist and behave as specified.
+
+Checks:
+	•	/healthz returns {ok, profile_id, peaks_count, last_stream_seq, last_mmr_root}.
+	•	Metrics include veen_submit_ok_total, veen_submit_err_total{code}, latency histograms, etc.
+	•	Logs are structured JSON per submit (label, client_id_prefix, stream_seq, leaf_hash_prefix, code?, bytes_in, bytes_out, verify_ms, commit_ms).
+	•	Retention and file rotation work (receipts.cborseq, payloads.cborseq, checkpoints.cborseq + index sidecars).
+	•	TLS uses AEAD suites and no compression; bounds checks happen before expensive crypto.
+
+All covered by veen-selftest core via combined integration + small unit/property tests.
+
+⸻
+
+2. Overlay Integration GOALs (VEEN v0.0.1+)
+
+These are the “+” features: FED1, AUTH1, KEX1+, SH1+, LCLASS0, META0+.
+
+2.1 Federation & single-primary discipline (FED1 + AUTH1)
+
+GOAL: Primary/replica/bridge topology with single writer per label.
+
+Flow (from WSL):
+
+# primary hub
+veen-hub run \
+  --role primary \
+  --listen 127.0.0.1:8080 \
+  --data-dir ~/.veen/hub-primary
+
+# replica hub
+veen-hub run \
+  --role replica \
+  --listen 127.0.0.1:8081 \
+  --data-dir ~/.veen/hub-replica
+
+# bridge primary -> replica
+veen-bridge run \
+  --from http://127.0.0.1:8080 \
+  --to   http://127.0.0.1:8081
+
+Set authority:
+
+PRIMARY_ID=$(veen-cli hub-id --hub http://127.0.0.1:8080)
+REPLICA_ID=$(veen-cli hub-id --hub http://127.0.0.1:8081)
+
+veen-cli authority set \
+  --realm default \
+  --stream fed/chat \
+  --primary-hub $PRIMARY_ID \
+  --replica-hub $REPLICA_ID
+
+Tests:
+	1.	Send to primary → success.
+	2.	Send directly to replica → E.AUTH/E.CAP (not primary for label).
+	3.	Stream from replica → primary’s events appear via bridge.
+	4.	On both hubs, veen-cli audit --stream fed/chat shows identical mmr_root and stream_seq.
+
+All run by veen-selftest overlays --subset fed-auth.
+
+⸻
+
+2.2 Key/identity lifecycle and revocation (KEX1+)
+
+GOAL: Enforce client_id lifetime, per-client msg caps, and revocation.
+
+Flow:
+	•	Start hub with:
+	•	max_client_id_lifetime_sec
+	•	max_msgs_per_client_id_per_label
+	•	Use veen-cli to:
+	1.	Hit the message cap for a client_id → next send fails with E.CAP/E.AUTH.
+	2.	Wait (or simulate) client_id lifetime expiry → sends fail.
+	3.	Revoke client-id, auth-ref, cap-token via:
+
+veen-cli revoke \
+  --hub http://127.0.0.1:8080 \
+  --kind client-id|auth-ref|cap-token \
+  --target <value>
+
+
+
+Acceptance:
+	•	All three revocation kinds take effect immediately for new writes.
+	•	Revocation state is carried in the log and can be audited.
+
+⸻
+
+2.3 Hardening pipeline (SH1+)
+
+GOAL: Full Stage0–Stage3 admission pipeline behaves correctly under normal and adversarial load.
+
+Checks (driven by veen-selftest overlays --subset sh1):
+	•	Oversized payloads fail at Stage0 (length checks) with E.SIZE / HTTP 413.
+	•	Malformed CBOR / unknown keys fail at Stage1 with E.SIZE.
+	•	Bad signatures fail at Stage2 with E.SIG / HTTP 409.
+	•	Unauthorized / over-rate traffic fails at Stage2 with E.AUTH/E.CAP/E.RATE.
+	•	Invariant violations fail at Stage3 with E.SEQ/E.DUP/E.PROFILE.
+	•	Optional PoW / stateless cookie: requests without a valid cookie are blocked during overload; valid cookie passes.
+
+Bounds-first is enforced: crypto is not invoked for obvious garbage.
+
+⸻
+
+2.4 Label classification (LCLASS0)
+
+GOAL: Label classes influence padding, rate, and retention without exposing payload contents.
+
+Flow:
+
+# Set label classes as admin
+veen-cli label-class set \
+  --realm default \
+  --label chat/user \
+  --class user \
+  --sensitivity medium \
+  --retention-hint 86400
+
+veen-cli label-class set \
+  --realm default \
+  --label wallet/main \
+  --class wallet \
+  --sensitivity high \
+  --retention-hint 2592000
+
+veen-cli label-class set \
+  --realm default \
+  --label log/ingest \
+  --class log \
+  --sensitivity low \
+  --retention-hint 86400
+
+# Inspect classification view
+veen-cli label-class show \
+  --hub http://127.0.0.1:8080 \
+  --label HEX32 \
+  --json
+
+veen-cli label-class list \
+  --hub http://127.0.0.1:8080 \
+  --class user
+
+Tests:
+	•	Short payloads to each label must result in different ciphertext lengths per configured pad_block (e.g. 256 vs 1024 vs 0).
+	•	Rate-limit and retention policies follow the label class configuration.
+	•	All of this happens without hub ever seeing decrypted payloads.
+	•	veen-cli label-class show/list reflect the hub’s classification view in text and JSON output.
+
+⸻
+
+2.5 Schema metadata (META0+)
+
+GOAL: Schema registry maps schema_id to human-readable metadata and coordinates overlays (RPC, wallet, CRDT, etc.).
+
+Flow:
+
+# Register a schema
+SCHEMA_ID=$(veen-cli schema-id "wallet.transfer.v1")
+
+veen-cli schema register \
+  --realm default \
+  --schema-id $SCHEMA_ID \
+  --name "wallet.transfer.v1" \
+  --version "v1" \
+  --doc-url "https://example.com/wallet-transfer" \
+  --owner ~/.veen/admin.pub
+
+# Use schema in a wallet-like message
+veen-cli wallet transfer \
+  --hub http://127.0.0.1:8080 \
+  --client ~/.veen/client1 \
+  --stream wallet/main \
+  --to "user2" \
+  --amount "100"
+
+Acceptance:
+	•	veen-cli schema list shows the registered schema.
+	•	Messages that use this schema_id can be introspected by tooling (debug/CLI) even though the hub sees only ciphertext.
+	•	Unregistered/unknown schemas are still transmitted, but tooling can report them as “unknown schema”.
+
+⸻
+
+2.6 Combined overlay scenario
+
+GOAL: All overlays cooperate correctly in one integrated run.
+
+Scenario (driven by veen-selftest overlays-full):
+	•	Primary + replica + bridge.
+	•	Label classes configured.
+	•	Schema metadata registered for some RPC/CRDT/wallet messages.
+	•	cap_token issued, authorized, then revoked.
+	•	High RPS traffic to mixed labels (wallet, chat, log, admin) under SH1.
+	•	Clients RESYNC after state loss.
+	•	primary and replica remain consistent (mmr_root, CHECKPOINT, anchor).
+	•	No hub crashes, correct E.* codes everywhere, and health/metrics/logs stay consistent.
+
+If this full scenario passes from WSL, the overlay feature set is considered complete.
+
+⸻
+
+3. Final Acceptance: What “DONE” Means
+
+VEEN v0.0.1+ implementation is “DONE” when:
+	1.	From WSL, you can:
+	•	Start hubs (single, primary/replica),
+	•	Run clients and admin flows via veen-cli,
+	•	Exercise all core and overlay behaviours as above.
+	2.	veen-selftest core passes:
+	•	Core wire format, crypto, MMR, invariants, RPC, CRDT, anchoring, observability, compliance, hardening, deployment mappings.
+	3.	veen-selftest overlays passes:
+	•	Federation (FED1), authority discipline (AUTH1), key/cap lifecycle and revocation (KEX1+), hardening pipeline (SH1+), label classification (LCLASS0), and schema metadata (META0+).
+	4.	veen-selftest all is green on your WSL environment without manual intervention.
+
+At that point you can say, in a very literal sense:
+
+“From WSL, I can operate a full VEEN v0.0.1+ fabric – core + overlays – and verify every property the spec claims, via integration tests.”
+
+
+## CLI-GOALS-1.txt
+
+VEEN CLI v0.0.1 Operational Goal Specification (Tightened)
+Plain ASCII, English only. No overlays beyond v0.0.1 (OP0, KEX0, RESYNC0, RPC0, CRDT0, ANCHOR0, OBS0, COMP0, SH0, DR0, TS0).
+	0.	Scope
+
+This document defines the required capabilities of the VEEN command line interface (CLI) for VEEN v0.0.1.
+
+The CLI must be sufficient to:
+	•	start, stop, and inspect a v0.0.1 hub
+	•	manage client identities and hub keys
+	•	send and receive VEEN messages
+	•	handle attachments
+	•	use capability tokens and admission
+	•	resynchronize and verify client state
+	•	use RPC0 and CRDT0 overlays
+	•	manage external anchoring
+	•	inspect observability, compliance, and hardening behavior
+	•	run the v0.0.1 self test suite
+
+If every requirement below is met, v0.0.1 is considered operationally complete from the CLI.
+	1.	CLI process model
+
+1.1 Binary
+	•	Single binary: veen
+
+1.2 Roles
+
+The CLI supports these roles with no additional binaries:
+	•	hub operator
+	•	client user
+	•	administrator
+	•	auditor
+	•	application developer (RPC/CRDT)
+
+1.3 General rules
+	•	Commands are deterministic given the same filesystem and environment variables.
+	•	Non-zero exit code on error; 0 on success.
+	•	Machine-readable outputs use JSON or CBOR on stdout when explicitly requested.
+	•	Human-facing defaults are single-line or short multi-line text.
+
+	2.	Hub control
+
+2.1 Start hub
+
+Command shape:
+
+veen hub start 
+–listen 0.0.0.0:8080 
+–data-dir /path/to/data 
+[–config /path/to/config.toml] 
+[–profile-id hex32] 
+[–foreground] 
+[–log-level info|debug|warn|error]
+
+Requirements:
+	•	Starts a hub implementing:
+	•	v0.0.1 core wire objects (MSG, RECEIPT, CHECKPOINT, mmr_proof)
+	•	OP0 (operational profile)
+	•	KEX0 (hub key pin and rotation)
+	•	RESYNC0
+	•	RPC0
+	•	CRDT0
+	•	ANCHOR0
+	•	OBS0
+	•	COMP0
+	•	SH0
+	•	DR0
+	•	TS0
+	•	Creates or reuses the directory tree under data-dir:
+	•	data-dir/receipts.cborseq
+	•	data-dir/payloads.cborseq (if enabled)
+	•	data-dir/checkpoints.cborseq
+	•	data-dir/anchors/…
+	•	data-dir/state/…
+	•	Listens on the specified address for:
+	•	POST /submit
+	•	GET  /stream
+	•	GET  /checkpoint_latest
+	•	GET  /checkpoint_range
+	•	POST /authorize
+	•	POST /report_equivocation
+	•	GET  /healthz
+	•	GET  /metrics
+
+2.2 Stop hub
+
+Command:
+
+veen hub stop 
+–data-dir /path/to/data
+
+Requirements:
+	•	Locates the running hub associated with data-dir (PID file or similar).
+	•	Requests graceful shutdown.
+	•	Waits until:
+	•	receipts.cborseq is flushed
+	•	checkpoints.cborseq is flushed
+	•	current peaks are checkpointed
+	•	anchoring queue is drained or cleanly persisted
+
+2.3 Hub status
+
+Command:
+
+veen hub status 
+–hub http://host:port
+
+Output:
+	•	role: string (for v0.0.1 minimal: “standalone”; federation role is out of scope here)
+	•	profile_id: hex32
+	•	peaks_count: uint
+	•	last_stream_seq: uint (for a requested label or all labels)
+	•	uptime_sec: uint
+	•	data_dir: path (if reported)
+
+	3.	Hub keys (KEX0 subset)
+
+3.1 Show hub public key
+
+Command:
+
+veen hub key 
+–hub http://host:port
+
+Output:
+	•	hub_pk: hex32 (Ed25519 public key)
+	•	profile_id: hex32
+	•	may include a hash identifier: H(hub_pk || profile_id)
+
+3.2 Hub key rotation (admin view)
+
+Actual rotation mechanism is out of scope for CLI v0.0.1; however the CLI MUST:
+	•	be able to fetch CHECKPOINTs with witness_sigs (old and new hub keys) and:
+	•	verify that both signatures are valid during rotation window.
+
+Command:
+
+veen hub verify-rotation 
+–checkpoint checkpoint.cbor 
+–old-key old_hub_pk.hex 
+–new-key new_hub_pk.hex
+	4.	Client identity and key management
+
+4.1 Generate client identity
+
+Command:
+
+veen keygen 
+–out /path/to/client
+
+Requirements:
+	•	Generate id_sign (Ed25519 private key).
+	•	Generate id_dh (X25519 private key).
+	•	Generate initial HPKE prekeys signed by id_sign.
+	•	Create:
+	•	/path/to/client/keystore.enc
+	•	/path/to/client/identity_card.pub
+	•	/path/to/client/state.json or equivalent
+	•	identity_card.pub contains the public portion (id_sign public, id_dh public, metadata).
+
+4.2 Show client identity
+
+Command:
+
+veen id show 
+–client /path/to/client
+
+Output:
+	•	client_id: hex32 (current Ed25519 public key used as MSG.client_id)
+	•	id_sign_public: hex32
+	•	id_dh_public: hex32
+	•	profile_id (if pinned)
+	•	local state summary (last_stream_seq per label, last_mmr_root per label)
+
+4.3 Rotate client_id (KEX0)
+
+Command:
+
+veen id rotate 
+–client /path/to/client
+
+Requirements:
+	•	Generate a new Ed25519 keypair used for client_id.
+	•	Generate new prekeys signed by id_sign.
+	•	Store local linkage metadata in client state only.
+	•	Do not emit any wire-visible linkage identifier.
+
+	5.	Message send and receive
+
+5.1 Send MSG
+
+Minimal command:
+
+veen send 
+–hub http://host:port 
+–client /path/to/client 
+–stream stream/name 
+–body ‘{“k”:“v”}’
+
+Parameters:
+	•	–stream: logical stream name, mapped to stream_id via H(stream/name).
+	•	–body: JSON string, encoded as CBOR for payload body.
+	•	Optional:
+	•	–schema hex32 (if the caller wants a specific payload_hdr.schema)
+	•	–expires-at unix_timestamp
+	•	–cap cap.cbor (to use a capability token)
+	•	–no-store-body (do not store payloads.cborseq locally)
+
+Mandatory behavior:
+	•	Load client keys and local state for this label (stream + epoch).
+	•	Compute label based on routing_secret, stream_id, and epoch.
+	•	Build payload_hdr with:
+	•	schema (explicit or default)
+	•	parent_id (if provided via option)
+	•	att_root (provided or omitted)
+	•	cap_ref (if using cap inside payload)
+	•	expires_at (if provided)
+	•	Run HPKE.SealSetup and HPKE.Seal for payload_hdr.
+	•	Derive k_body via HPKE.Export.
+	•	Compute nonce from (label, prev_ack, client_id, client_seq).
+	•	AEAD encrypt body with k_body and nonce.
+	•	Apply padding if pad_block > 0 from the profile.
+	•	Compute ct_hash = H(ciphertext).
+	•	Compute leaf_hash and msg_id.
+	•	Construct MSG map in correct field order.
+	•	Sign MSG.sig = Ed25519(Ht(“veen/sig”, CBOR(MSG without sig))).
+	•	POST MSG to /submit.
+	•	Receive RECEIPT or error.
+
+Postconditions if RECEIPT is returned:
+	•	Verify hub_sig.
+	•	Verify I1..I12 for (MSG, RECEIPT).
+	•	Update local MMR state for the label (stream_seq, peaks, mmr_root).
+	•	Update prev_ack to the new stream_seq.
+
+5.2 Receive MSG via stream
+
+Command:
+
+veen stream 
+–hub http://host:port 
+–client /path/to/client 
+–stream stream/name 
+[–from N] 
+[–with-proof]
+
+Behavior:
+	•	Map stream to label as in send.
+	•	GET /stream?label=…&from=N&with_proof=(0|1).
+	•	For each {RECEIPT, MSG, mmr_proof?} triple:
+	•	Verify hub_sig.
+	•	Verify invariants I1..I12.
+	•	If with_proof, verify mmr_proof against RECEIPT.mmr_root.
+	•	Update local MMR state.
+	•	Decrypt MSG for this client:
+	•	Reconstruct HPKE ctx or re-open as needed.
+	•	Recompute nonce.
+	•	AEAD decrypt.
+	•	Output:
+	•	stream_seq
+	•	msg_id (leaf_hash)
+	•	payload_hdr fields
+	•	body (as JSON if possible)
+
+	6.	Attachments
+
+6.1 Send with attachments
+
+Command:
+
+veen send 
+–hub http://host:port 
+–client /path/to/client 
+–stream stream/att 
+–body ‘{“k”:“v”}’ 
+–attach ./file1.bin 
+–attach ./file2.bin
+
+Behavior:
+	•	For each attachment i:
+	•	Derive k_att = HPKE.Export(ctx, “veen/att-k” || u64be(i)).
+	•	Derive n_att from msg_id and i.
+	•	Encrypt attachment bytes b to ciphertext c.
+	•	Compute coid = H(c).
+	•	Compute att_root as Merkle root over coids according to spec.
+	•	Place att_root into payload_hdr.att_root.
+	•	Optionally store encrypted attachments locally keyed by coid.
+
+6.2 Verify attachments
+
+Command:
+
+veen attachment verify 
+–msg msg.cbor 
+–file ./file1.bin 
+–index i
+
+Requirements:
+	•	Recompute coid for attachment i.
+	•	Recompute att_root from all coids.
+	•	Verify equality with payload_hdr.att_root.
+	•	Exit 0 if matched, non-zero if mismatched.
+
+	7.	Capability tokens and admission
+
+7.1 Issue cap_token
+
+Command:
+
+veen cap issue 
+–issuer /path/to/issuer 
+–subject /path/to/subject.pub 
+–stream stream/name 
+–ttl SECONDS 
+[–rate “PER_SEC,BURST”] 
+–out cap.cbor
+
+Behavior:
+	•	Build cap_token:
+	•	ver = 1
+	•	issuer_pk = issuer public key
+	•	subject_pk = subject public key
+	•	allow.stream_ids = [ stream_id ]
+	•	allow.ttl = ttl
+	•	allow.rate = optional rate map
+	•	sig_chain = signatures as per Ht(“veen/cap-link”, …)
+	•	Write CBOR to cap.cbor.
+
+7.2 Authorize with hub
+
+Command:
+
+veen cap authorize 
+–hub http://host:port 
+–cap cap.cbor
+
+Behavior:
+	•	POST cap_token to /authorize.
+	•	On success, read {auth_ref, expires_at}.
+	•	Display auth_ref as hex32.
+	•	Optionally cache mapping cap.cbor -> auth_ref for later sends.
+
+7.3 Use cap in send
+
+Command:
+
+veen send 
+–hub http://host:port 
+–client /path/to/client 
+–cap cap.cbor 
+–stream stream/name 
+–body ‘{“k”:“v”}’
+
+Behavior:
+	•	Compute auth_ref from cap.cbor if not cached.
+	•	Set MSG.auth_ref = auth_ref.
+	•	All other behavior as in basic send.
+
+	8.	Errors and limits
+
+8.1 Display errors
+
+Any command that calls the hub must:
+	•	If HTTP success:
+	•	parse CBOR(RECEIPT) and continue.
+	•	If HTTP error:
+	•	parse CBOR({code, detail?}) if present.
+	•	print code and optional detail.
+	•	exit non-zero.
+
+8.2 Explain error codes
+
+Command:
+
+veen explain-error E.CODE
+
+Behavior:
+	•	Print a one-line description of:
+	•	E.SIG
+	•	E.SIZE
+	•	E.SEQ
+	•	E.CAP
+	•	E.AUTH
+	•	E.RATE
+	•	E.PROFILE
+	•	E.DUP
+	•	E.TIME
+
+	9.	Client state, resync, and durable storage (RESYNC0)
+
+9.1 Local state layout
+
+For each client directory, the CLI and client library must maintain:
+	•	state.json:
+	•	profile_id
+	•	hub pins (optional)
+	•	per-label:
+	•	last_stream_seq
+	•	last_mmr_root (hex32)
+	•	prev_ack for send
+	•	MMR peaks per label (separate file or encoded in state.json)
+	•	rekey material rk per label or per profile
+
+9.2 Resync stream
+
+Command:
+
+veen resync 
+–hub http://host:port 
+–client /path/to/client 
+–stream stream/name
+
+Behavior:
+	•	Load local state snapshot for label.
+	•	Query hub via stream?from=last_stream_seq+1 with with_proof=1.
+	•	For each new element:
+	•	verify RECEIPT, mmr_proof, and invariants
+	•	update local MMR, last_stream_seq, last_mmr_root
+	•	If any divergence is detected (roots mismatch or proofs fail):
+	•	fetch checkpoint_latest for the label
+	•	rebuild local peaks from CHECKPOINT
+	•	replay receipts from appropriate earlier stream_seq
+	•	Persist updated state atomically (state + peaks).
+
+9.3 Verify state
+
+Command:
+
+veen verify-state 
+–hub http://host:port 
+–client /path/to/client 
+–stream stream/name
+
+Behavior:
+	•	Fetch checkpoint_latest and stream summary from hub.
+	•	Compare local last_stream_seq and last_mmr_root with hub.
+	•	Report:
+	•	consistent: yes/no
+	•	mismatch at stream_seq k if discovered.
+
+	10.	RPC overlay (RPC0)
+
+10.1 RPC request
+
+Command:
+
+veen rpc call 
+–hub http://host:port 
+–client /path/to/client 
+–stream rpc/main 
+–method method_name 
+–args ‘{“k”:“v”}’ 
+[–timeout-ms 5000] 
+[–idem 12345]
+
+Behavior:
+	•	Build payload_hdr.schema = H(“rpc.v1”).
+	•	Body:
+	•	method: text
+	•	args: CBOR from JSON
+	•	timeout_ms: if provided
+	•	reply_to: optional bstr(32); default is implicit correlation via msg_id.
+	•	idem: optional u64 if provided.
+	•	Send as MSG on stream rpc/main.
+	•	Wait for a reply MSG with:
+	•	payload_hdr.schema = H(“rpc.res.v1”)
+	•	parent_id = request.msg_id
+	•	Decrypt reply and output:
+	•	on ok=true: print result as JSON.
+	•	on ok=false: print error.code and error.detail.
+
+Timeout handling:
+	•	If no reply by timeout-ms:
+	•	exit non-zero with a timeout indication.
+	•	RPC semantics remain idempotent due to idem key.
+
+	11.	CRDT overlay (CRDT0)
+
+11.1 LWW register
+
+Commands:
+
+veen crdt lww set 
+–hub http://host:port 
+–client /path/to/client 
+–stream crdt/main 
+–key key_name 
+–value “value” 
+[–ts 123]
+
+veen crdt lww get 
+–hub http://host:port 
+–client /path/to/client 
+–stream crdt/main 
+–key key_name
+
+Behavior:
+	•	set:
+	•	schema = H(“crdt.lww.v1”)
+	•	body = {key: bytes, ts: u64 (supplied or from local clock), value: bytes}
+	•	get:
+	•	fetch all relevant CRDT messages up to last_stream_seq via stream
+	•	fold them into CRDT state
+	•	apply tie-breaking by (ts, stream_seq)
+	•	print final value or “unset” if none.
+
+11.2 OR-set
+
+Commands:
+
+veen crdt orset add 
+–hub http://host:port 
+–client /path/to/client 
+–stream crdt/main 
+–elem “value”
+
+veen crdt orset remove 
+–hub http://host:port 
+–client /path/to/client 
+–stream crdt/main 
+–elem “value”
+
+veen crdt orset list 
+–hub http://host:port 
+–client /path/to/client 
+–stream crdt/main
+
+Behavior:
+	•	add:
+	•	schema = H(“crdt.orset.v1”)
+	•	body = {id: random 32 bytes, elem: bytes}
+	•	remove:
+	•	schema = H(“crdt.orset.v1”)
+	•	body = {tomb: [ids for elem to be removed]}
+	•	list:
+	•	reconstruct add / remove history via receipts
+	•	output the current set of elements.
+
+11.3 G-counter
+
+Commands:
+
+veen crdt counter add 
+–hub http://host:port 
+–client /path/to/client 
+–stream crdt/main 
+–delta 5
+
+veen crdt counter get 
+–hub http://host:port 
+–client /path/to/client 
+–stream crdt/main
+
+Behavior:
+	•	add:
+	•	schema = H(“crdt.gcnt.v1”)
+	•	body = {shard: client_id, delta: u64}
+	•	get:
+	•	sum deltas across shards up to last_stream_seq
+	•	print total as integer.
+
+	12.	Anchoring (ANCHOR0)
+
+12.1 Publish anchor (hub-side behavior, CLI as controller)
+
+Command:
+
+veen anchor publish 
+–hub http://host:port 
+–stream stream/name 
+[–epoch E] 
+[–ts T] 
+[–nonce hex…]
+
+Behavior:
+	•	Ask hub (if supported) to publish mmr_root to its configured anchoring backend for the label.
+	•	Receive anchor_ref and print it.
+
+12.2 Verify anchor
+
+Command:
+
+veen anchor verify 
+–checkpoint checkpoint.cbor
+
+Behavior:
+	•	Read checkpoint:
+	•	mmr_root
+	•	anchor_ref (if present)
+	•	Query configured anchor backend to verify that anchor_ref binds to mmr_root.
+	•	Exit 0 on success, non-zero on mismatch.
+
+	13.	Observability (OBS0) and compliance (COMP0)
+
+13.1 Health
+
+Command:
+
+veen hub health 
+–hub http://host:port
+
+Behavior:
+	•	GET /healthz.
+	•	Print JSON:
+	•	ok: bool
+	•	profile_id: hex32
+	•	peaks_count: uint
+	•	last_stream_seq: uint
+	•	last_mmr_root: hex32
+
+13.2 Metrics
+
+Command:
+
+veen hub metrics 
+–hub http://host:port 
+[–raw]
+
+Behavior:
+	•	GET /metrics.
+	•	If –raw: print raw metrics text.
+	•	Else: print summarized counters and histograms:
+	•	submit_ok_total
+	•	submit_err_total by code
+	•	verify_latency_ms summary
+	•	commit_latency_ms summary
+	•	end_to_end_latency_ms summary
+
+13.3 Retention inspection
+
+Command:
+
+veen retention show 
+–data-dir /path/to/data
+
+Behavior:
+	•	Report configured retention for:
+	•	receipts.cborseq
+	•	payloads.cborseq
+	•	checkpoints.cborseq
+	•	Show current on-disk files and their rotation boundaries.
+
+	14.	Security hardening (SH0)
+
+14.1 Bounds-first confirmation
+
+No separate user command is required; instead, CLI self tests (section 15) must include:
+	•	sending oversized payloads
+	•	malformed CBOR
+	•	ensuring hub responds with E.SIZE before any heavy work
+
+14.2 TLS introspection
+
+Command:
+
+veen hub tls-info 
+–hub https://host:port
+
+Behavior:
+	•	Show TLS version and cipher suite in use.
+	•	Confirm AEAD and no compression if possible.
+
+	15.	Test suite (TS0)
+
+15.1 Core tests
+
+Command:
+
+veen selftest core
+
+Behavior:
+	•	Start a temporary hub on random port with a fresh data-dir.
+	•	Run:
+	•	basic send/receive
+	•	attachment round trip
+	•	cap_token issue/authorize/use
+	•	sequence errors
+	•	profile mismatch
+	•	time window errors
+	•	duplicate detection
+	•	RESYNC0 flows
+	•	RPC0 basic calls
+	•	CRDT0 basic operations
+	•	ANCHOR0 dummy backend checks
+	•	Kill hub and clean up data-dir.
+
+15.2 Property and fuzz tests
+
+Command:
+
+veen selftest props
+
+Behavior:
+	•	Run:
+	•	MMR associativity tests
+	•	mmr_proof minimality checks
+	•	duplicate rejection
+	•	CBOR determinism for all wire types
+
+Command:
+
+veen selftest fuzz
+
+Behavior:
+	•	Generate malformed CBOR and truncated inputs for:
+	•	MSG
+	•	RECEIPT
+	•	CHECKPOINT
+	•	mmr_proof
+	•	Verify hub returns E.SIZE or E.SIG as appropriate and does not crash.
+
+15.3 Full test suite
+
+Command:
+
+veen selftest all
+
+Behavior:
+	•	Equivalent to:
+	•	veen selftest core
+	•	veen selftest props
+	•	veen selftest fuzz
+	•	Exit non-zero if any subtest fails.
+
+	16.	Success criteria for VEEN CLI v0.0.1
+
+The CLI is considered v0.0.1-complete when:
+	1.	A hub can be started with a single veen hub start command on a fresh machine and handles all v0.0.1 endpoints.
+	2.	A client identity can be created with a single veen keygen command with no additional tools.
+	3.	From only the CLI and the running hub, a user can:
+	•	send and receive end-to-end encrypted messages
+	•	send and verify attachments
+	•	issue and use capability tokens
+	•	resynchronize and verify client state
+	•	perform RPC0 calls
+	•	operate CRDT0 objects (LWW, OR-set, G-counter)
+	•	read health and metrics
+	•	inspect and verify anchors
+	4.	All invariants I1..I12 are enforced and can be observed via CLI-driven checks.
+	5.	veen selftest all exits with status 0 in a clean environment.
+
+
+## CLI-GOALS-2.txt
+
+VEEN CLI v0.0.1+ Operational Goal Specification (Tightened)
+Plain ASCII, English only. Additive to VEEN CLI v0.0.1. No wire changes.
+	0.	Scope
+
+This document extends the VEEN CLI v0.0.1 Operational Goal Specification for deployments that implement VEEN v0.0.1+ overlays:
+	•	FED1: Federated hubs and authority records
+	•	AUTH1: Label authority and single-primary discipline
+	•	KEX1+: Strengthened key and capability lifecycle
+	•	SH1+: Extended hardening and admission pipeline
+	•	LCLASS0: Label classification overlay
+	•	META0+: Schema registry and discovery overlay
+
+All v0.0.1 core CLI goals remain mandatory. v0.0.1+ goals are additional, not replacements.
+A CLI implementation that satisfies both documents is “VEEN CLI v0.0.1+-complete”.
+	1.	Global CLI conventions for v0.0.1+
+
+1.1 Global flags
+
+Every v0.0.1+ command MUST accept:
+	•	–json : emit machine-readable JSON to stdout only, no extra text
+	•	–quiet : suppress informational text and progress, print errors only
+	•	–timeout-ms N : upper bound on HTTP / RPC round-trip per hub interaction
+
+If both –json and –quiet are provided, –json governs output formatting, and errors MUST be JSON objects with fields:
+	•	ok: false
+	•	code: string
+	•	detail: string?
+
+1.2 Exit codes
+
+The following exit codes are reserved:
+	•	0   : success; all required checks passed
+	•	1   : CLI usage error (missing flags, invalid combinations)
+	•	2   : network or transport failure (hub not reachable, TLS error)
+	•	3   : protocol error (malformed hub response)
+	•	4   : hub-level logical error (E.* from hub or policy violation)
+	•	5   : selftest failure (at least one test case failed)
+
+Commands MAY use additional non-zero codes for finer-grained scripting but MUST treat 0 vs non-zero as success vs failure.
+
+1.3 Determinism
+
+For all v0.0.1+ commands:
+	•	Given the same:
+	•	CLI version
+	•	command line arguments
+	•	environment variables
+	•	local filesystem tree
+	•	hub state
+	•	The observable outputs (stdout, stderr, exit code) MUST be bitwise identical.
+
+Randomness (for ids, nonces) is allowed only when explicitly specified; selftests MUST control randomness via fixed seeds or explicit parameters.
+	2.	Hub profile and role introspection
+
+2.1 Hub feature profile
+
+Command:
+
+veen hub profile
+–hub http://host:port
+[–json]
+
+Requirements:
+	•	Perform a single request to obtain a v0.0.1+ capability descriptor. Mechanism is implementation-defined (HTTP endpoint, RPC schema, or admin label), but MUST be documented.
+	•	On success, emit:
+
+Human-readable (default):
+
+version: veen-0.0.1+
+profile_id: HEX32
+hub_id: HEX32
+features:
+core: true|false
+fed1: true|false
+auth1: true|false
+kex1_plus: true|false
+sh1_plus: true|false
+lclass0: true|false
+meta0_plus: true|false
+
+JSON (–json):
+
+{
+“ok”: true,
+“version”: “veen-0.0.1+”,
+“profile_id”: “HEX32”,
+“hub_id”: “HEX32”,
+“features”: {
+“core”: true,
+“fed1”: true,
+“auth1”: true,
+“kex1_plus”: true,
+“sh1_plus”: true,
+“lclass0”: true,
+“meta0_plus”: true
+}
+}
+
+Errors:
+	•	If hub does not support profile introspection: exit 4 with code “E.PROFILE” in JSON or text.
+
+2.2 Hub role for realm/stream
+
+Command:
+
+veen hub role
+–hub http://host:port
+[–realm HEX32]
+[–stream STREAM_NAME]
+[–json]
+
+Definitions:
+	•	stream_id = deterministic mapping from STREAM_NAME to bstr(32); same mapping as used by veen send.
+	•	realm_id:
+	•	if –realm provided: parsed from HEX32
+	•	else: hub default realm (implementation-defined but must be documented)
+
+Behavior:
+	•	With no –stream:
+	•	Print a coarse hub role summary, such as:
+	•	role: “standalone”
+	•	or role: “federated-primary”, “federated-replica”, “observer”
+	•	With –stream:
+	•	Compute stream_id and associated label mapping (same as send).
+	•	Ask hub for label_authority(label) under AUTH1.
+	•	Emit:
+
+Human-readable:
+
+hub_id: HEX32
+realm_id: HEX32
+stream_id: HEX32
+label: HEX32
+policy: single-primary|multi-primary|unspecified
+primary_hub: HEX32 or “none”
+local_is_primary: true|false
+
+JSON:
+
+{
+“ok”: true,
+“hub_id”: “HEX32”,
+“realm_id”: “HEX32”,
+“stream_id”: “HEX32”,
+“label”: “HEX32”,
+“policy”: “single-primary”,
+“primary_hub”: “HEX32”,
+“local_is_primary”: true
+}
+
+Constraints:
+	•	If AUTH1 is not enabled on the hub:
+	•	Exit 4 with code “E.PROFILE” (text or JSON).
+	•	CLI MUST NOT guess policy locally; it MUST use hub view or fail explicitly.
+
+	3.	Federation and authority management (FED1, AUTH1)
+
+3.1 Publish authority record
+
+Command:
+
+veen fed authority publish
+–hub http://host:port
+–realm HEX32
+–stream STREAM_NAME
+–primary-hub HUB_ID_HEX32
+[–replica-hub HUB_ID_HEX32 …]
+–policy single-primary|multi-primary
+–ttl SECONDS
+[–ts UNIX_TIME]
+–admin /path/to/admin-client
+[–json]
+
+Preconditions:
+	•	admin client directory exists and is a valid VEEN client identity.
+	•	Admin client has a capability that authorizes writing veen.fed.authority.v1 to the admin stream for given realm.
+
+Behavior:
+	•	Compute:
+	•	realm_id from –realm
+	•	stream_id from STREAM_NAME mapping
+	•	Build veen.fed.authority.v1 body:
+{
+realm_id: bstr(32),
+stream_id: bstr(32),
+primary_hub: bstr(32),
+replica_hubs: [bstr(32)…],
+policy: text,
+ts: uint (UNIX_TIME or now),
+ttl: uint
+}
+	•	Send as MSG using admin client on stream_fed_admin (derived from realm_id).
+	•	Verify RECEIPT locally (hub_sig, invariants).
+	•	Optionally refresh authority view (see 3.2).
+
+Postconditions:
+	•	On success, print the active record chosen by the hub (after tie-breaking).
+	•	On failure due to capability or policy, propagate code (E.AUTH, E.CAP, etc).
+
+3.2 Show authority record for realm/stream
+
+Command:
+
+veen fed authority show
+–hub http://host:port
+–realm HEX32
+–stream STREAM_NAME
+[–json]
+
+Behavior:
+	•	Compute realm_id and stream_id.
+	•	Query hub for its authority_view[(realm_id, stream_id)] (folded from veen.fed.authority.v1 stream).
+	•	Emit:
+
+Human-readable:
+
+realm_id: HEX32
+stream_id: HEX32
+primary_hub: HEX32 or “none”
+replica_hubs: [HEX32,…] or []
+policy: single-primary|multi-primary|unspecified
+ts: uint
+ttl: uint
+expires_at: uint
+active_now: true|false
+
+JSON with the same fields.
+
+Edge cases:
+	•	If no record exists, CLI prints policy: “unspecified” and active_now: false and exits 0.
+
+3.3 Label authority by label
+
+Command:
+
+veen label authority
+–hub http://host:port
+–label HEX32
+[–json]
+
+Behavior:
+	•	Request label_authority(L) from hub for label = HEX32.
+	•	Emit:
+label: HEX32
+realm_id: HEX32 or “unspecified”
+stream_id: HEX32
+policy: single-primary|multi-primary|unspecified
+primary_hub: HEX32 or “none”
+local_hub_id: HEX32
+locally_authorized: true|false
+
+Use case:
+	•	Diagnose “not primary for label” rejections and misconfigured federation.
+
+	4.	Key and capability lifecycle (KEX1+)
+
+4.1 Hub key and capability policy
+
+Command:
+
+veen hub kex-policy
+–hub http://host:port
+[–json]
+
+Behavior:
+	•	Query KEX1+ policy summary:
+max_client_id_lifetime_sec: uint
+max_msgs_per_client_id_per_label: uint
+default_cap_ttl_sec: uint
+max_cap_ttl_sec: uint
+revocation_stream: stream name or label description
+rotation_window_sec: uint (for hub key rotation) or 0 if not used
+	•	CLI MUST treat absence of values as “unspecified” and show them as null in JSON.
+
+4.2 Client identity usage summary
+
+Command:
+
+veen id usage
+–client /path/to/client
+[–hub http://host:port]
+[–json]
+
+Behavior:
+	•	Read local state for the client (per-label send metadata).
+	•	Optionally, if –hub provided, fetch KEX1+ policy and apply thresholds.
+
+Output per label:
+
+label: HEX32
+stream: logical name if known, else “-”
+client_id: HEX32
+created_at: uint or 0 if unknown
+msgs_sent: uint
+approx_lifetime_sec: uint or 0 if unknown
+exceeds_msg_bound: true|false (if policy known)
+exceeds_lifetime_bound: true|false (if policy known)
+rotation_recommended: true|false
+
+Exit behavior:
+	•	Exit code 0 even if rotation is recommended; the command is informational only.
+
+4.3 Capability validity and hub view
+
+Command:
+
+veen cap status
+–hub http://host:port
+–cap cap.cbor
+[–json]
+
+Behavior:
+	•	Load cap_token from cap.cbor.
+	•	Compute auth_ref = Ht(“veen/cap”, CBOR(cap_token)).
+	•	Derive local validity window:
+	•	issued_at:
+	•	if explicit field inside cap_token: use it
+	•	else: unknown
+	•	ttl from cap_token.allow.ttl
+	•	Query hub via an inspection RPC or admin endpoint:
+request: auth_ref
+response fields:
+known: bool
+currently_valid: bool
+revoked: bool
+expiry: uint? (hub view)
+revocation_kind: “client-id”|“auth-ref”|“cap-token”|null
+revocation_ts: uint?
+reason: text?
+
+Compose output:
+
+Human:
+
+auth_ref: HEX32
+locally_within_ttl: true|false|“unknown”
+hub_known: true|false
+hub_currently_valid: true|false
+revoked: true|false
+revocation_kind: …
+expires_at: uint or “unknown”
+reason: text?
+
+JSON includes all fields plus an “ok”: true flag.
+
+4.4 Publish revocation record
+
+Command:
+
+veen cap revoke
+–hub http://host:port
+–admin /path/to/admin-client
+–kind client-id|auth-ref|cap-token
+–target HEX32
+[–reason TEXT]
+[–ttl SECONDS]
+[–json]
+
+Behavior:
+	•	Build veen.revocation.v1:
+{
+kind: text,
+target: bstr(32),
+reason: text?,
+ts: now,
+ttl: uint?
+}
+	•	Send via admin client on stream_revocation.
+	•	Verify RECEIPT and invariants.
+	•	Print:
+kind, target, ts, ttl, active_now: bool
+
+4.5 List revocations
+
+Command:
+
+veen cap revocations
+–hub http://host:port
+[–kind client-id|auth-ref|cap-token]
+[–since UNIX_TIME]
+[–active-only]
+[–limit N]
+[–json]
+
+Behavior:
+	•	Read revocation stream up to configured limit (or N).
+	•	Fold to current active window at local “now”.
+	•	Filter by:
+	•	kind (if provided)
+	•	ts >= since (if provided)
+	•	active_now (if –active-only)
+	•	Emit a table or JSON list of:
+kind, target, ts, ttl, active_now, reason
+
+	5.	Admission pipeline inspection (SH1+)
+
+5.1 Admission stages overview
+
+Command:
+
+veen hub admission
+–hub http://host:port
+[–json]
+
+Behavior:
+	•	Query hub admission configuration and runtime metrics.
+	•	Emit per stage:
+stage:
+name: text (“stage0-prefilter” etc)
+enabled: bool
+responsibilities: [text]
+queue_depth: uint
+max_queue_depth: uint
+recent_err_rates:
+E.SIZE: float?
+E.SIG: float?
+E.AUTH: float?
+E.CAP: float?
+E.RATE: float?
+
+JSON uses arrays and objects with the same fields.
+
+5.2 Proof-of-work challenge and solver
+
+Command:
+
+veen pow request
+–hub http://host:port
+[–difficulty D]
+[–json]
+
+Behavior:
+	•	Ask the hub (or PoW endpoint) for:
+	•	challenge: bytes
+	•	difficulty: uint8 (recommended difficulty)
+	•	Emit:
+
+Human:
+
+challenge: HEX
+difficulty: D
+
+JSON:
+
+{ “ok”: true, “challenge”: “HEX”, “difficulty”: D }
+
+Command:
+
+veen pow solve
+–challenge HEX
+–difficulty D
+[–max-iterations N]
+[–json]
+
+Behavior:
+	•	Iterate nonce from 0 upward (or within a bounded range if –max-iterations is supplied).
+	•	For each nonce:
+v = Ht(“veen/pow”, challenge || u64be(nonce))
+Check that the first D bits of v are zero.
+	•	On success:
+	•	Print nonce (decimal and hex) and v (optional) in human mode.
+	•	JSON:
+{ “ok”: true, “nonce”: NONCE, “nonce_hex”: “HEX”, “hash_prefix_ok”: true }
+	•	If no solution within bound: exit 4 with an error message.
+
+5.3 Using PoW with send
+
+All send-like commands (veen send, veen rpc call, etc.) MUST accept optional PoW parameters:
+	•	–pow-challenge HEX
+	•	–pow-nonce NONCE
+	•	–pow-difficulty D
+
+Transport binding of PoW cookie is deployment-specific. CLI MUST:
+	•	Attach these parameters exactly as hub expects (e.g., header, RPC field, or side-channel).
+	•	Not alter MSG encoding, RECEIPT handling, or VEEN invariants.
+
+5.4 Admission-log sampling
+
+Command:
+
+veen hub admission-log
+–hub http://host:port
+[–limit N]
+[–codes CODE1,CODE2,…]
+[–json]
+
+Behavior:
+	•	Fetch a recent window of failed admission events via:
+	•	a dedicated observability RPC, or
+	•	a VEEN audit stream filtered by E.* codes.
+	•	Display per event:
+ts: uint
+code: “E.*”
+label_prefix: first 8 hex chars
+client_id_prefix: first 8 hex chars
+detail: short text
+
+Use case: confirm that AUTH1, KEX1+, SH1+ policies are actually enforced and that failures are visible.
+	6.	Label classification overlay (LCLASS0)
+
+6.1 Set label classification
+
+Command:
+
+veen label-class set
+–hub http://host:port
+–realm HEX32
+–label HEX32
+–class TEXT
+[–sensitivity low|medium|high]
+[–retention-hint SECONDS]
+–admin /path/to/admin-client
+[–json]
+
+Behavior:
+	•	Build veen.label.class.v1:
+{
+label: bstr(32),
+class: text,
+sensitivity: text?,
+retention_hint: uint?
+}
+	•	Publish on stream_label_class for the realm via admin client.
+	•	Verify RECEIPT.
+	•	Optionally re-query hub for effective classification and print it.
+
+6.2 Show label classification
+
+Command:
+
+veen label-class show
+–hub http://host:port
+–label HEX32
+[–json]
+
+Behavior:
+	•	Query hub classification view for the label.
+	•	Emit:
+label: HEX32
+class: TEXT or “unset”
+sensitivity: TEXT or “none”
+retention_hint: uint or 0
+pad_block_effective: uint
+retention_policy: TEXT
+rate_policy: TEXT
+	•	CLI MUST treat hub values as authoritative; no local heuristics.
+	•	Default output is human-readable text; use “–json” for machine-readable descriptors.
+
+6.3 List label classifications
+
+Command:
+
+veen label-class list
+–hub http://host:port
+[–realm HEX32]
+[–class TEXT]
+[–json]
+
+Behavior:
+	•	Query all known label classifications in the realm or deployment.
+	•	Filter by class if provided.
+	•	Print a compact table or JSON array of:
+label, class, sensitivity, retention_hint
+	•	“–json” returns the descriptor entries as an array for automation.
+
+	7.	Schema registry overlay (META0+)
+
+7.1 Register schema descriptor
+
+Command:
+
+veen schema register
+–hub http://host:port
+–realm HEX32
+–name TEXT
+–version TEXT
+[–doc-url TEXT]
+[–owner HEX32]
+[–schema-id HEX32]
+–admin /path/to/admin-client
+[–json]
+
+Behavior:
+	•	schema_id selection:
+	•	if –schema-id provided: parse HEX32.
+	•	else: schema_id = H(“veen/schema:” || name) or equivalent documented rule.
+	•	Build veen.meta.schema.v1:
+{
+schema_id: bstr(32),
+name: text,
+version: text,
+doc_url: text?,
+owner: bstr(32)?,
+ts: now
+}
+	•	Publish on stream_schema_meta via admin client.
+	•	Verify RECEIPT.
+	•	Emit the registered descriptor (including schema_id).
+
+7.2 Show schema descriptor
+
+Command:
+
+veen schema show
+–hub http://host:port
+–schema-id HEX32
+[–json]
+
+Behavior:
+	•	Lookup schema_id in hub registry.
+	•	Emit:
+schema_id: HEX32
+name: TEXT
+version: TEXT
+doc_url: TEXT or “none”
+owner: HEX32 or “none”
+ts: uint
+used_labels: [HEX32,…]?   (optional summary)
+used_count: uint?           (approximate)
+
+If schema_id is unknown, exit 4 with code “E.SEQ” or “E.PROFILE”.
+
+7.3 List schemas
+
+Command:
+
+veen schema list
+–hub http://host:port
+[–realm HEX32]
+[–name-prefix TEXT]
+[–owner HEX32]
+[–json]
+
+Behavior:
+	•	List schema descriptors matching filters.
+	•	Provide at least:
+schema_id, name, version, owner, ts
+
+7.4 Schema usage inspection (optional but recommended)
+
+Command:
+
+veen schema usage
+–hub http://host:port
+–schema-id HEX32
+[–stream STREAM_NAME]
+[–since UNIX_TIME]
+[–limit N]
+[–json]
+
+Behavior:
+	•	Optionally implemented to scan recent messages and show where a schema is used (labels, counts).
+	•	Pure overlay; no wire changes.
+
+	8.	Extended self tests for v0.0.1+
+
+8.1 Federated behavior (FED1, AUTH1)
+
+Command:
+
+veen selftest federated
+[–json]
+
+Behavior:
+	•	Start two temporary hubs (hubA, hubB) with shared realm and distinct hub_ids.
+	•	Run the following deterministic sequence:
+	•	Publish authority record pointing primary_hub = hubA for test stream S.
+	•	Confirm via:
+	•	veen fed authority show
+	•	veen hub role –stream S
+	•	Using a client:
+	•	Send MSG for S to hubA: MUST succeed.
+	•	Send MSG for S to hubB: MUST fail with E.AUTH or E.CAP.
+	•	Switch primary_hub to hubB in a new authority record (higher ts).
+	•	Confirm authority view flips.
+	•	Repeat send tests with reversed roles.
+	•	If any check fails, exit 5 and report failing step.
+
+8.2 Lifecycle and revocation (KEX1+)
+
+Command:
+
+veen selftest kex1
+[–json]
+
+Behavior:
+	•	Start a hub with KEX1+ enabled and tight bounds for test (e.g. max_msgs_per_client_id_per_label = 3).
+	•	Generate a client and capability.
+	•	Test:
+	•	Send up to the bound: all succeed.
+	•	One additional send: hub MUST reject with E.CAP/E.AUTH; CLI verifies.
+	•	Issue a short-ttl capability; after expiry, confirm rejection.
+	•	Publish revocations for:
+	•	client-id
+	•	auth-ref
+	•	Confirm that subsequent sends with revoked identity or capability fail.
+	•	Collect all steps in a JSON summary when –json is provided.
+
+8.3 Hardening behavior (SH1+)
+
+Command:
+
+veen selftest hardened
+[–json]
+
+Behavior:
+	•	Against a hub with SH1+ enabled:
+	•	Send oversized MSG:
+	•	Ensure E.SIZE is returned; hub remains responsive.
+	•	Send malformed CBOR:
+	•	Ensure E.SIZE or equivalent structural error, no crash.
+	•	If PoW is configured:
+	•	Call veen pow request, then veen pow solve for a small difficulty.
+	•	Send a batch of MSG with valid PoW: majority MUST succeed.
+	•	Send similar batch without PoW: hub SHOULD throttle or reject with policy-specific errors.
+	•	Selftest reports whether bounds-first behavior holds (size check before Ed25519/HPKE).
+
+8.4 Label and schema overlays (LCLASS0, META0+)
+
+Command:
+
+veen selftest meta
+[–json]
+
+Behavior:
+	•	Start ephemeral hub with all meta overlays enabled.
+	•	For a test label:
+	•	Use veen label-class set to define a class and retention hint.
+	•	Confirm via label-class show and hub metrics that the policy is recognized.
+	•	For a test schema:
+	•	Use veen schema register to register “test.operation.v1”.
+	•	Send a MSG with payload_hdr.schema equal to that id.
+	•	Confirm via schema show and schema list that the schema appears and has non-zero usage.
+
+8.5 Aggregated v0.0.1+ test suite
+
+Command:
+
+veen selftest plus
+[–json]
+
+Behavior:
+	•	Equivalent to:
+	•	veen selftest core
+	•	veen selftest props
+	•	veen selftest fuzz
+	•	veen selftest federated
+	•	veen selftest kex1
+	•	veen selftest hardened
+	•	veen selftest meta
+	•	Exit 0 only if all subtests succeed.
+
+	9.	v0.0.1+ completeness criteria
+
+The VEEN CLI is v0.0.1+-complete if and only if:
+	1.	All VEEN CLI v0.0.1 success criteria are met.
+	2.	Every command specified in this document is implemented with:
+	•	deterministic behavior
+	•	correct use of VEEN wire types
+	•	no modification of MSG, RECEIPT, CHECKPOINT, mmr_proof, or cap_token encodings
+	3.	A hub’s v0.0.1+ behavior (FED1, AUTH1, KEX1+, SH1+, LCLASS0, META0+) can be:
+	•	configured and inspected using CLI only, and
+	•	validated end-to-end via veen selftest plus.
+	4.	For any label in a federated deployment:
+	•	Its authority, classification, schemas, and lifecycle policies can be recovered and inspected using only VEEN logs and CLI tooling, without any external state.
+
+
+## CLI-GOALS-3.txt
+
+VEEN CLI v0.0.1++ Operational Goal Specification (Tightened)
+Plain ASCII, English only. Additive to VEEN CLI v0.0.1 and v0.0.1+. No wire changes.
+	0.	Scope and invariants
+
+0.1 Purpose
+
+This document refines the operational goals for the VEEN CLI when:
+	•	Hubs are deployed as disposable, Kubernetes-native workloads.
+	•	Extended operation profiles on top of VEEN v0.0.1 Core are in use:
+	•	Paid Operation
+	•	Access Grant / Revoke
+	•	Delegated Execution
+	•	Multi Party Agreement
+	•	Data Publication
+	•	State Snapshot
+	•	Recovery Procedure
+	•	Query Audit Log
+	•	Federation Synchronization
+
+0.2 Non-goals
+	•	No change to VEEN wire objects: MSG, RECEIPT, CHECKPOINT, mmr_proof, cap_token.
+	•	No new fields on the wire; all additions are in CLI behavior, Kubernetes manifests, and payload bodies.
+
+0.3 Determinism and reproducibility
+
+The CLI MUST satisfy:
+	•	Given the same inputs (flags, files, environment variables, cluster state) it produces:
+	•	identical manifests for kube render,
+	•	identical payloads for op commands,
+	•	identical JSON outputs for inspection commands (ignoring ordering in purely diagnostic text).
+	•	All destructive operations (delete, purge, restore) MUST require an explicit flag and MUST be idempotent:
+	•	a second invocation on an already-deleted resource MUST exit with success and a clear note.
+
+0.4 Compliance levels
+
+The CLI MAY expose a self-reported level:
+	•	“veen-cli v0.0.1”
+	•	“veen-cli v0.0.1+”
+	•	“veen-cli v0.0.1++”
+
+A v0.0.1++ implementation MUST satisfy all v0.0.1 and v0.0.1+ requirements plus every MUST and required command in this document.
+	1.	CLI surface overview
+
+1.1 Top-level command groups
+
+The v0.0.1++ CLI binary “veen” MUST expose at least these groups:
+	•	hub        (existing)
+	•	keygen     (existing)
+	•	id         (existing)
+	•	send       (existing)
+	•	stream     (existing)
+	•	cap        (existing)
+	•	resync     (existing)
+	•	crdt       (existing)
+	•	rpc        (existing)
+	•	anchor     (existing)
+	•	selftest   (existing)
+
+New for v0.0.1++:
+	•	kube       Kubernetes integration
+	•	env        environments, tenants, realms
+	•	op         extended operation profiles
+	•	wallet     folding of Paid Operation into ledgers
+	•	agreement  folding of agreements
+	•	snapshot   state snapshots
+	•	recovery   account and identity recovery views
+	•	audit      query audits and policy checks
+	•	federate   federation and mirroring helpers
+
+1.2 Global conventions
+	•	All commands accept “–help” and print a short, single-screen usage description.
+	•	All commands accept “–json” when they produce structured output; “–json” MUST result in valid JSON printed to stdout with no extra text.
+	•	Non-zero exit codes MUST be used for:
+	•	input validation errors,
+	•	hub errors (E.*),
+	•	Kubernetes API errors,
+	•	policy violations in verify and audit commands.
+
+	2.	Kubernetes-native deployment (kube)
+
+2.1 Naming and labels
+
+The CLI MUST define a deterministic naming scheme:
+	•	Deployment/StatefulSet name: “veen-hub-NAME”
+	•	Service name: “veen-hub-NAME”
+	•	ConfigMap name: “veen-hub-NAME-config”
+	•	Secret name for hub private keys: “veen-hub-NAME-keys” (unless overridden)
+	•	Label “app=veen-hub” and “veen.hub.name=NAME” applied to all hub pods.
+
+These names MUST be derived solely from:
+	•	“–namespace”
+	•	“–name”
+
+and MUST be stable across invocations.
+
+2.2 kube render
+
+Command:
+
+veen kube render
+–cluster-context CONTEXT
+–namespace NAMESPACE
+–name NAME
+–image IMAGE
+–data-pvc PVC_NAME
+[–replicas N]
+[–resources-cpu REQUEST,LIMIT]
+[–resources-mem REQUEST,LIMIT]
+[–profile-id HEX32]
+[–config /path/to/hub-config.toml]
+[–env-file /path/to/env]
+[–pod-annotations /path/to/annotations.json]
+[–json]
+
+Behavior:
+	•	Does not contact the cluster.
+	•	Reads local files (config, env, annotations) if given.
+	•	Produces a fixed ordered list of objects:
+	•	Namespace (if not suppressed)
+	•	ServiceAccount
+	•	Role
+	•	RoleBinding
+	•	ConfigMap(s)
+	•	Secret template (without private keys)
+	•	Deployment or StatefulSet
+	•	Service
+
+Constraints:
+	•	resource requests and limits:
+	•	“–resources-cpu” is “request,limit”, for example “500m,1”.
+	•	“–resources-mem” is “request,limit”, for example “512Mi,1Gi”.
+	•	Missing limit means “request,request”.
+	•	The container command MUST be equivalent to:
+veen hub start 
+–listen 0.0.0.0:8080 
+–data-dir /var/lib/veen 
+–config /etc/veen/hub-config.toml 
+–profile-id HEX32_FROM_CONFIG_OR_FLAG
+	•	Readiness and liveness:
+	•	Readiness probe: HTTP GET /healthz on port 8080, success on “ok: true”.
+	•	Liveness probe: HTTP GET /healthz with a higher failure threshold.
+	•	These probe definitions MUST be present in rendered pods.
+	•	Security:
+	•	runAsNonRoot: true
+	•	readOnlyRootFilesystem: true
+	•	allowPrivilegeEscalation: false
+
+If “–json” is provided, the CLI MUST output a JSON array of objects with “apiVersion”, “kind”, “metadata”, “spec”.
+
+2.3 kube apply
+
+Command:
+
+veen kube apply
+–cluster-context CONTEXT
+–file MANIFESTS.(yaml|json)
+[–wait-seconds T]
+
+Behavior:
+	•	Apply given manifests to the target cluster and namespace using Kubernetes API.
+	•	If “–wait-seconds T” is set:
+	•	Poll pod conditions of “veen-hub-NAME” until:
+	•	ready replicas equal desired replicas, or
+	•	timeout T seconds.
+	•	On success, print:
+	•	effective namespace
+	•	hub service DNS name:
+	•	“veen-hub-NAME.NAMESPACE.svc.cluster.local:8080”
+
+If the manifests refer to a namespace that does not exist, the CLI MUST create it or report a clear error, depending on presence of Namespace objects in the file.
+
+2.4 kube delete
+
+Command:
+
+veen kube delete
+–cluster-context CONTEXT
+–namespace NAMESPACE
+–name NAME
+[–purge-pvcs]
+
+Behavior:
+	•	Delete Deployment/StatefulSet and Service for “veen-hub-NAME”.
+	•	Always delete Role and RoleBinding owned by that hub.
+	•	If “–purge-pvcs” is set, also delete PVC “PVC_NAME” from kube render.
+	•	If resources are already gone, exit 0 and print “already deleted”.
+
+2.5 kube status
+
+Command:
+
+veen kube status
+–cluster-context CONTEXT
+–namespace NAMESPACE
+–name NAME
+[–json]
+
+Behavior:
+	•	Read Kubernetes Deployment/StatefulSet status.
+	•	If hub pods are reachable, query each pod “/healthz”.
+	•	Output at least:
+	•	deployment_name
+	•	namespace
+	•	desired_replicas
+	•	ready_replicas
+	•	pod list with name, phase, restarts
+	•	health per pod: “ok” or last error
+
+With “–json”, output a JSON object; field names MUST be stable.
+
+2.6 kube logs
+
+Command:
+
+veen kube logs
+–cluster-context CONTEXT
+–namespace NAMESPACE
+–name NAME
+[–pod POD]
+[–follow]
+[–since DURATION]
+
+Behavior:
+	•	If “–pod” omitted:
+	•	pick all pods with label “veen.hub.name=NAME” and stream logs of each sequentially.
+	•	“–since” is a duration like “1h”, “10m”, default “1h”.
+	•	“–follow” keeps the connection open and continues streaming until user interrupts.
+
+The CLI MUST pass logs from Kubernetes unchanged (no reformatting).
+
+2.7 kube backup and restore
+
+Command:
+
+veen kube backup
+–cluster-context CONTEXT
+–namespace NAMESPACE
+–name NAME
+–snapshot-name SNAPNAME
+–target-uri URI
+
+Behavior:
+	•	Contact hub via Service HTTP endpoint.
+	•	Invoke hub backup RPC /admin/backup (deployment specific but CLI spec assumes existence).
+	•	Backup metadata MUST include:
+	•	hub profile_id
+	•	last_stream_seq per label
+	•	last_mmr_root per label
+	•	timestamps
+	•	Backup payload MUST be stored at URI; URI is implementation-specific but has to be a single string.
+
+Command:
+
+veen kube restore
+–cluster-context CONTEXT
+–namespace NAMESPACE
+–name NAME
+–snapshot-name SNAPNAME
+–source-uri URI
+
+Behavior:
+	•	Ensure hub is not running or scaled to zero.
+	•	Recreate data-dir from snapshot.
+	•	Restart hub.
+	•	After restart, CLI MUST call “veen hub status –hub SERVICE_URL” and verify restored last_stream_seq and mmr_root against snapshot metadata; mismatch MUST cause non-zero exit.
+
+	3.	Disposable jobs as clients (kube job)
+
+3.1 General job structure
+
+All “veen kube job” commands MUST:
+	•	Create a Kubernetes Job with:
+	•	single container running the same veen binary
+	•	environment variables taken from:
+	•	“–env-file”
+	•	Secrets config (for keys and caps)
+	•	a volume for client state (either emptyDir or PVC if specified)
+	•	The Job container MUST exit as soon as the requested CLI command terminates.
+
+3.2 kube job send
+
+Command:
+
+veen kube job send
+–cluster-context CONTEXT
+–namespace NAMESPACE
+–hub-service HUB_SERVICE_DNS
+–client-secret SECRET_NAME
+–stream STREAM_NAME
+–body ‘{“k”:“v”}’
+[–cap-secret CAP_SECRET_NAME]
+[–profile-id HEX32]
+[–timeout-ms N]
+[–image IMAGE]
+
+Behavior:
+	•	Construct Job name “veen-job-send-”.
+	•	Mount SECRET_NAME into the pod at “/var/lib/veen-client”:
+	•	keystore.enc
+	•	identity_card.pub
+	•	state.json if present
+	•	If CAP_SECRET_NAME is given, mount capability token CBOR at a fixed path.
+	•	Container command MUST be equivalent to:
+veen send 
+–hub http://HUB_SERVICE_DNS 
+–client /var/lib/veen-client 
+–stream STREAM_NAME 
+–body ‘{“k”:“v”}’ 
+[–cap /var/lib/veen-cap/cap.cbor] 
+[–profile-id HEX32] 
+[–timeout-ms N]
+	•	CLI waits for Job completion. Job status:
+	•	success: print RECEIPT summary (stream_seq, msg_id).
+	•	failure: print CLI stderr from the Job.
+
+The mapping from Job completion to CLI exit code MUST be:
+	•	Job succeeded: CLI exit 0.
+	•	Job failed: CLI exit non-zero.
+
+3.3 kube job stream
+
+Command:
+
+veen kube job stream
+–cluster-context CONTEXT
+–namespace NAMESPACE
+–hub-service HUB_SERVICE_DNS
+–client-secret SECRET_NAME
+–stream STREAM_NAME
+[–from N]
+[–with-proof]
+[–image IMAGE]
+
+Behavior:
+	•	Similar structure to kube job send but invokes “veen stream”.
+	•	Job prints decrypted messages to stdout.
+
+	4.	Environments, tenants, and realms (env)
+
+4.1 Environment descriptor format
+
+Command:
+
+veen env init
+–root ROOT_DIR
+–name ENV_NAME
+–cluster-context CONTEXT
+–namespace NAMESPACE
+[–description TEXT]
+
+Behavior:
+	•	Create directory ROOT_DIR if missing.
+	•	Write file ROOT_DIR/ENV_NAME.env.json with JSON schema:
+{
+“version”: 1,
+“name”: “ENV_NAME”,
+“cluster_context”: “CONTEXT”,
+“namespace”: “NAMESPACE”,
+“description”: “TEXT or empty”,
+“hubs”: {},
+“tenants”: {}
+}
+
+4.2 Env add-hub
+
+Command:
+
+veen env add-hub
+–env ROOT_DIR/ENV_NAME.env.json
+–hub-name NAME
+–service-url URL
+–profile-id HEX32
+[–realm HEX32]
+
+Behavior:
+	•	Load env JSON.
+	•	Insert or update:
+env[“hubs”][NAME] = {
+“service_url”: URL,
+“profile_id”: HEX32,
+“realm_id”: HEX32 or null
+}
+	•	Save back to file atomically.
+
+4.3 Env add-tenant
+
+Command:
+
+veen env add-tenant
+–env ROOT_DIR/ENV_NAME.env.json
+–tenant-id TENANT_ID
+–stream-prefix PREFIX
+[–label-class user|wallet|log|admin|bulk]
+
+Behavior:
+	•	Insert or update:
+env[“tenants”][TENANT_ID] = {
+“stream_prefix”: PREFIX,
+“label_class”: CLASS if provided else “user”
+}
+
+4.4 Env show
+
+Command:
+
+veen env show
+–env ROOT_DIR/ENV_NAME.env.json
+[–json]
+
+Behavior:
+	•	Without “–json”:
+	•	print a human-readable summary of hubs and tenants.
+	•	With “–json”:
+	•	reprint the env JSON verbatim.
+
+Other commands MAY accept:
+	•	“–env PATH” and “–hub-name NAME” instead of “–hub URL”.
+	•	In that case, the CLI MUST resolve the hub URL and profile_id from the env descriptor.
+
+	5.	Operation profile authoring (op)
+
+5.1 Schema resolution
+
+The CLI MUST support named schemas:
+	•	paid.operation.v1
+	•	access.grant.v1
+	•	access.revoke.v1
+	•	delegated.execution.v1
+	•	agreement.definition.v1
+	•	agreement.confirmation.v1
+	•	data.publication.v1
+	•	state.checkpoint.v1
+	•	recovery.request.v1
+	•	recovery.approval.v1
+	•	recovery.execution.v1
+	•	query.audit.v1
+	•	federation.mirror.v1
+
+Mapping:
+	•	schema_id = SHA-256(“veen/schema:” || ascii_name)
+	•	ascii_name is exactly the name above.
+
+The CLI MUST compute this mapping deterministically and MAY also consult a schema registry (META0+) when present.
+
+5.2 op send generic
+
+Command:
+
+veen op send
+–hub URL
+–client CLIENT_DIR
+–stream STREAM_NAME
+–schema-name SCHEMA_NAME
+–body-json JSON_STRING
+[–cap CAP_FILE]
+[–expires-at UNIX_TIME]
+[–parent-id HEX32]
+[–json]
+
+Behavior:
+	•	Compute schema_id from SCHEMA_NAME.
+	•	Parse JSON_STRING into a CBOR body.
+	•	Perform minimal validation:
+	•	All fields required by the schema MUST be present and of correct basic type (text, uint, bstr, array).
+	•	Call “veen send” internally with:
+	•	payload_hdr.schema = schema_id
+	•	body = CBOR(body)
+
+With “–json”, output:
+
+{
+“stream_seq”: N,
+“msg_id”: “HEX32”,
+“operation_id”: “HEX32”,
+“schema_name”: “SCHEMA_NAME”
+}
+
+5.3 op paid
+
+Command:
+
+veen op paid
+–hub URL
+–client CLIENT_DIR
+–stream STREAM_NAME
+–op-type OP_TYPE
+–payer HEX32
+–payee HEX32
+–amount UINT
+–currency-code TEXT
+[–op-args-json JSON]
+[–ttl-seconds UINT]
+[–op-ref HEX32]
+[–parent-op HEX32]
+[–cap CAP_FILE]
+[–json]
+
+Behavior:
+	•	Build body:
+{
+“operation_type”: OP_TYPE,
+“operation_args”: JSON or null,
+“payer_account”: payer bstr,
+“payee_account”: payee bstr,
+“amount”: amount,
+“currency_code”: TEXT,
+“operation_reference”: op-ref or null,
+“parent_operation_id”: parent-op or null,
+“ttl_seconds”: ttl or null,
+“metadata”: null
+}
+	•	Use payload_hdr.schema = schema_id for paid.operation.v1.
+	•	Use “veen send” under the hood.
+	•	Print RECEIPT and “operation_id = Ht(“veen/operation-id”, msg_id)” as HEX32.
+
+5.4 op access-grant and op access-revoke
+
+Commands:
+
+veen op access-grant
+–hub URL
+–admin ADMIN_CLIENT_DIR
+–subject-identity HEX32
+–stream STREAM_NAME
+–expiry-time UNIX_TIME
+[–allowed-stream STREAM_ID_HEX] (repeatable)
+[–max-rate-per-second UINT]
+[–max-burst UINT]
+[–max-amount UINT]
+[–currency-code TEXT]
+[–reason TEXT]
+
+Behavior:
+	•	If “–allowed-stream” is absent:
+	•	default to stream_id derived from STREAM_NAME.
+	•	Construct access.grant.v1 payload with given fields.
+
+veen op access-revoke
+–hub URL
+–admin ADMIN_CLIENT_DIR
+–subject-identity HEX32
+[–target-cap-ref HEX32]
+[–reason TEXT]
+
+Behavior:
+	•	Construct access.revoke.v1 payload.
+
+5.5 op delegated
+
+Command:
+
+veen op delegated
+–hub URL
+–client CLIENT_DIR
+–stream STREAM_NAME
+–principal HEX32
+–agent HEX32
+–delegation-cap HEX32,…
+–operation-schema-id HEX32
+–operation-body-json JSON
+[–parent-op HEX32]
+
+Behavior:
+	•	Parse delegation-cap as array of bstr(32).
+	•	Parse operation-body-json into CBOR.
+	•	Construct delegated.execution.v1 payload with fields:
+	•	principal_identity
+	•	agent_identity
+	•	delegation_chain
+	•	operation_schema
+	•	operation_body
+	•	parent_operation_id (optional)
+	•	metadata null
+
+	6.	Folding and state views
+
+6.1 wallet ledger
+
+Command:
+
+veen wallet ledger
+–hub URL
+–stream STREAM_NAME
+[–upto-stream-seq N]
+[–since-stream-seq M]
+[–account HEX32]
+[–json]
+
+Folding rules:
+	•	Scan messages on STREAM_NAME between M (default 1) and N (default current tip).
+	•	Filter paid.operation.v1 payloads.
+	•	For each payload:
+	•	debit payer_account by amount
+	•	credit payee_account by amount
+	•	Maintain a map account_id -> signed integer balance.
+
+Output:
+	•	If “–account” given:
+	•	single balance for that account.
+	•	Else:
+	•	list of accounts and balances.
+
+With “–json”, output:
+
+{
+“stream”: “…”,
+“from”: M,
+“upto”: N,
+“balances”: {
+“HEX32_ACCOUNT_1”: BAL1,
+“HEX32_ACCOUNT_2”: BAL2
+}
+}
+
+6.2 agreement status
+
+Command:
+
+veen agreement status
+–hub URL
+–stream STREAM_NAME
+–agreement-id HEX32
+[–version UINT]
+[–json]
+
+Folding rules:
+	•	Extract agreement.definition.v1 and agreement.confirmation.v1 messages.
+	•	Track:
+	•	definition by (agreement_id, version)
+	•	confirmations by (agreement_id, version, party_identity)
+
+For each party, use last confirmation in stream order.
+
+Output:
+	•	active: boolean (all parties accepted, not expired, effective_time passed)
+	•	parties: list with identity, last decision, decision time.
+
+6.3 snapshot verify
+
+Command:
+
+veen snapshot verify
+–hub URL
+–stream STREAM_NAME
+–state-id HEX32
+–upto-stream-seq N
+–state-class CLASS_NAME
+[–json]
+
+Behavior:
+	•	Find state.checkpoint.v1 for (state_id, upto_stream_seq).
+	•	Replay operations on STREAM_NAME that affect state_id up to N.
+	•	Folding is defined per CLASS_NAME and MUST be deterministic.
+	•	Compare computed state_hash to checkpoint.state_hash.
+	•	Compare checkpoint.mmr_root to hub CHECKPOINT mmr_root at upto_seq.
+
+Output:
+	•	consistent: true or false
+	•	if false, indicate first mismatch.
+
+6.4 recovery timeline
+
+Command:
+
+veen recovery timeline
+–hub URL
+–stream STREAM_NAME
+–target-identity HEX32
+[–json]
+
+Behavior:
+	•	Extract recovery.request.v1, recovery.approval.v1, recovery.execution.v1 for target_identity.
+	•	Show chronological list with:
+	•	type: request / approval / execution
+	•	msg_id
+	•	requested_new_identity / new_identity
+	•	approver_identity
+	•	decision
+	•	stream_seq
+
+	7.	Federation synchronization (federate)
+
+7.1 mirror-plan
+
+Command:
+
+veen federate mirror-plan
+–source-hub URL_SRC
+–target-hub URL_DST
+–stream STREAM_NAME
+[–label-map-file LABEL_MAP_JSON]
+[–json]
+
+Behavior:
+	•	Fetch basic stream metadata from source and target:
+	•	current last_stream_seq
+	•	last_mmr_root
+	•	Determine target label:
+	•	if label-map-file provided, use mapping.
+	•	else, default to same STREAM_NAME mapping.
+
+Output:
+	•	Plan object describing:
+	•	source stream
+	•	target stream
+	•	start and end sequence numbers (initially 1 to src_last_stream_seq)
+	•	approximate message count and size.
+
+7.2 mirror-run
+
+Command:
+
+veen federate mirror-run
+–source-hub URL_SRC
+–target-hub URL_DST
+–stream STREAM_NAME
+[–from-stream-seq M]
+[–to-stream-seq N]
+[–json]
+
+Behavior:
+	•	Subscribe to “stream” on source hub for given range with with_proof=1.
+	•	For each (RECEIPT, MSG, mmr_proof):
+	•	verify proof and invariants.
+	•	send a federation.mirror.v1 operation to target-hub under a configured mirror stream.
+	•	Report:
+	•	mirrored_count
+	•	first_stream_seq
+	•	last_stream_seq
+	•	number of verification failures.
+
+	8.	Audit and compliance (audit)
+
+8.1 audit queries
+
+Command:
+
+veen audit queries
+–hub URL
+–stream STREAM_NAME
+[–resource-prefix TEXT]
+[–since UNIX_TIME]
+[–json]
+
+Behavior:
+	•	Filter query.audit.v1 messages by resource_identifier prefix and time.
+	•	Output rows:
+	•	requester_identity
+	•	resource_identifier
+	•	resource_class
+	•	purpose_code
+	•	request_time
+
+8.2 audit summary
+
+Command:
+
+veen audit summary
+–hub URL
+[–env ENV_FILE]
+[–json]
+
+Behavior:
+	•	Optionally use ENV_FILE for known streams and tenants.
+	•	For each labeled stream:
+	•	list schemas seen (using META0+ or static names).
+	•	list whether query.audit.v1 is present for streams labeled as “sensitive”.
+	•	list presence of access.grant / access.revoke for authorization surfaces.
+
+8.3 audit enforce-check
+
+Command:
+
+veen audit enforce-check
+–hub URL
+–policy-file POLICY_JSON
+[–json]
+
+Policy file minimal schema:
+
+{
+“version”: 1,
+“rules”: [
+{
+“type”: “require_audit”,
+“stream”: “STREAM_NAME”,
+“resource_class”: “personal-data”
+},
+{
+“type”: “require_recovery_threshold”,
+“target_identity_prefix”: “HEX”,
+“min_approvals”: 2
+}
+]
+}
+
+Behavior:
+	•	Interpret simple rules:
+	•	require_audit:
+	•	if query.audit.v1 never appears for that stream and resource_class, report violation.
+	•	require_recovery_threshold:
+	•	if any recovery.execution.v1 is executed with fewer approvals than min_approvals, report violation.
+
+Output:
+	•	violations: list of strings or structured descriptions.
+	•	exit non-zero if any violations found.
+
+	9.	End-to-end scenarios
+
+9.1 Wallet-backed paid operation from zero
+
+A v0.0.1++ CLI MUST support the following minimal sequence, with no manual editing of manifests:
+	1.	Initialize environment:
+	•	veen env init
+	•	veen env add-hub (after deployment)
+	2.	Deploy hub:
+	•	veen kube render | veen kube apply
+	3.	Generate admin and user identities:
+	•	veen keygen –out admin
+	•	veen keygen –out user
+	4.	Grant access:
+	•	veen op access-grant –admin admin … –subject-identity USER_PUB
+	5.	Perform paid operation:
+	•	veen op paid –client user …
+	6.	Inspect ledger:
+	•	veen wallet ledger
+
+Each step MUST have a bounded number of flags and not require any additional tools beyond “veen” and Kubernetes access.
+
+9.2 Recovery and rekey
+
+From only:
+	•	hub logs and data-dir snapshot,
+	•	an environment descriptor,
+	•	and a backup of recovery guardians’ keys,
+
+operator MUST be able to:
+	•	reconstruct identity and ledger state:
+	•	veen snapshot verify
+	•	veen wallet ledger
+	•	execute a recovery:
+	•	veen op recovery-request
+	•	veen op recovery-approval (multiple guardians)
+	•	veen op recovery-execution
+	•	confirm that new identity is applied:
+	•	veen recovery timeline
+	•	veen wallet ledger for new identity
+
+	10.	v0.0.1++ completeness
+
+The CLI is v0.0.1++-complete if:
+	1.	It passes all v0.0.1 and v0.0.1+ selftests.
+	2.	It can deploy a VEEN hub on Kubernetes and perform an end-to-end paid operation and ledger inspection using only CLI commands described here.
+	3.	It can mirror a stream between two hubs and verify mirrored receipts and proofs.
+	4.	It can reconstruct wallet, agreement, snapshot, and recovery state from VEEN logs using folding commands in this spec.
+	5.	An automated “veen selftest plus-plus” (name implementation-defined) can:
+	•	start temporary hubs on Kubernetes or locally,
+	•	exercise kube, op, wallet, agreement, snapshot, recovery, audit, federate flows,
+	•	and exit 0 when all invariants hold.
+
+
+## OS-GOALS.txt
+
+VEEN v0.0.1 OS-GOALS
+Host Operating System Operational Goal Specification (Tightened)
+Plain ASCII, English only. No overlays beyond v0.0.1 (OP0, KEX0, RESYNC0, RPC0, CRDT0, ANCHOR0, OBS0, COMP0, SH0, DR0, TS0).
+	0.	Purpose and scope
+
+OS-GOALS defines what must hold at the host operating system level for VEEN v0.0.1 to be considered operationally complete on a Unix-like platform, with Ubuntu 22.04 and 24.04 (including WSL2) as the reference environment.
+
+It constrains:
+	•	how VEEN is built and installed on the OS
+	•	how processes are started, stopped, and supervised
+	•	how persistent data and logs are placed on disk
+	•	how CLI, hub, bridge, and selftest binaries interact with the OS
+	•	how a clean system can be driven from “no VEEN” to “fully functioning VEEN deployment” using only documented commands
+
+If every numbered requirement in this document is satisfied on the reference OS, VEEN v0.0.1 meets OS-GOALS.
+	1.	Target operating systems
+
+OS1.1 Reference distributions
+
+VEEN MUST fully support:
+	•	Ubuntu 22.04 LTS amd64 (native, systemd managed)
+	•	Ubuntu 24.04 LTS amd64 (native, systemd managed)
+	•	WSL2 Ubuntu 22.04 / 24.04 under Windows 10 or 11 (systemd may be absent or disabled)
+
+OS1.2 Single source tree
+
+The same git repository and Cargo workspace MUST:
+	•	build on all reference distributions without source modifications
+	•	not depend on OS-specific feature flags for protocol correctness
+	•	only use OS-specific conditional compilation for optional integrations (for example, systemd units, TLS key paths)
+
+	2.	Dependency model
+
+OS2.1 Minimal system packages
+
+On a clean reference system, the following sequence MUST be sufficient to install all system-level dependencies required to build and run VEEN:
+	•	sudo apt update
+	•	sudo apt install -y build-essential pkg-config libssl-dev curl ca-certificates
+
+No additional mandatory system libraries beyond the standard OpenSSL, pthreads, and libc are allowed for core functionality.
+
+OS2.2 Rust toolchain
+
+VEEN MUST build and run on stable Rust, installed as:
+	•	curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+	•	source "$HOME/.cargo/env"
+
+The minimum Rust version MUST be documented in the repository (for example, in a rust-toolchain.toml or README) and MUST be a stable channel release.
+
+OS2.3 No external services
+
+VEEN core tests and selftest MUST NOT require:
+	•	external databases
+	•	external message brokers
+	•	external key management services
+
+Loopback HTTP ports and the local filesystem are the only mandatory external resources.
+	3.	Source layout and build
+
+OS3.1 Repository layout
+
+The repository root MUST contain:
+	•	a Cargo workspace with member crates including:
+	•	veen-core
+	•	veen-hub
+	•	veen-bridge
+	•	veen-cli
+	•	veen-selftest
+	•	documentation for build and runtime expectations in a text file (for example, README)
+
+OS3.2 Build command
+
+From the repository root:
+	•	cargo build --release
+
+MUST:
+	•	complete with exit status 0 on all reference OS variants
+	•	produce at least:
+	•	target/release/veen (single CLI/hub binary) or
+	•	documented binaries where one binary is the canonical CLI front-end and one is the hub
+	•	not require environment variables beyond those documented (for example, no hidden dependency on PATH hacks)
+
+OS3.3 Test command
+
+From the repository root:
+	•	cargo test --all
+
+MUST:
+	•	complete with exit status 0 on all reference OS variants
+	•	run unit tests for all core protocol components
+	•	not hang indefinitely or require manual interaction
+
+	4.	Installation pattern on native Ubuntu
+
+OS4.1 Standard install prefix
+
+VEEN MUST support installation into a conventional Unix layout:
+	•	binaries under /usr/local/bin or /usr/bin
+	•	configuration under /etc/veen
+	•	persistent data under /var/lib/veen
+	•	logs under /var/log/veen (if not journald-only)
+
+The repository MUST document:
+	•	a simple manual install path using cp or install
+	•	an optional package manager recipe (for example, deb build) may be provided but is not mandatory for OS-GOALS
+
+OS4.2 Binary deployment
+
+A minimal manual install sequence MUST be sufficient:
+	•	sudo cp target/release/veen /usr/local/bin/veen
+	•	sudo chmod 0755 /usr/local/bin/veen
+	•	veen --help returns usage information and exit code 0
+
+OS4.3 Configuration files
+
+If configuration files are required for the hub, they MUST:
+	•	reside under /etc/veen (for example, /etc/veen/veen.toml)
+	•	be optional with sane defaults when absent
+	•	have a documented example configuration
+
+	5.	Runtime processes and supervision
+
+5.1 Process roles
+
+The OS MUST be able to host at least the following VEEN process roles:
+	•	hub process
+	•	bridge process (optional)
+	•	CLI invocations from user shells
+	•	selftest processes that start ephemeral hubs
+
+5.2 Hub as a foreground process
+
+The hub MUST support foreground operation for development and debugging:
+	•	veen hub start --listen 127.0.0.1:8080 --data-dir /var/lib/veen --foreground
+
+This MUST:
+	•	keep the hub in the foreground
+	•	log status and errors to stderr or stdout
+	•	exit with non-zero code on fatal error
+
+5.3 Hub as a background systemd service (native Ubuntu)
+
+On native Ubuntu with systemd, a unit file of the form:
+	•	ExecStart=/usr/local/bin/veen hub start --listen 0.0.0.0:8080 --data-dir /var/lib/veen --config /etc/veen/veen.toml
+
+MUST work such that:
+	•	sudo systemctl start veen-hub launches the hub
+	•	sudo systemctl status veen-hub shows the hub as active
+	•	sudo systemctl stop veen-hub stops the hub gracefully
+
+The hub MUST respond to SIGTERM by:
+	•	flushing receipt and checkpoint files
+	•	flushing log buffers
+	•	closing network listeners
+	•	exiting with code 0 on normal shutdown
+
+5.4 WSL2 environment
+
+In a WSL2 Ubuntu instance with no systemd:
+	•	the hub MUST still be startable as a foreground process
+	•	a simple background pattern such as:
+	•	nohup veen hub start --listen 0.0.0.0:8080 --data-dir ~/veen-data > ~/veen-hub.log 2>&1 &
+MUST be valid and stable
+
+No systemd-specific assumptions may be required for correctness.
+	6.	Filesystem layout and permissions
+
+OS6.1 Ownership model
+
+On native Ubuntu:
+	•	/var/lib/veen MUST be owned by a dedicated system user (for example, veen)
+	•	the hub process SHOULD run as this user, not as root, except for port binding or container contexts
+	•	the CLI may run as any user to manage client identities under that user’s home directory
+
+On WSL2, running as the default user is acceptable but MUST still respect per-user client directories.
+
+OS6.2 Data directory contents
+
+The hub MUST create or reuse the following under its data directory:
+	•	receipts.cborseq
+	•	checkpoints.cborseq
+	•	state/ (internal state)
+	•	anchors/ (if anchoring is enabled)
+	•	optional:
+	•	payloads.cborseq if payload storage at the hub is enabled by configuration
+
+These files and directories MUST:
+	•	be created with permissions that prevent other unrelated users from modifying them (for example, 0700 directories, 0600 files, owned by the hub user)
+	•	be usable across hub restarts without manual repair
+
+OS6.3 Client filesystem layout
+
+Each client identity MUST reside under a user-specific directory, for example:
+	•	$HOME/.local/share/veen/client-main
+	•	or a user-specified path
+
+Each client directory MUST contain:
+	•	keystore.enc (encrypted private keys)
+	•	identity_card.pub (public identity)
+	•	state.json (or equivalent state file)
+	•	optional:
+	•	additional state files such as MMR peaks
+
+File permissions MUST restrict access to the owning user (for example, 0700 directory, 0600 files).
+	7.	Networking and ports
+
+OS7.1 Binding addresses
+
+On the reference OS, the hub MUST be able to bind to:
+	•	127.0.0.1:PORT for local-only testing
+	•	0.0.0.0:PORT for serving remote clients on the host network
+
+The CLI MUST accept hubs specified as:
+	•	http://127.0.0.1:8080
+	•	http://hostname:8080
+
+OS7.2 Port reuse and restart
+
+The hub MUST:
+	•	properly close its listening sockets on shutdown
+	•	allow immediate restart on the same address/port pair without manual socket cleanup
+
+OS7.3 TLS endpoints (optional)
+
+If TLS is enabled (for example, https://hostname:8443), the OS-level integration MUST:
+	•	use the host’s certificate store or files under /etc/veen/tls or similar
+	•	not require OS-specific hacks beyond documented configuration
+
+	8.	CLI behavior on the OS
+
+OS8.1 Path and invocation
+
+After installation, the following MUST be valid on the reference OS:
+	•	veen --help
+	•	veen hub --help
+	•	veen keygen --help
+	•	veen send --help
+	•	veen stream --help
+	•	veen selftest core
+	•	veen selftest all
+
+All of these MUST:
+	•	exit with status 0 when just printing help
+	•	not require environment variables beyond PATH and HOME
+
+OS8.2 Deterministic behavior
+
+Given the same:
+	•	hub data directory
+	•	client directories and files
+	•	VEEN binary version
+	•	OS-level environment variables (for example, TZ)
+
+CLI commands MUST produce:
+	•	the same wire messages
+	•	the same receipts and mmr_root values
+
+apart from values that depend on wall-clock time and OS randomness where the specification allows it.
+
+OS8.3 Error reporting
+
+Any CLI command contacting the hub MUST:
+	•	decode hub responses as CBOR
+	•	if an error response is returned, print:
+	•	the error code (for example, E.SIZE, E.SIG)
+	•	optional detail text if present
+	•	exit with a non-zero exit code
+
+	9.	Logging and observability integration
+
+OS9.1 Hub logs
+
+On native Ubuntu:
+	•	when run under systemd, hub logs MUST be visible via journalctl -u veen-hub
+	•	when run in foreground, logs MUST go to stderr or stdout
+
+Log output SHOULD:
+	•	be structured as text or JSON lines
+	•	contain timestamps and severity levels
+
+OS9.2 Metrics endpoint
+
+The hub MUST expose:
+	•	GET /metrics on its HTTP port
+
+The CLI command:
+	•	veen hub metrics --hub http://127.0.0.1:8080
+
+MUST:
+	•	fetch this endpoint
+	•	print raw output with --raw
+	•	otherwise, summarize key counters and histograms
+
+OS9.3 Health endpoint
+
+The hub MUST expose:
+	•	GET /healthz
+
+The CLI command:
+	•	veen hub health --hub http://127.0.0.1:8080
+
+MUST:
+	•	fetch /healthz
+	•	map the response to a simple JSON or text summary
+
+	10.	Security and OS-level hardening
+
+OS10.1 Non-root operation
+
+On native Ubuntu, VEEN MUST:
+	•	be able to run the hub process as a non-root user for ports above 1024
+	•	not require CAP_NET_ADMIN or similar privileged capabilities for normal operation
+
+Running as root for port 80 or 443 MAY be supported but MUST NOT be required.
+
+OS10.2 File permissions
+
+Installation docs MUST specify:
+	•	recommended permissions for /var/lib/veen
+	•	recommended permissions for client directories under $HOME/.local/share/veen
+
+The VEEN binaries MUST:
+	•	not weaken these permissions automatically
+	•	fail with a clear error message if they cannot create or access their required paths
+
+OS10.3 Resource limits
+
+VEEN MUST behave gracefully under OS resource limits such as:
+	•	process file descriptor limits
+	•	open file limits
+	•	CPU time quotas (in containers)
+
+The selftest suite SHOULD include at least one check that:
+	•	the hub returns E.SIZE or a similar bound-related error when payload sizes exceed configured limits
+	•	the hub does not crash or spin indefinitely under such stress
+
+	11.	WSL2 specifics
+
+OS11.1 Filesystem behavior
+
+On WSL2, VEEN MUST:
+	•	tolerate NTFS-backed filesystem semantics (no assumptions about fsync performance beyond basic durability)
+	•	not rely on Linux-specific filesystem features (extended attributes, special file types) for correctness
+
+OS11.2 Time and clocks
+
+On WSL2, VEEN MUST:
+	•	rely on wall-clock time only for epoch-based label derivation and expiry handling
+	•	tolerate small clock skews without breaking protocol invariants beyond what CLOCK_SKEW_EPOCHS allows
+
+	12.	End-to-end OS-level workflows
+
+OS12.1 Local developer workflow
+
+On a clean reference OS, the following end-to-end sequence MUST be valid and documented:
+	1.	Install toolchain and clone repository.
+	2.	Build VEEN.
+	3.	Start a hub in foreground or via systemd.
+	4.	Generate a client identity.
+	5.	Send a message on core/main.
+	6.	Stream messages on core/main.
+	7.	Verify at least one attachment.
+	8.	Issue a capability token and authorize it.
+	9.	Send a capability-gated message.
+	10.	Run veen resync and veen verify-state.
+	11.	Run veen selftest core.
+	12.	Run veen selftest all.
+
+All steps MUST complete without OS-level surprises beyond normal firewall or port conflict issues.
+
+OS12.2 Minimal production workflow
+
+On native Ubuntu, documentation MUST describe a minimal production deployment pattern:
+	•	create a system user for VEEN
+	•	create /var/lib/veen and /etc/veen
+	•	copy the veen binary into /usr/local/bin
+	•	set up a systemd unit for the hub
+	•	start the hub using systemd
+	•	manage client identities from application hosts or users
+
+	13.	Selftest integration with OS
+
+OS13.1 Selftest independence
+
+veen selftest core and veen selftest all MUST:
+	•	start temporary hubs on random loopback ports
+	•	create temporary data and client directories under /tmp or $TMPDIR
+	•	clean up these directories and processes on success or failure
+	•	not interfere with any existing hub that uses /var/lib/veen
+
+OS13.2 Exit codes
+	•	veen selftest core MUST exit 0 if all core goals are satisfied
+	•	veen selftest all MUST exit 0 if all goals and properties pass
+	•	non-zero exit codes MUST indicate failure and be accompanied by log lines describing which step failed
+
+	14.	OS-GOALS success criteria
+
+VEEN v0.0.1 meets OS-GOALS when all of the following are true on the reference operating systems:
+
+G14.1 Build and test
+	•	cargo build --release succeeds
+	•	cargo test --all succeeds
+	•	the veen binary (or equivalent documented binaries) is usable from the shell
+
+G14.2 Process lifecycle
+	•	the hub can be run in foreground on Ubuntu and WSL2
+	•	the hub can be managed by systemd on native Ubuntu
+	•	shutdown sequences preserve data durability
+
+G14.3 Filesystem and permissions
+	•	hub and client directories are created with safe permissions
+	•	all required paths are created automatically or with documented manual steps
+	•	restarts do not require manual repair of on-disk state
+
+G14.4 Networking
+	•	hubs can bind and listen on loopback and host interfaces
+	•	CLI commands can reach hubs using HTTP URLs
+	•	port reuse works after hub restart
+
+G14.5 CLI capabilities
+
+From a clean OS, using only VEEN and documented commands, an operator can:
+	•	start a hub
+	•	generate and inspect identities
+	•	send and receive messages
+	•	use attachments
+	•	use capability tokens, rate limits, and revocations
+	•	resynchronize and verify client state
+	•	execute RPC and CRDT operations
+	•	inspect health and metrics
+	•	run selftest suites
+
+G14.6 Stability and hardening
+	•	malformed inputs produce controlled errors, not crashes
+	•	large payloads are handled within configured bounds
+	•	repeated selftest runs do not leak processes or files
+
+When all G14.x conditions hold on Ubuntu 22.04 and 24.04 (native and WSL2) with only the documented prerequisites, VEEN v0.0.1 is OS-GOALS complete.
+
+
+## Design-Philosophy.txt
+
+VEEN Design Philosophy v0.0.1 (Ephemeral Fabric Tightened)
+Plain ASCII, English only
+	0.	Purpose and scope
+
+This document pinpoints the design philosophy of VEEN v0.0.1 as an operating model for an “ephemeral, verifiable, reproducible network fabric”.
+
+Motto:
+
+Treat networks as ephemeral as pods.
+A network should be disposable, verifiable, and reproducible.
+A network you can clone, fork, replay, and interpret.
+
+VEEN interprets this as:
+	•	networks are infrastructure with pod-like lifetimes;
+	•	hubs are disposable execution containers;
+	•	logs and receipts are the durable truth;
+	•	overlays (identity, wallet, RPC, CRDT, operations) are deterministic folds over logs;
+	•	deployment is OS-agnostic: Linux, WSL2, Docker, k8s, k3s.
+
+The goal is to keep these principles stable while implementations, overlays, and tooling evolve.
+	1.	Primary objectives
+
+1.1 Ephemeral fabric
+	•	A “network” is treated like a pod:
+	•	it can be created, scaled, drained, and destroyed without configuration debt;
+	•	lifetimes are short and repeatable;
+	•	the cheapest response to damage is replacement, not manual surgery.
+	•	The long-lived artefacts are logs, keys, and anchor state, not hub processes, static configs, or mutable databases.
+
+1.2 Disposability
+	•	Hubs are explicitly disposable:
+	•	a hub can be killed, upgraded, or moved without changing semantics of any label;
+	•	a hub can be replaced by another binary using the same data directory;
+	•	multiple hubs can serve the same fabric as long as they respect the core invariants.
+	•	Network topologies, pod layouts, and node assignments are allowed to change frequently; logs remain authoritative.
+	•	Operational guidelines should default to:
+	•	“replace the hub” rather than “repair the hub”;
+	•	“replay from logs” rather than “fix state in place”.
+
+1.3 Verifiability
+	•	Every accepted message is committed into an authenticated log:
+	•	leaf_hash and msg_id bind ciphertext to label, profile, and client_seq;
+	•	MMR roots and CHECKPOINT objects provide compact inclusion proofs;
+	•	RECEIPT and CHECKPOINT carry hub signatures;
+	•	anchors optionally bind MMR roots to external ledgers or trust systems.
+	•	Any statement about “what happened” must be reconstructible and checkable from retained logs and proofs, without trusting a live hub, a particular database, or a specific cluster topology.
+
+1.4 Reproducibility
+	•	For any retained log prefix, folding overlays over that prefix must:
+	•	produce identical state on any conforming implementation;
+	•	allow state to be recomputed from scratch without hidden side channels;
+	•	allow a new hub or client to join by replaying logs only.
+	•	Reproducibility is preferred over mutable databases:
+	•	operational state is derived, not stored ad hoc;
+	•	divergence between stored state and log-derived state is treated as an error to surface, not a normal condition to tolerate.
+	•	Cloneability and replayability are design requirements:
+	•	copying a data directory must be sufficient to reconstruct the same fabric instance;
+	•	replaying the same event sequence must yield the same overlay state.
+
+1.5 Invariance
+	•	A small set of wire objects and invariants is fixed:
+	•	MSG, RECEIPT, CHECKPOINT, mmr_proof, cap_token;
+	•	invariants I1..I12 over their relationships.
+	•	The following must not change the meaning of these objects:
+	•	OS or kernel version;
+	•	container runtime (bare metal, Docker, containerd, etc.);
+	•	hub process layout or topology;
+	•	which overlays are in use, or how many hubs participate in the fabric.
+
+1.6 Determinism
+	•	For any finite event prefix L on a label:
+	•	fold(L) is a deterministic function for every overlay;
+	•	any conforming implementation produces identical overlay state from L.
+	•	All non-determinism is either:
+	•	forbidden, or
+	•	explicitly localized and documented (for example:
+	•	time in TTL checks,
+	•	day-boundary limit windows,
+	•	tie-breaking using stream_seq).
+	•	Admission and error behavior for a given MSG under v0.0.1 are deterministic given:
+	•	current log state;
+	•	configured limits and profiles.
+	•	Determinism is what makes “replay” and “interpret” meaningful operations rather than approximations.
+
+1.7 Portability
+	•	The same repository and binary must:
+	•	run on Ubuntu 22.04 and 24.04 (native, systemd);
+	•	run on WSL2 Ubuntu;
+	•	run in containers under Docker, k8s, and k3s;
+	•	expose identical wire semantics and log behavior.
+	•	A “VEEN fabric instance” is defined by:
+	•	its logs (receipts.cborseq, payloads.cborseq, checkpoints.cborseq, anchors);
+	•	not by OS, container runtime, process layout, or cluster design.
+
+1.8 Minimality
+	•	Hubs:
+	•	accept, verify, commit, stream, and anchor;
+	•	expose health and metrics;
+	•	do not interpret payload schemas.
+	•	Overlays:
+	•	define schemas and folding rules;
+	•	are pure clients of the log model;
+	•	do not require hub modifications.
+	•	The core remains small enough that:
+	•	audits are feasible and bounded;
+	•	alternative hub implementations remain practical;
+	•	cloning, forking, and replay are implementable without hidden dependencies.
+
+1.9 Clone, fork, replay, interpret
+
+VEEN is designed so that a network can be:
+	•	Cloned:
+	•	copying a fabric data directory and pinned keys is sufficient to stand up an equivalent fabric instance;
+	•	cloned instances can be brought up in isolated environments for testing, audit, or simulation.
+	•	Forked:
+	•	retaining a log prefix and then diverging event streams allows independent evolution from a common history;
+	•	forks are explicit at the fabric or label level and do not require bespoke migration paths.
+	•	Replayed:
+	•	overlay state is reconstructed by replaying events from zero or from a checkpoint;
+	•	replay is deterministic and yields identical results for the same inputs.
+	•	Interpreted:
+	•	new overlays can be applied to existing logs to derive new views of the same history;
+	•	no hub changes are required to interpret old logs with new overlays.
+
+These four operations are core design targets, not side effects.
+	2.	Network-as-container model
+
+2.1 Fabric instance
+
+A VEEN fabric instance is:
+	•	a set of labels and their event logs;
+	•	a set of MMR roots and checkpoints;
+	•	optional anchors and bridge relationships;
+	•	optional overlay-specific state reconstructed from logs.
+
+This is analogous to:
+	•	a container image plus its volume contents:
+	•	logs are the durable “data volume”;
+	•	hubs are disposable “container processes” that:
+	•	bind logs to TCP ports and endpoints;
+	•	enforce admission and invariants;
+	•	interact with anchoring backends.
+
+Cloning or snapshotting a fabric is equivalent to copying container volumes and pinned config.
+
+2.2 Hubs as disposable nodes
+	•	A hub process is started with a data directory, profile, and listen address.
+	•	A hub can be:
+	•	killed and restarted without semantic loss for any label whose logs are intact;
+	•	replaced by a newer binary using the same data directory;
+	•	replicated under supervision (systemd, k8s Deployments, k3s) with identical behavior for the same traffic and logs.
+	•	Hubs are expected to be:
+	•	short-lived compared to fabric lifetime;
+	•	rotated often for upgrades, hardening, and topology changes.
+	•	Operational guidance:
+	•	“drain and replace a hub” should be routine, not exceptional.
+
+2.3 Clients as portable endpoints
+	•	A client identity (keys and state) is stored under a user-controlled path or volume.
+	•	A client can:
+	•	connect to any conforming hub in the fabric;
+	•	resync and verify its state using /stream and CHECKPOINT endpoints;
+	•	detect divergence and recover via RESYNC flows.
+	•	Client correctness depends only on:
+	•	retained logs;
+	•	trust in pinned hub keys and profiles;
+	•	never on hub-local mutable databases or in-memory caches.
+
+	3.	Wire and invariants
+
+3.1 Fixed wire objects
+	•	MSG:
+	•	carries ver, profile_id, label, client_id, client_seq, prev_ack, auth_ref, ct_hash, ciphertext, sig.
+	•	RECEIPT:
+	•	carries ver, label, stream_seq, leaf_hash, mmr_root, hub_ts, hub_sig.
+	•	CHECKPOINT:
+	•	commits label_prev, label_curr, upto_seq, mmr_root, epoch, hub_sig, optional witness_sigs.
+	•	cap_token:
+	•	carries issuer_pk, subject_pk, allow, sig_chain.
+
+These objects, together with MMR structure and invariants, define what can be cloned, forked, and replayed.
+
+3.2 Hub responsibilities
+
+The hub must:
+	•	validate:
+	•	signatures (MSG.sig, hub_sig, cap_token signatures when used);
+	•	sizes and limits;
+	•	sequence and uniqueness invariants;
+	•	profile compatibility;
+	•	maintain per-label MMR state and emit RECEIPTs;
+	•	emit CHECKPOINT objects and optional anchors.
+
+The hub must not:
+	•	branch on payload_hdr.schema contents for core behavior;
+	•	use decrypted body for admission or ordering decisions;
+	•	embed overlay-specific semantics into core wire handling.
+
+3.3 Version stability
+	•	Within v0.0.1:
+	•	wire encoding is frozen;
+	•	hub behavior for valid and invalid messages is frozen.
+	•	Overlays may evolve by defining new schemas and folding rules without:
+	•	changing MSG, RECEIPT, CHECKPOINT, mmr_proof, cap_token structure;
+	•	requiring hub code changes;
+	•	invalidating existing logs.
+
+	4.	Logs as single source of truth
+
+4.1 Append-only model
+	•	The authoritative record for a label consists of:
+	•	receipts.cborseq (sequence of RECEIPT, optionally paired with MSG payloads for retention);
+	•	checkpoints.cborseq;
+	•	optional anchors that bind mmr_root values externally.
+	•	Hubs may rotate on-disk files and apply retention, but:
+	•	any retained prefix must remain internally consistent and re-foldable;
+	•	truncation must not silently create inconsistent prefixes;
+	•	policies for retention and compaction must be documented and auditable.
+
+4.2 Folding semantics
+	•	For each overlay:
+	•	state(label, upto_seq) = fold(events up to upto_seq on relevant streams).
+	•	Folding rules must:
+	•	depend only on:
+	•	stream order (stream_seq as primary tie-breaker);
+	•	payload_hdr.schema;
+	•	payload body bytes;
+	•	optional timestamps inside the payload body;
+	•	not depend on:
+	•	which hub accepted the message;
+	•	sender IP or connection metadata;
+	•	OS, hardware, or container runtime.
+	•	Re-running fold on the same retained prefix must exactly reproduce prior overlay state, enabling replay and offline audit.
+
+4.3 Cross-hub consistency
+	•	Bridging and mirroring must preserve:
+	•	payload bytes;
+	•	payload_hdr.schema;
+	•	a deterministic parent_id link back to original msg_id when mirroring.
+	•	Overlay implementations must:
+	•	treat local and bridged events under the same folding rules;
+	•	document deduplication keys (for example (source_hub, label, stream_seq) or parent_id);
+	•	ensure that clones and forks of fabrics that include bridged events remain foldable without ambiguity.
+
+	5.	Overlay design constraints
+
+5.1 Pure overlay
+
+An overlay (identity, wallet, RPC, CRDT, operations) must:
+	•	be defined only in terms of:
+	•	schema identifiers in payload_hdr.schema;
+	•	deterministic CBOR payload bodies;
+	•	per-stream folding rules over logs;
+	•	not require:
+	•	hub-specific endpoints beyond VEEN core;
+	•	schema-aware logic in hub;
+	•	non-deterministic external state during folding.
+
+5.2 Conflict handling
+
+Overlays must specify:
+	•	update rules:
+	•	last-writer-wins when multiple updates can apply to the same key;
+	•	OR-set or grow-only counter semantics when sets or counters are used;
+	•	deduplication rules when duplicate events are possible (for example due to replay or mirroring);
+	•	explicit tie-breakers:
+	•	timestamps plus stream_seq;
+	•	stream_seq alone;
+	•	leaf_hash only if needed.
+
+Any ambiguity must be resolved by documented rules. Different implementations must not diverge under the same event prefix, otherwise “interpret” ceases to be well-defined.
+
+5.3 Compatibility
+	•	Adding an overlay must not:
+	•	change how MSG are accepted or ordered by the hub;
+	•	require schema-specific error handling in core paths;
+	•	invalidate or reinterpret older logs.
+	•	Overlays must be strictly additive with respect to the core:
+	•	new overlays can always be applied to old logs;
+	•	old overlays continue to fold correctly when new overlays are introduced.
+
+	6.	Identity overlay role
+
+6.1 Identity as log-derived state
+	•	Principals, devices, realms, contexts, organizations, groups, and handles:
+	•	exist only as derived state from identity streams;
+	•	are folded from identity messages and revocation messages.
+	•	Hubs:
+	•	are unaware of identity details beyond public keys and cap_token structures;
+	•	are not required to understand realms, organizations, or group semantics.
+
+6.2 Sessions and context binding
+	•	Application frontends bind sessions to context identifiers using:
+	•	device keys;
+	•	capability chains;
+	•	identity overlay logs.
+	•	This binding must be:
+	•	reconstructible from logs;
+	•	verifiable offline;
+	•	independent of hub internals.
+	•	Identity overlays must remain foldable on cloned, forked, and replayed fabrics.
+
+	7.	Wallet and paid operation overlay role
+
+7.1 Balances and transfers from logs
+	•	A wallet is defined by:
+	•	wallet_id (for example realm, context, currency, account);
+	•	its event stream of wallet operations and paid operations.
+	•	Balances, limits, freezes, and adjustments are derived entirely by folding events:
+	•	debit and credit operations;
+	•	policy and configuration events;
+	•	revocations and closures.
+
+7.2 No hub-side balances
+	•	Hubs do not:
+	•	store balances;
+	•	enforce wallet-specific rules;
+	•	distinguish financial messages from other payloads.
+	•	Wallet services and auditors:
+	•	recompute balances from logs;
+	•	detect overdrafts or violations using the same folding rules;
+	•	can operate on cloned or forked fabric snapshots for what-if analysis.
+
+	8.	OS and container integration
+
+8.1 Execution environment
+	•	VEEN must run as:
+	•	a normal Unix process on Linux and WSL2;
+	•	a container entrypoint in Docker, k8s, and k3s;
+	•	the same veen binary with the same CLI surface.
+	•	No mandatory external persistent systems:
+	•	no required RDBMS;
+	•	no required message broker;
+	•	no required external KMS.
+	•	Integrations with databases, KMS, or queues are permitted as overlays or sidecars, not as core dependencies.
+
+8.2 Data and logs
+	•	Hub data directories:
+	•	are plain directories, mountable as volumes;
+	•	contain receipts, payloads, checkpoints, anchor metadata, and state files;
+	•	can be attached to containers or bare-metal processes interchangeably.
+	•	Clients:
+	•	store identity and state under user paths or mounted volumes;
+	•	must be able to move between machines without changing semantics, as long as keys and state are preserved.
+
+8.3 Supervision and lifecycle
+	•	Hub lifecycle is managed by:
+	•	systemd units on bare metal and WSL2;
+	•	Deployments or StatefulSets on k8s and k3s;
+	•	equivalent constructs on other orchestrators.
+	•	Shutdown must:
+	•	flush receipts and checkpoints to disk at documented durability guarantees;
+	•	close listeners cleanly;
+	•	permit immediate restart on the same data directory and port.
+	•	Operational practices should treat hub restarts and redeployments as normal background noise, not rare events.
+
+	9.	Security model
+
+9.1 Trust boundaries
+	•	Clients trust:
+	•	their own keys and keystore;
+	•	pinned hub public keys and profiles;
+	•	log ordering and hub signatures as enforced by core invariants.
+	•	Hubs are trusted to:
+	•	enforce admission via cap_token and rate limiting;
+	•	maintain MMR consistency and signatures;
+	•	respect configured limits.
+	•	Hubs are not trusted with:
+	•	plaintext application payloads;
+	•	overlay semantics or policy decisions beyond admission.
+
+9.2 Confidentiality and integrity
+	•	Confidentiality:
+	•	payloads are protected by AEAD using per-label keys derived from HPKE contexts;
+	•	hub does not see decrypted payload_hdr or body.
+	•	Integrity:
+	•	client-level via MSG.sig over the canonical MSG encoding (without sig);
+	•	hub-level via hub_sig over RECEIPT and CHECKPOINT;
+	•	log-level via MMR roots and inclusion proofs plus optional external anchoring.
+	•	These properties must hold across clones, forks, and replays of the fabric.
+
+9.3 Revocation and rotation
+	•	Revocation is represented as overlay events and cap_token lifecycle:
+	•	device or client identity revocations;
+	•	capability and auth_ref revocations.
+	•	Hubs and applications:
+	•	read the same revocation events;
+	•	enforce consistent decisions for new messages.
+	•	Key rotation:
+	•	is performed without changing wire semantics;
+	•	is recorded via CHECKPOINT witness signatures and overlay events;
+	•	must remain verifiable when logs are cloned, forked, or replayed.
+
+	10.	Evolution and versioning
+
+10.1 Core evolution
+	•	VEEN v0.0.1:
+	•	fixes wire objects, invariants, and error behavior.
+	•	Future core versions may:
+	•	add new fields or error codes;
+	•	define new invariants;
+	•	provide explicit upgrade paths.
+	•	Core evolution must not:
+	•	silently reinterpret v0.0.1 logs;
+	•	break deterministic folding for pre-existing schemas;
+	•	invalidate the ability to clone, fork, replay, and interpret v0.0.1 fabrics.
+
+10.2 Overlay evolution
+	•	New overlays are added by:
+	•	defining new schema identifiers;
+	•	defining folding rules and invariants for those schemas;
+	•	documenting interaction with existing overlays.
+	•	Existing overlays may:
+	•	evolve via versioned schemas (for example “id.ctx.profile.v2”);
+	•	introduce new fields while keeping old behavior well-defined.
+	•	Overlay evolution must:
+	•	be replayable from combined logs;
+	•	specify precedence and tie-breaking between versions;
+	•	preserve interpretability of past events.
+
+	11.	Non-goals
+
+VEEN does not aim to be:
+	•	a general-purpose compute or function execution platform;
+	•	a consensus or blockchain system;
+	•	a deep packet inspection or routing engine;
+	•	a replacement for every existing authentication or identity standard;
+	•	a full-featured API gateway or service mesh.
+
+VEEN aims to be:
+	•	a minimal, deterministic fabric for:
+	•	encrypted event transport;
+	•	verifiable logging;
+	•	overlay-defined state;
+	•	a network layer that is:
+	•	as ephemeral as pods in deployment;
+	•	as auditable as a ledger in history;
+	•	cloneable, forkable, replayable, and re-interpretable in operation.
+
+	12.	Summary axis
+
+The design axis that must not drift is:
+	•	Fix a minimal wire and log core with strong invariants.
+	•	Treat logs, receipts, and checkpoints as the single durable truth.
+	•	Make hubs disposable containers that attach logs to networks and enforce invariants.
+	•	Keep all higher-level semantics (identity, wallet, RPC, CRDT, operations) as deterministic folds over logs.
+	•	Require OS and container independence: Linux, WSL2, Docker, k8s, and k3s all yield identical semantics for the same logs.
+	•	Ensure that any conforming implementation supports:
+	•	cloning fabrics by copying data;
+	•	forking fabrics by splitting histories;
+	•	replaying fabrics by folding logs;
+	•	interpreting fabrics by adding overlays.
+
+As long as these properties hold, networks can be treated as ephemeral as pods: disposable in deployment, verifiable in audit, reproducible under replay, and interpretable under new overlays.
+
+
+## USAGE.md
+
+# VEEN Usage Compendium
+
+This is the “first hour” guide for the VEEN CLI and its companion binaries (`veen`, `veen-hub`, `veen-selftest`, `veen-bridge`). Follow the sections in order the first time you use VEEN, then dip back in as a reference for common tasks.
+
+**Who is this for?**
+- **First-time users:** start at “Before you begin”, then follow the Local developer quickstart exactly once end-to-end.
+- **Returning operators:** skip straight to the command blocks you need; each block is self-contained.
+
+**Reading tips**
+- Commands written with `target/release/` assume you built locally. Drop the prefix when using packaged binaries or when already inside Docker/Kubernetes.
+- Replace placeholders like `<PROFILE_ID>` with your own values. Flags in backticks are literal.
+- Use temporary paths such as `/tmp/veen-hub` for experiments; for long-lived hubs see “Manual installation” for persistent directories.
+- Output precedence: explicit output flags (for example `--json` on a subcommand) win over global defaults, and `--json` overrides `--quiet`. When `--quiet` is set without JSON output enabled, successful command output is suppressed (errors still print).
+- If something fails, re-run with `--verbose` to see detailed logs. Most first-run issues relate to filesystem permissions on the chosen data directory.
+
+**Fast navigation**
+- [1. Before you begin](#1-before-you-begin)
+- [2. Build and sanity-check](#2-build-and-sanity-check)
+- [3. Local developer quickstart](#3-local-developer-quickstart)
+- [4. Additional flows](#4-additional-flows)
+- [5. Running with containers](#5-running-with-containers)
+- [6. Environment descriptors (`veen env`)](#6-environment-descriptors-veen-env)
+- [7. Kubernetes workflows (`veen kube`)](#7-kubernetes-workflows-veen-kube)
+- [8. Verification and tests](#8-verification-and-tests)
+- [9. Common helper tools](#9-common-helper-tools)
+- [10. Further reading](#10-further-reading)
+
+## 1. Before you begin
+
+### Supported platforms and packages
+- Target OS: Ubuntu 22.04/24.04 (including WSL2). macOS works if you swap `apt` commands for Homebrew equivalents.
+- Required packages: `build-essential pkg-config libssl-dev curl ca-certificates`
+- Recommended extras: `jq` for inspecting JSON outputs and `just` for developer shortcuts
+
+Install everything in one go on Ubuntu:
+
+```shell
+sudo apt update
+sudo apt install -y build-essential pkg-config libssl-dev curl ca-certificates
+sudo apt install -y jq just # optional, but useful for debugging
+```
+
+### Rust toolchain
+Use the pinned stable toolchain declared in `rust-toolchain.toml` so your build matches CI and the Docker image:
+
+```shell
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+cargo --version # verify Rust is available
+```
+
+If your shell cannot find `cargo`, ensure `~/.cargo/bin` is present on your `PATH` (rerun `source "$HOME/.cargo/env"`).
+
+## 2. Build and sanity-check
+
+### Build the workspace
+
+```shell
+cargo build --release
+```
+
+`cargo` will fetch dependencies on first run. Supply `CARGO_NET_OFFLINE=true` for an air-gapped build **only** when you already have a populated Cargo cache. If the build fails with linker errors, ensure `libssl-dev` is installed and re-run the command.
+
+#### Quick sanity check
+- List the installed binaries and confirm they respond:
+  ```shell
+  ls target/release/veen*
+  target/release/veen --help | head -n 5
+  target/release/veen version
+  ```
+- Expected result: a version string like `veen x.y.z (git <hash>)` and four binaries present. Missing files usually mean the build aborted; re-run `cargo build --release` and read the first error in the log.
+
+You should now have four binaries under `target/release/`:
+- `veen` – CLI used across all workflows
+- `veen-hub` – hub runtime binary (invoked via `veen hub`)
+- `veen-selftest` – self-test harness
+- `veen-bridge` – log replication helper
+
+### Manual installation
+
+```shell
+sudo install -m 0755 target/release/veen /usr/local/bin/veen
+sudo install -m 0755 target/release/veen-hub /usr/local/bin/veen-hub
+sudo install -m 0755 target/release/veen-selftest /usr/local/bin/veen-selftest
+sudo install -m 0755 target/release/veen-bridge /usr/local/bin/veen-bridge
+```
+
+When packaging for production hosts, prefer copying the four binaries into `/usr/local/bin` as a single step using your configuration manager (Ansible, Chef, etc.). The binaries are dynamically linked to glibc and OpenSSL, so ensure the target hosts provide those libraries.
+
+Recommended directories:
+
+```shell
+sudo install -d -m 0750 /var/lib/veen
+sudo install -d -m 0755 /etc/veen
+sudo install -d -m 0750 /var/log/veen
+```
+
+`/var/lib/veen` should be writable by the service account that runs the hub. `/etc/veen` can hold static configuration such as `hub-config.toml` and TLS material if you supply `--tls-cert`/`--tls-key`. Logs default to stderr; set `RUST_LOG` or `VEEN_LOG_LEVEL` to adjust verbosity.
+
+## 3. Local developer quickstart
+
+Complete these steps in order the first time you run VEEN. Create a disposable workspace (e.g. `/tmp/veen-hub` and `/tmp/veen-client`) so you can delete everything afterwards.
+
+1. **Start a hub in the foreground**
+   ```shell
+   target/release/veen hub start \
+     --listen 127.0.0.1:37411 \
+     --data-dir /tmp/veen-hub \
+     --foreground
+   ```
+   Stop with `Ctrl+C`. `--data-dir` accepts a local path or a `file://` URI. When not running in the foreground, the hub detaches and writes its PID under `<data-dir>/hub.pid` for `hub stop` to consume. On first start you should see the listen address, profile identifier, and log path printed to the terminal. If you see “address already in use”, change `--listen` to a free port.
+
+2. **Generate a client identity**
+   ```shell
+   target/release/veen keygen --out /tmp/veen-client
+   ```
+
+   The command creates `identity_card.pub` (public key material), `keystore.enc`
+   (private key material), and `state.json` (client ack/rotation state). Keep
+   `keystore.enc` outside version control and back it up securely.
+
+3. **Send a message**
+   ```shell
+   target/release/veen send \
+     --hub /tmp/veen-hub \
+     --client /tmp/veen-client \
+     --stream core/main \
+     --body '{"text":"hello-veens"}'
+   ```
+   Expected result: the terminal prints the committed sequence number and the hub writes a JSON bundle under the data directory. Add `--cap <PATH>` to attach a capability token or `--attach <FILE>` to bundle binary payloads; each flag may be repeated. Errors such as `unable to open hub` usually mean the path after `--hub` is wrong or the hub from step 1 has stopped.
+
+4. **Stream messages**
+   ```shell
+   target/release/veen stream \
+     --hub /tmp/veen-hub \
+     --client /tmp/veen-client \
+     --stream core/main \
+     --from 0
+   ```
+   Displays message bodies, attachment metadata, and received sequence numbers. ACK state is maintained client-side.
+
+   Add `--with-proof` to request cryptographic proofs for each record or `--follow` to keep streaming new messages.
+
+5. **Inspect hub status and keys**
+   ```shell
+   target/release/veen hub status --hub /tmp/veen-hub
+   target/release/veen hub key --hub /tmp/veen-hub
+   ```
+   `hub status` reports the listen address, current state root, and whether PoW is enabled. `hub key` prints the hub's signing key and profile identifier.
+
+6. **Stop a background hub**
+   ```shell
+   target/release/veen hub stop --data-dir /tmp/veen-hub
+   ```
+   This sends a shutdown signal to the backgrounded hub and waits for a clean exit. `hub stop` is only available on Unix-like hosts; on Windows, terminate the background process manually.
+
+7. **Clean up**
+
+   Remove temporary state when you are done exploring:
+   ```shell
+   rm -rf /tmp/veen-hub /tmp/veen-client
+   ```
+   Re-run the steps above any time you want a fresh sandbox. When in doubt, delete the temporary directories and repeat steps 1–4 to return to a known-good state.
+
+## 4. Additional flows
+
+### Viewing schema descriptors
+- Inspect a registered schema:
+  ```shell
+  target/release/veen schema show \
+    --hub http://127.0.0.1:37411 \
+    --schema-id <HEX32> \
+    --json
+  ```
+  Shows the identifier, name, version, and usage. Use `--json` for machine-readable output.
+
+### Proof-of-Work (PoW)
+If a hub demands PoW, supply the parameters on `veen send` or `veen rpc call`:
+- `--pow-difficulty <BITS>`: Solve and attach a cookie of the given difficulty. When no challenge is supplied a random one is generated locally.
+- `--pow-challenge <HEX>`: Reuse a hub-issued challenge or provide your own.
+- `--pow-nonce <NONCE>`: Send a pre-computed cookie alongside the matching difficulty and challenge.
+
+Enable PoW requirements on the hub with `veen hub start --pow-difficulty`.
+
+Include `--pow-max-time <SECONDS>` to cap the time spent solving. All PoW parameters are echoed back in verbose logs to aid debugging.
+
+### Snapshot verification
+Verify that a stream state matches a checkpoint:
+```shell
+veen snapshot verify \
+  --hub https://hub.example \
+  --stream my/ledger \
+  --state-class wallet.ledger \
+  --state-id deadbeef... \
+  --upto-stream-seq 42
+```
+Prints the state hash and MMR root, highlighting the first mismatch when present. Use `--json` for structured output.
+
+For local debug you can point `--hub` at a filesystem path (e.g. `/tmp/veen-hub`) instead of HTTP(S). Combine with `--expected-root <HEX>` to assert a specific Merkle root during CI.
+
+## 5. Running with containers
+
+Docker packaging persists hub data in a named volume.
+
+Prerequisites:
+- Docker Engine 24+ and Docker Compose Plugin v2.2+ installed on the host.
+- Ports `37411` (default) or your chosen `HUB_PORT` must be free.
+- The current working directory should be the repo root (so Compose can build or locate the binary).
+
+1. **Build and start**
+   ```shell
+   docker compose up --build -d
+   ```
+   Listens on `0.0.0.0:37411` with `restart: unless-stopped`.
+
+   Override the exposed port with `HUB_PORT=<PORT> docker compose up -d` if you need to avoid clashes. Compose injects the hub binary built from the local workspace by default; set `HUB_IMAGE` to pull a prebuilt image instead.
+
+2. **Health and logs**
+   ```shell
+   docker compose logs -f hub
+   docker compose ps
+   ```
+   A container healthcheck runs `veen hub health` internally.
+
+   Use `docker compose exec hub veen hub status --hub /var/lib/veen` to confirm the in-container data directory and profile ID.
+
+3. **Use the CLI inside the container**
+   Keep client material on the shared volume:
+   ```shell
+   docker compose run --rm hub veen keygen --out /var/lib/veen/clients/alice
+   docker compose exec hub veen send \
+     --hub /var/lib/veen \
+     --client /var/lib/veen/clients/alice \
+     --stream core/main \
+     --body '{"text":"hello-veens"}'
+   docker compose exec hub veen stream \
+     --hub /var/lib/veen \
+     --client /var/lib/veen/clients/alice \
+     --stream core/main \
+     --from 0
+   ```
+   Stop with `docker compose down` (add `--volumes` to remove the persisted log).
+
+### Overriding environment variables
+Set `VEEN_LISTEN`, `VEEN_LOG_LEVEL`, `VEEN_PROFILE_ID`, `VEEN_CONFIG_PATH`, etc. in `docker-compose.yml` or via `docker compose run -e` to control listen addresses or config paths.
+
+For TLS, mount cert/key pairs into the container and reference them with `VEEN_TLS_CERT`/`VEEN_TLS_KEY`. Logging verbosity can be increased with `VEEN_LOG_LEVEL=debug` to mirror the `--verbose` flag of the CLI.
+
+## 6. Environment descriptors (`veen env`)
+
+Environment files (`*.env.json`) capture cluster context, namespace, and hub metadata for reuse across commands.
+
+1. **Initialise**
+   ```shell
+   veen env init \
+     --root ~/.config/veen \
+     --name demo \
+     --cluster-context kind-demo \
+     --namespace veen-tenant-demo \
+     --description "demo tenant"
+   ```
+   `--root` must be an existing directory; VEEN will create the `.env.json` file within it. The description is optional but helps distinguish similar clusters.
+
+2. **Register hubs and tenants**
+   ```shell
+   veen env add-hub \
+     --env ~/.config/veen/demo.env.json \
+     --hub-name primary \
+     --service-url https://hub.demo.internal:8443 \
+     --profile-id <PROFILE_ID>
+   veen env add-tenant \
+     --env ~/.config/veen/demo.env.json \
+     --tenant-id demo \
+     --stream-prefix core \
+     --label-class wallet
+   ```
+   Use `veen env add-cap` to register capabilities or `veen env add-client` when distributing pre-generated client identities to operators.
+
+3. **Inspect**
+   ```shell
+   veen env show --env ~/.config/veen/demo.env.json
+   veen env show --env ~/.config/veen/demo.env.json --json
+   ```
+   `--json` output includes embedded hub profile IDs, service URLs, and tenant stream prefixes for consumption by automation.
+
+Subsequent CLI calls can use `--env ~/.config/veen/demo.env.json --hub-name primary` to resolve service URLs and profile IDs automatically. When both `--env` and explicit flags are supplied, the explicit flags win.
+
+## 7. Kubernetes workflows (`veen kube`)
+
+Follows `doc/CLI-GOALS-3.txt` to render and apply Namespace/ServiceAccount/RBAC/ConfigMap/Secret/Deployment/Service resources. All subcommands support `--json`.
+
+- **Render manifests**
+  ```shell
+  target/release/veen kube render \
+    --cluster-context kind-veens \
+    --namespace veen-tenants \
+    --name alpha \
+    --image veen-hub:latest \
+    --data-pvc veen-alpha-data \
+    --config hub-config.toml \
+    --env-file hub.env \
+    --pod-annotations pod-annotations.json > hub.yaml
+  ```
+
+- **Apply**
+  ```shell
+  target/release/veen kube apply --cluster-context kind-veens --file hub.yaml --wait-seconds 180
+  ```
+
+- **Logs and status**
+  - `veen kube logs --cluster-context ... --namespace ... --name alpha --follow`
+  - `veen kube status --cluster-context ... --namespace ... --name alpha --json`
+
+- **Delete**
+  ```shell
+  veen kube delete --cluster-context kind-veens --namespace veen-tenants --name alpha --purge-pvcs
+  ```
+
+### Disposable Jobs for client workflows
+Run `veen send` / `veen stream` inside short-lived Jobs that mount Secrets containing clients/capabilities.
+
+- Send example:
+  ```shell
+  veen kube job send \
+    --cluster-context prod-admin \
+    --namespace veen-tenants \
+    --hub-service veen-hub-alpha.veen-tenants.svc.cluster.local:8080 \
+    --client-secret tenant-a-client \
+    --cap-secret tenant-a-cap \
+    --stream core/main \
+    --body '{"k":"v"}' \
+    --state-pvc veen-tenant-a-client-pvc
+  ```
+
+- Stream with proofs:
+  ```shell
+  veen kube job stream \
+    --cluster-context prod-admin \
+    --namespace veen-tenants \
+    --hub-service veen-hub-alpha.veen-tenants.svc.cluster.local:8080 \
+    --client-secret tenant-a-client \
+    --stream core/main \
+    --from 0 \
+    --with-proof \
+    --image registry.example.com/ops/veen-cli:v1
+  ```
+
+Jobs mount Secrets to `/var/lib/veen-client` (and `/var/lib/veen-cap`), stream pod logs in real time, and optionally persist ACK state via `--state-pvc`.
+
+## 8. Verification and tests
+
+- Run all unit tests: `cargo test --workspace`
+- Self-test harness: `target/release/veen selftest core` / `props` / `fuzz` / `all`
+- Overlay suites: `target/release/veen selftest federated` / `kex1` / `hardened` / `meta`
+
+Temporary directories under `/tmp` are removed automatically on success or failure.
+
+## 9. Common helper tools
+
+- `Justfile` commands: `just ci` (fmt + clippy + test), `just fmt`, `just cli -- --help`
+- Performance: `just perf -- "--requests 512 --concurrency 64"` (add `--mode http` for HTTP latency)
+
+## 10. Further reading
+
+- Protocol/overlay specs (SSOT): `doc/spec.md`
+- CLI/OS goals: `doc/CLI-GOALS-1.txt`–`CLI-GOALS-3.txt`, `doc/OS-GOALS.txt`
+- Design rationale: `doc/Design-Philosophy.txt`
+
+
+## Whyuse.txt
+
+Why use VEEN v0.0.1
+Plain ASCII, English only
+	0.	Purpose
+
+This document explains why an organization should deploy VEEN as part of its production stack. It focuses on concrete, operational value: what becomes easier, safer, or cheaper once event traffic passes through VEEN’s ephemeral, verifiable fabric.
+
+VEEN’s core claim can be stated as:
+
+A network should be something you can clone, fork, replay, and interpret.
+
+If your current messaging and network infrastructure cannot be cloned, cannot be replayed from a single source of truth, and cannot be interpreted offline in a deterministic way, VEEN gives you capabilities you do not currently have.
+	1.	Operational value: safer networks by default
+
+1.1 A single place where “what happened” is unambiguous
+
+In most systems today:
+	•	messages pass through multiple brokers, gateways, and services;
+	•	each component keeps its own partial logs;
+	•	reconstructing an incident requires correlating multiple data sources with different schemas and retention policies.
+
+VEEN enforces one simple rule: every accepted message becomes part of an authenticated log for its label, with receipts, MMR roots, and optional checkpoints.
+
+This means that:
+	•	“Did this message happen?” has a cryptographic yes/no answer.
+	•	“In what order did these events occur?” is determined by stream order and MMR proofs, not by scattered timestamps.
+	•	“What state should the system be in?” can be recomputed by folding overlays over logs, without trusting ad hoc databases.
+
+Adoption value: incident response, security reviews, and audits become fundamentally easier because there is a single, authoritative event history rooted in signed receipts.
+
+1.2 Disposable hubs instead of fragile snowflake clusters
+
+Traditional message brokers and API gateways become “pets”:
+	•	upgrades are risky;
+	•	topology drift breaks invariants;
+	•	failover requires careful choreography.
+
+VEEN treats hubs as disposable containers:
+	•	they can be killed and restarted without semantic loss;
+	•	they can be replaced by newer binaries on the same log directories;
+	•	multiple hubs can serve the same fabric, as long as they respect invariants.
+
+Operational value:
+	•	upgrades are reduced to “roll out new hub image, point it at the same data directory, observe metrics”;
+	•	capacity planning is about logs and I/O, not about preserving hidden broker state;
+	•	running on bare metal, WSL2, Docker, k8s, or k3s is a deployment choice, not a semantic change.
+
+1.3 Built-in disaster recovery semantics
+
+Because VEEN treats logs as the single truth and hubs as disposable, DR becomes a first-class capability:
+	•	a second region or cluster can mirror logs via bridge;
+	•	a cutover scenario is a matter of moving clients and overlays to fold over mirrored logs;
+	•	DR tests can be automated as self-tests that spin hubs, replay logs, and verify that invariants hold.
+
+This is very different from trying to replicate an entire message broker, its database, and all consumers’ state. VEEN’s design makes “can we bring this network back from logs alone?” an answerable question.
+	2.	Security and compliance value
+
+2.1 Strong integrity without a blockchain
+
+Many teams want tamper-evident logs but do not want to operate or integrate a blockchain.
+
+VEEN offers:
+	•	AEAD protection and end-to-end integrity for payloads;
+	•	MMR-based authenticated logs with leaf-level inclusion proofs;
+	•	hub signatures on receipts and checkpoints;
+	•	optional external anchoring for roots.
+
+This gives:
+	•	demonstrable proof that events were not retroactively edited or deleted, within a retention policy;
+	•	the ability to present short, verifiable evidence to auditors and regulators without exposing full internal infrastructure;
+	•	a way to separate “who can see plaintext” from “who can verify integrity”.
+
+In short, VEEN gives most of the audit and non-repudiation benefits people expect from ledger systems, but with the performance and operational model of an event fabric, not a global consensus chain.
+
+2.2 Capability-based, rate-limited admission
+
+Admission and rate limiting are expressed via cap_token and revocation overlays, not hard-coded per-service logic.
+
+Benefits:
+	•	access policies can be changed by publishing events, leaving a signed record of policy history;
+	•	rate limits are enforced at the network fabric layer with cryptographic structure, instead of being reimplemented in every microservice;
+	•	revocation decisions are reproducible from logs: “why was this request denied?” can be traced back to specific revocation and quota events.
+
+This is particularly useful in environments where multiple teams or tenants share infrastructure and where auditability of access control is a requirement.
+	3.	Developer and architecture value
+
+3.1 Overlays let you add semantics after the fact
+
+Today, changing semantics of a running network often requires:
+	•	redeploying services;
+	•	applying database migrations;
+	•	coordinating new headers, message shapes, and routing rules.
+
+In VEEN:
+	•	the core wire format is fixed and minimal;
+	•	overlays interpret logs as identity, wallets, CRDT state, RPC endpoints, or operational metrics;
+	•	new overlays can be added to existing logs without touching hubs.
+
+This yields:
+	•	the ability to “retrofit” semantics to historical data (for example, compute new analytics, derive new counters, or define new forms of identity from existing traffic);
+	•	the ability to introduce new application concerns, such as billing or cross-region CRDTs, as overlays instead of as invasive code changes across the fleet.
+
+Put plainly: once traffic goes through VEEN, you regain the option to reinterpret that traffic later, without redeploying the world.
+
+3.2 Stepwise migration from legacy systems
+
+VEEN is explicitly designed so that teams can start with:
+	•	mirroring events from existing brokers and APIs into a VEEN label;
+	•	doing nothing else.
+
+At this stage, VEEN is “just” a better audit log and DR substrate.
+
+Then, gradually:
+	•	a subset of traffic is sent directly through VEEN;
+	•	overlays are added to derive identity, quotas, and financial state;
+	•	existing services begin to read from VEEN streams instead of legacy brokers;
+	•	legacy components can be retired one by one.
+
+At no point is a big-bang migration required. VEEN fits into brownfield environments.
+
+3.3 Treating the network as a testable, spec-aligned component
+
+Because VEEN comes with:
+	•	a precise specification for MSG, RECEIPT, CHECKPOINT, and invariants;
+	•	self-tests that spin up hubs, send messages, resync, and verify invariants;
+	•	test coverage for identity, wallet, revocation, and proof behavior,
+
+you can treat the network fabric as a unit you can test in CI:
+	•	“does our network obey its own spec?” becomes a machine-checkable question;
+	•	regression in network semantics is caught at the level of invariants, not after outages;
+	•	multiple implementations or forks can be validated against the same behavioral tests.
+
+This is very different from most ad hoc event pipelines, where behavior is distributed and emergent.
+	4.	Integration and platform value
+
+4.1 OS and platform agnostic fabric
+
+With VEEN, a single set of logs can be:
+	•	served by a hub running on a developer’s laptop under WSL2;
+	•	later attached to a hub running in Docker or k8s in staging;
+	•	finally mounted into a k3s or bare-metal cluster in production.
+
+Semantics remain identical.
+
+This decouples:
+	•	“where do we run this?” from “what does it mean when a message is accepted?”;
+	•	infra decisions from protocol design.
+
+It also makes it easier to support hybrid:
+	•	on-prem components;
+	•	cloud components;
+	•	regulated environments that demand specific OS or hypervisor configurations.
+
+4.2 Multi-tenant and multi-realm by construction
+
+Because identity and realms are derived from overlay state, VEEN is naturally suited for:
+	•	multi-tenant SaaS;
+	•	internal platforms with multiple business units;
+	•	regulated scenarios where one fabric must enforce strong separation between orgs.
+
+The same core can:
+	•	serve multiple realms, each with its own authorities and hubs;
+	•	enforce admission via cap_token chains specific to each realm;
+	•	expose only aggregated or filtered views to certain users or services.
+
+You get a multi-tenant-ready network substrate without having to bolt on tenancy after the fact.
+	5.	Economic value
+
+5.1 Reduced cost of outages and investigations
+
+Outages and security incidents are expensive mainly because:
+	•	systems are opaque;
+	•	reconstructing state takes time;
+	•	root cause analysis is uncertain.
+
+VEEN lowers these costs by:
+	•	making “what happened” reconstructible from logs alone;
+	•	making “what should state be now?” a deterministic fold;
+	•	avoiding silent drift between databases, caches, and logs.
+
+Even if VEEN does not replace your primary brokers immediately, using it as a parallel fabric for critical traffic acts as an insurance policy against opacity and state drift.
+
+5.2 Cheaper evolution and compliance
+
+As regulations change, many organizations are forced to:
+	•	redesign logging;
+	•	retrofit audit capabilities;
+	•	revalidate access and revocation behavior.
+
+With VEEN:
+	•	log structure and proofs already exist;
+	•	admission policies are expressed as overlay events;
+	•	new compliance requirements can often be met by adding overlays or anchoring strategies, not by reengineering infrastructure.
+
+The long-term cost of regulatory adaptation is lowered, and future-proofing is improved.
+	6.	When VEEN makes the most sense
+
+VEEN is most valuable when at least one of the following is true:
+	•	you operate multiple services and want a coherent, verifiable event history across them;
+	•	you need strong, demonstrable auditability without running a blockchain;
+	•	you are planning or running multi-region and DR setups, and want deterministic recovery;
+	•	you expect to evolve semantics (billing, identity, quotas, CRDT state) over years without constantly migrating databases and brokers;
+	•	you want to treat your network as something you can clone, fork, replay, and interpret, not as a fragile, permanently live structure.
+
+If your environment is simple (a single monolith, a single database, minimal compliance), VEEN may be overkill.
+If your environment is complex, multi-service, multi-tenant, or regulated, VEEN’s value compounds as complexity grows.
+	7.	Summary
+
+You should use VEEN when you want your network fabric to behave like:
+	•	a reproducible, testable component with a written spec;
+	•	a tamper-evident event ledger without the cost of global consensus;
+	•	an ephemeral deployment surface (hubs) over a durable truth (logs);
+	•	an integration spine where higher-level semantics are overlays, not hard-coded wiring.
+
+In practical terms: VEEN lets you turn your network into something you can clone, fork, replay, and interpret, while keeping hubs disposable and overlays programmable. That combination is rare, and it directly translates into lower risk, clearer audits, safer evolution, and simpler disaster recovery.
