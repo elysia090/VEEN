@@ -1856,6 +1856,8 @@ mmr_hash: “sha256”
 profile_id = Ht(“veen/profile”, CBOR(profile))
 
 Every MSG carries profile_id; receivers MAY reject unknown profile_id. Changing any field in profile changes profile_id. All participants in a deployment MUST agree on a single profile_id or an explicit set of supported profile_id values.
+
+pad_block is a deployment parameter encoded in the profile. The profile shown above is an illustrative baseline; deployments MAY choose a different pad_block (for example 256 or 1024 for messaging use cases, or 0 for bulk ingest). There is no implicit default beyond the chosen profile value.
 	3.	Keys and identities
 
 Clients hold long-term keys id_sign (Ed25519) and id_dh (X25519). Prekeys are X25519 public keys signed by id_sign.
@@ -2027,6 +2029,15 @@ rate: { per_sec: uint, burst: uint }?
 },
 sig_chain: [ bstr(64), … ]
 }
+
+allow.stream_ids MUST contain at least one entry. An empty array is invalid and MUST be rejected with E.CAP. Deployments that wish to support an “all streams” capability MUST define and document an explicit wildcard encoding (for example a dedicated stream_id value) and MUST treat any other empty or missing list as invalid.
+
+allow.rate is optional. If absent, no rate limit is enforced for that capability; if present, rate limits MUST follow the token bucket semantics in OP0.3.
+
+allow.ttl is a validity duration in seconds. In v0.0.1 core (without KEX1+ issued_at), hubs MUST bind an issued_at timestamp to each auth_ref on first observation and MUST enforce expiry as now <= issued_at + ttl. issued_at is defined as:
+	•	the hub’s hub_ts at the time of /authorize, if /authorize is used; or
+	•	the hub’s hub_ts at first successful MSG admission using the auth_ref, if /authorize is not used.
+The issued_at chosen for a given auth_ref MUST remain stable for the lifetime of the admission record; re-verifying a cap_token MUST NOT extend its ttl.
 
 Each link in sig_chain is an Ed25519 signature over:
 
@@ -2270,6 +2281,7 @@ OP0.6 Padding policy:
 pad_block is in {0, 256, 1024}. Default:
 	•	pad_block = 256 for messaging use cases.
 	•	pad_block = 0 for bulk ingest where length-hiding is not required.
+These are recommended defaults for profile selection; the effective pad_block is always the value encoded in the profile_id used by a deployment.
 
 Padding bytes are zeros and are included in ct_hash.
 
