@@ -19,11 +19,11 @@ use tracing::info;
 
 use veen_bridge::{run_bridge, BridgeConfig, EndpointConfig};
 use veen_core::ht;
-use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::pipeline::{
     BridgeIngestRequest, HubStreamState, StoredMessage, StreamReceipt, SubmitRequest,
 };
 use veen_hub::runtime::HubRuntime;
+use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::storage::HUB_KEY_FILE;
 
 use crate::{query, SelftestGoalReport, SelftestReporter};

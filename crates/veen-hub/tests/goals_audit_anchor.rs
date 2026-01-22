@@ -22,9 +22,9 @@ use tokio::task::JoinHandle;
 use veen_core::label::Label;
 use veen_core::wire::checkpoint::{Checkpoint, CHECKPOINT_VERSION};
 use veen_core::wire::types::{MmrRoot, Signature64};
-use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::pipeline::{AnchorLog, AnchorRequest};
 use veen_hub::runtime::HubRuntime;
+use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 
 /// Scenario acceptance covering audit anchor workflows with checkpoint binding.
 ///

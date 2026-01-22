@@ -3,11 +3,18 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::config::HubRuntimeConfig;
-use crate::observability::HubObservability;
+mod config;
+mod observability;
+
+pub use config::{
+    AdmissionConfig, AnchorConfig, DedupConfig, FederationConfig, HubConfigOverrides, HubRole,
+    HubRuntimeConfig, ObservabilityConfig,
+};
+pub use observability::{HubObservability, ObservabilitySnapshot};
+
 use crate::pipeline::HubPipeline;
+use crate::server::HubServerHandle;
 use crate::storage::HubStorage;
-use crate::transport::HubServerHandle;
 
 pub struct HubRuntime {
     config: HubRuntimeConfig,

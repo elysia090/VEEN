@@ -13,13 +13,13 @@ use tokio::sync::{Mutex, Semaphore};
 use veen_core::cap_stream_id_from_label;
 use veen_core::profile::Profile;
 use veen_core::wire::types::ClientId;
-use veen_hub::config::{
+use veen_hub::pipeline::{HubPipeline, SubmitRequest, SubmitResponse};
+use veen_hub::runtime::{
     AdmissionConfig, AnchorConfig, DedupConfig, FederationConfig, HubRole, HubRuntimeConfig,
     ObservabilityConfig,
 };
-use veen_hub::pipeline::{HubPipeline, SubmitRequest, SubmitResponse};
+use veen_hub::server::HubServerHandle;
 use veen_hub::storage::HubStorage;
-use veen_hub::transport::HubServerHandle;
 
 use crate::metrics::{HistogramSnapshot, HubMetricsSnapshot, LatencyRecorder};
 use crate::{SelftestGoalReport, SelftestReporter};

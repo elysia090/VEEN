@@ -14,9 +14,9 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::fs;
 
-use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::pipeline::{StreamMessageWithProof, SubmitRequest, SubmitResponse};
 use veen_hub::runtime::HubRuntime;
+use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 
 const HUB_KEY_VERSION: u8 = 1;
 

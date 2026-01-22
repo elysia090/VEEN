@@ -7,9 +7,9 @@ use serde_bytes::ByteBuf;
 use tempfile::TempDir;
 use tokio::fs;
 
-use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::pipeline::{StreamResponse, SubmitRequest, SubmitResponse};
 use veen_hub::runtime::HubRuntime;
+use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 
 /// Scenario acceptance covering disposable mesh deployments on Kubernetes.
 ///

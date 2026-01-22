@@ -6,8 +6,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
-use veen_hub::config::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::runtime::HubRuntime;
+use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 
 #[derive(Parser)]
 #[command(name = "veen-hub", version, about = "Run the VEEN hub runtime", long_about = None)]
