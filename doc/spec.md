@@ -144,63 +144,60 @@ derived structures so they can be indexed uniformly.
 3. **Append-path batching** (bounded fsync + segmented logs).
 4. **Bridge throttling** (dedupe + backpressure).
 
-### Complexity & non-sequential processing guarantees (normative update)
-All implementations MUST guarantee that every externally visible operation defined by this specification
-has a strict worst-case time complexity of **O(1)** or, at maximum, **O(polylog n)** with respect to the
-total history size `n` (total events/messages per stream or per realm as applicable). Any design that
-requires linear scans, linear rebuilds, or sequential dependency on the entire history is **non-compliant**.
+### O(1)/polylog compliance architecture (normative, refactored)
+All externally visible operations defined by this specification MUST exhibit a strict worst-case time
+complexity of **O(1)** or, at maximum, **O(polylog n)** with respect to the total history size `n`
+(total events/messages per stream or per realm as applicable). Any design that requires linear scans,
+linear rebuilds, or sequential dependency on the full history is **non-compliant**.
 
 **Definitions**
 - `n` refers to the total number of events/messages relevant to the operation (per-stream for stream ops,
   per-realm for realm-wide ops, per-hub for hub-wide ops).
 - **polylog n** means `O((log n)^k)` for a fixed constant `k`.
 
-**Normative constraints**
-- **No O(n) reads or writes:** All request paths (submit, stream read/proof, query, inspection, revocation,
-  and wallet/identity overlays) MUST be bounded by O(1) or O(polylog n). Any fallback to linear scans is
-  forbidden, even under cache miss or cold start.
-- **No sequential dependency on full history:** Derived state MUST be computable via associative, deterministic
-  reductions that support parallel or tree-based evaluation. A schema’s fold function MUST specify a
-  merge/combine operation that allows `fold(range)` to be computed from subrange summaries without replaying
-  every event in sequence.
-- **Mandatory hierarchical summaries:** Implementations MUST maintain hierarchical checkpoints/snapshots and
-  range summaries (e.g., segment trees, skip lists, or chunked accumulator tables) so that:
+**Normative performance contract**
+- **No O(n) paths:** Submit, stream read/proof, query, inspection, revocation, and all wallet/identity overlays
+  MUST be bounded by O(1) or O(polylog n). Linear fallbacks are forbidden, including on cold start or cache miss.
+- **No sequential dependence:** Derived state MUST be computable via associative, deterministic reductions
+  that support parallel or tree-based evaluation. A schema’s fold function MUST define a merge operation that
+  permits `fold(range)` from subrange summaries without replaying every event in order.
+- **Cold start bound:** Startup and recovery MUST be O(polylog n) via bounded metadata loads. Full log replay is
+  non-compliant for operational paths and is only permitted for offline recovery tooling.
+- **Proof bound:** MMR or equivalent proof construction MUST be O(polylog n) using precomputed peaks/branches
+  and bounded caches; scanning history to rebuild proofs is non-compliant.
+
+**Mandatory large-scale data structures**
+- **Hierarchical summaries:** Implementations MUST persist checkpoints/snapshots and range summaries
+  (segment trees, skip lists, chunked accumulators, or equivalent) such that:
   - stream range proofs are O(polylog n),
   - range state reconstruction is O(polylog n),
   - the latest state is retrievable in O(1).
 - **Index completeness:** All queryable fields and inspection endpoints MUST have explicit, persisted indexes
-  with bounded fan-out (e.g., B-tree or LSM-tree indexes), eliminating any need for full scans.
-- **Cold start bound:** Cold start and restart MUST be O(polylog n) by loading bounded summaries and indexes;
-  replaying full logs is non-compliant except in offline recovery tooling that is not part of the operational
-  spec surface.
-- **Proof construction bound:** MMR or equivalent proof construction MUST be O(polylog n) with precomputed
-  peaks/branches and bounded caches; rebuilding proofs by scanning history is non-compliant.
+  with bounded fan-out (e.g., B-tree, LSM-tree, or equivalent). Full scans are forbidden.
+- **Per-label head index:** Maintain an O(1) head record per label/stream containing
+  `(latest stream_seq, latest leaf_hash, last checkpoint reference)`.
 
-**Design requirements (implementation-agnostic)**
-- **Per-label head index:** Maintain an O(1) head record per label/stream with (latest stream_seq, latest leaf_hash,
-  and last checkpoint reference).
-- **Chunked fold summaries:** Every K events, compute a deterministic summary object (schema-defined) so that
-  any range fold can be computed by combining O(polylog n) summaries.
-- **Deterministic tree shape:** Use a canonical tree partitioning of stream_seq (e.g., binary tree over ranges,
-  fixed-size chunking with a balanced index) so that all nodes derive identical summaries from identical inputs.
-- **Parallelizable evaluation:** Implementations SHOULD exploit parallelism across independent ranges or labels,
-  but MUST remain deterministic regardless of concurrency.
+**Refactored folding model (schema requirements)**
+- **Summary type:** Every schema that defines folding MUST define a summary type `S`.
+- **Merge contract:** Schemas MUST define a deterministic merge function
+  `merge(S_left, S_right) -> S` that is associative and order-canonical.
+- **Chunked summaries:** Every K events, produce a deterministic summary object so that any range fold is
+  computed by combining O(polylog n) summaries.
+- **Canonical tree shape:** Implementations MUST use a canonical range partitioning of `stream_seq`
+  (balanced tree or fixed-size chunking with deterministic indexing) so identical inputs yield identical summaries.
+
+**Operational constraints (optimization-hard requirements)**
+- **Worst-case bounds only:** Amortized or probabilistic bounds are insufficient unless a strict per-request cap
+  is enforced and documented.
+- **Bounded fan-out I/O:** Index and summary structures MUST cap per-operation disk seeks and network round trips
+  to O(polylog n). Any unbounded scatter/gather is non-compliant.
+- **Streaming-friendly proofs:** Proof generation MUST support streaming construction from precomputed summaries
+  without materializing full paths in memory; memory usage MUST be O(polylog n).
+- **Deterministic concurrency:** Parallel folding/proof construction MUST preserve canonical merge order and yield
+  byte-identical outputs across executions.
 
 These constraints are **normative** and supersede any legacy text that implies or permits linear-time scans,
 full-log replays, or sequential-only folding in operational paths.
-
-**Additional optimization requirements (normative)**
-- **Amortization is insufficient:** Any bound MUST hold per request in the worst case; amortized O(1) or
-  probabilistic bounds alone are non-compliant unless an explicit hard cap is enforced.
-- **Bounded fan-out structures:** All index and summary structures MUST use bounded fan-out and MUST cap
-  per-operation disk seeks and network round trips to O(polylog n).
-- **Streaming-friendly proofs:** Proof generation MUST support streaming construction from precomputed
-  summaries without materializing full paths in memory; memory usage MUST be O(polylog n).
-- **Mergeable schema summaries:** Every schema that defines folding MUST define a summary type `S` and a
-  deterministic merge function `merge(S_left, S_right) -> S` such that summaries compose without reprocessing
-  individual events.
-- **Deterministic concurrency:** If implementations parallelize folding/proof construction, they MUST ensure
-  that the order of merges is canonical and that the output is byte-identical across executions.
 
 ## Source index (consolidated)
 
