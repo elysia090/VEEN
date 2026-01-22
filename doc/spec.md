@@ -99,6 +99,26 @@ authoritative; later repetitions are non-normative commentary unless explicitly 
   - Apply idempotent deduplication before re-signing and publishing.
   - Use backpressure and bounded queues to avoid runaway memory usage.
 
+### Spec optimization pipeline (normative guidance)
+Implementations SHOULD apply the following ordered refinement steps when converting a spec surface into concrete
+data structures. The order is intended to expose constant-time or polylog access paths early, and to re-normalize
+derived structures so they can be indexed uniformly.
+
+1. **ID-ify keys/state:** Compress coordinates/keys into dense IDs (coordinate compression, dictionary encoding,
+   normalization) so they map to array indices.
+2. **Fix the location in O(1) expected time:** Use hash maps, perfect hash tables, or cache-indexed tables to
+   resolve “where” each ID lives.
+3. **Precompute static parts:** Pre-derive tables, indices, and auxiliary arrays so queries become O(1) lookups.
+4. **Create locality:** Use fixed-size blocks, micro/macro layouts, and bitset/SIMD-friendly packing to improve
+   cache behavior and bounded fan-out.
+5. **Decompose aggregation:** Model folds as monoids and implement with Fenwick trees, segment trees, sparse tables,
+   or equivalent structures to ensure O(1)/O(polylog) queries.
+6. **Reduce residual order dependence:** If strict ordering remains, convert to predecessor/successor queries using
+   y-fast tries, vEB trees, or rank/select bitsets.
+7. **Re-ID derived structures:** Assign IDs to nodes/blocks/clusters so the new structures are again array-indexed.
+8. **Re-hash in the new ID space:** Rebuild hash tables and indexes in the normalized space; then repeat from step 2
+   if additional derived layers emerge.
+
 ### Operational efficiency levers (actionable)
 - **Cold start**
   - Keep a warm standby hub pointed at the same data directory for fast recovery.
