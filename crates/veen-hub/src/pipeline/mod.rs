@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::convert::TryInto;
 use std::io::{Cursor, ErrorKind};
@@ -1508,10 +1509,24 @@ impl HubPipeline {
                 .then_with(|| a.primary_hub.as_ref().cmp(b.primary_hub.as_ref()))
         };
 
-        let mut sorted = records;
-        sorted.sort_by(ordering);
-        let active = sorted.iter().find(|record| record.is_active_at(now));
-        let selected = active.or_else(|| sorted.first());
+        let mut selected = None;
+        let mut active = None;
+        for record in &records {
+            if selected
+                .map(|current| ordering(record, current) == Ordering::Less)
+                .unwrap_or(true)
+            {
+                selected = Some(record);
+            }
+            if record.is_active_at(now)
+                && active
+                    .map(|current| ordering(record, current) == Ordering::Less)
+                    .unwrap_or(true)
+            {
+                active = Some(record);
+            }
+        }
+        let selected = active.or(selected);
 
         let primary_hub = selected.map(|record| hex::encode(record.primary_hub.as_ref()));
         let replica_hubs = selected
