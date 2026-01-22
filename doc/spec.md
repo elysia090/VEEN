@@ -2753,8 +2753,9 @@ sensitivity:    text?,         // for example “low” | “medium” | “high
 retention_hint: uint?          // advisory retention in seconds
 }
 
-Published on:
-	•	stream_label_class for the relevant realm.
+Published via:
+	•	The reference implementation accepts signed label-class records via the hub’s `/label-class` endpoint and stores them as hub state.
+	•	`stream_label_class` remains reserved for future stream-backed replication of label classifications.
 
 6.2 Operational use
 
@@ -5245,22 +5246,19 @@ Flow:
 
 # Set label classes as admin
 veen-cli label-class set \
-  --realm default \
-  --label chat/user \
+  --stream chat/user \
   --class user \
   --sensitivity medium \
   --retention-hint 86400
 
 veen-cli label-class set \
-  --realm default \
-  --label wallet/main \
+  --stream wallet/main \
   --class wallet \
   --sensitivity high \
   --retention-hint 2592000
 
 veen-cli label-class set \
-  --realm default \
-  --label log/ingest \
+  --stream log/ingest \
   --class log \
   --sensitivity low \
   --retention-hint 86400
@@ -6602,12 +6600,11 @@ Command:
 
 veen label-class set
 –hub http://host:port
-–realm HEX32
-–label HEX32
+–label HEX32 | –stream STREAM
 –class TEXT
 [–sensitivity low|medium|high]
 [–retention-hint SECONDS]
-–admin /path/to/admin-client
+–signer /path/to/admin-client
 [–json]
 
 Behavior:
@@ -6618,8 +6615,7 @@ class: text,
 sensitivity: text?,
 retention_hint: uint?
 }
-	•	Publish on stream_label_class for the realm via admin client.
-	•	Verify RECEIPT.
+	•	Publish a signed label classification to the hub.
 	•	Optionally re-query hub for effective classification and print it.
 
 6.2 Show label classification
@@ -6628,7 +6624,7 @@ Command:
 
 veen label-class show
 –hub http://host:port
-–label HEX32
+–label HEX32 | –stream STREAM
 [–json]
 
 Behavior:
@@ -6650,12 +6646,11 @@ Command:
 
 veen label-class list
 –hub http://host:port
-[–realm HEX32]
 [–class TEXT]
 [–json]
 
 Behavior:
-	•	Query all known label classifications in the realm or deployment.
+	•	Query all known label classifications in the deployment.
 	•	Filter by class if provided.
 	•	Print a compact table or JSON array of:
 label, class, sensitivity, retention_hint

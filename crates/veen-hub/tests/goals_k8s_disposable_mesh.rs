@@ -47,7 +47,7 @@ async fn goals_k8s_disposable_mesh() -> Result<()> {
     )
     .await?;
 
-    let http = reqwest::Client::new();
+    let http = reqwest::Client::builder().no_proxy().build()?;
     let base = format!("http://{}", runtime.listen_addr());
     let stream = "mesh/core";
     let client_id = hex::encode(generate_client_id());

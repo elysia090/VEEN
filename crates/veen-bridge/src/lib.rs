@@ -410,10 +410,10 @@ mod tests {
         replica: &MockServer,
         config: BridgeConfig,
     ) -> Result<BridgeRuntime> {
-        let client = Client::builder().build()?;
+        let client = Client::builder().no_proxy().build()?;
         let mut runtime = BridgeRuntime::new(client, config);
 
-        replica
+        let _replica_resync_mock = replica
             .mock_async(|when, then| {
                 when.method(POST)
                     .path("/resync")
@@ -422,7 +422,7 @@ mod tests {
             })
             .await;
 
-        primary
+        let _primary_metrics_mock = primary
             .mock_async(|when, then| {
                 when.method(GET).path("/metrics");
                 then.status(200)
@@ -513,7 +513,7 @@ mod tests {
             initial_streams: Vec::new(),
         };
 
-        replica
+        let _replica_resync_mock = replica
             .mock_async(|when, then| {
                 when.method(POST)
                     .path("/resync")
@@ -522,7 +522,7 @@ mod tests {
             })
             .await;
 
-        primary
+        let _primary_metrics_mock = primary
             .mock_async(|when, then| {
                 when.method(GET).path("/metrics");
                 then.status(200)
@@ -530,7 +530,7 @@ mod tests {
             })
             .await;
 
-        let mut runtime = BridgeRuntime::new(Client::builder().build()?, config);
+        let mut runtime = BridgeRuntime::new(Client::builder().no_proxy().build()?, config);
         runtime.initialise().await?;
 
         primary

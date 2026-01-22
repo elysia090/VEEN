@@ -53,7 +53,7 @@ async fn goals_audit_anchor() -> Result<()> {
     .await?;
     let runtime = HubRuntime::start(config).await?;
 
-    let http = reqwest::Client::new();
+    let http = reqwest::Client::builder().no_proxy().build()?;
     let stream = "audit/anchor";
     let client_id = hex::encode(generate_client_id().verifying_key().to_bytes());
     let submit: veen_hub::pipeline::SubmitResponse = http
@@ -215,7 +215,7 @@ impl PseudoAnchor {
         mmr_root: &str,
         checkpoint: &[u8],
     ) -> Result<()> {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().no_proxy().build()?;
         client
             .post(format!("http://{}/checkpoint", self.addr))
             .json(&PseudoAnchorSubmission {

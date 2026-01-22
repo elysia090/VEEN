@@ -12,6 +12,26 @@ pub enum ParseHexError {
     InvalidCharacter { index: usize, character: char },
 }
 
+impl ParseHexError {
+    /// Returns the expected hexadecimal length when the error is length-related.
+    #[must_use]
+    pub const fn expected(&self) -> Option<usize> {
+        match self {
+            Self::InvalidLength { expected, .. } => Some(*expected),
+            Self::InvalidCharacter { .. } => None,
+        }
+    }
+
+    /// Returns the actual hexadecimal length when the error is length-related.
+    #[must_use]
+    pub const fn actual(&self) -> Option<usize> {
+        match self {
+            Self::InvalidLength { actual, .. } => Some(*actual),
+            Self::InvalidCharacter { .. } => None,
+        }
+    }
+}
+
 impl fmt::Display for ParseHexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -246,10 +266,7 @@ mod tests {
             expected: 8,
             actual: 6,
         };
-        assert_eq!(
-            err.to_string(),
-            "expected 8 hex characters, found 6"
-        );
+        assert_eq!(err.to_string(), "expected 8 hex characters, found 6");
 
         let err = ParseHexError::InvalidCharacter {
             index: 3,
