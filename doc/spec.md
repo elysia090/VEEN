@@ -1,54 +1,62 @@
 # VEEN Specification (SSOT)
 
-この文書は VEEN の単一仕様（SSOT）です。`doc/reference.md` は旧仕様のアーカイブであり、非規範（参考）です。
+This document is the single source of truth (SSOT) for VEEN. `doc/reference.md` is an archived legacy reference and is non-normative.
 
-## 0. 目的・適用範囲
+## 0. Purpose and scope
 
-- **目的**: VEEN のコア・オーバーレイ・運用・製品プロファイルを、構造的かつ明瞭に統合する。
-- **適用範囲**: v0.0.1 コア、v0.0.1+ / v0.0.1++ オーバーレイ、CLI/運用、製品プロファイル（SDR0/AGB0）。
-- **前提**: 本仕様のすべての外部公開 API/CLI は **O(1)/polylog n** を満たし、逐次依存は極小である。
+- **Purpose:** Integrate the VEEN core, overlays, operations, and product profiles in a structured, unambiguous specification.
+- **Scope:** v0.0.1 core, v0.0.1+ / v0.0.1++ overlays, CLI/operations, and product profiles (SDR0/AGB0).
+- **Invariant:** Every external API/CLI operation MUST be **O(1)** or **O(polylog n)**. Linear scans and sequential replays on hot paths are non-compliant.
 
-## 1. 用語・命名（明確化・後方互換）
+## 1. Terms and naming (clarified and compatible)
 
-- **Hub**: 受理・順序付け・証明を提供する中継ノード。意味解釈は持たない。
-- **StreamID**: アプリが定義する論理ストリーム識別子（32 bytes）。
-- **Label**: Hub が順序付けする実ストリーム識別子。`Label = Ht("veen/label", routing_key || StreamID || epoch)`。
-- **StreamSeq**: Label ごとの単調増加シーケンス。
-- **ClientID**: Ed25519 公開鍵（MSG.sig の検証キー）。
-- **ClientSeq**: `(Label, ClientID)` ごとの単調増加シーケンス。
-- **ProfileID**: 暗号プロファイル設定のハッシュ。
-- **CapToken**: 権限・TTL・レートを表す能力トークン。
+- **Hub:** Relay node that admits, orders, and proves messages. It does not interpret payload semantics.
+- **StreamID:** Application-defined logical stream identifier (32 bytes).
+- **Label:** Physical stream identifier ordered by a Hub. `Label = Ht("veen/label", routing_key || StreamID || epoch)`.
+- **StreamSeq:** Monotonic sequence per Label.
+- **ClientID:** Ed25519 public key (verification key for `MSG.sig`).
+- **ClientSeq:** Monotonic sequence per `(Label, ClientID)`.
+- **ProfileID:** Hash of the cryptographic profile definition.
+- **CapToken:** Capability token expressing authorization, TTL, and rate.
 
-**後方互換ルール（規範）**
-- CLI: `veen` が正規。`veen-cli` は同等の別名として受け付ける。`veen hub start` が正規。旧 `veen-hub run/start` は同等動作。
-- 版数: v0.0.1 が不変コア。v0.0.1+ / v0.0.1++ は追加のみ（上書き禁止）。
+**Backward-compatibility rules (normative)**
+- CLI: `veen` is canonical. `veen-cli` is an equivalent alias. `veen hub start` is canonical. Legacy `veen-hub run/start` are accepted aliases.
+- Versioning: v0.0.1 is immutable core. v0.0.1+ and v0.0.1++ are additive only (no redefinition or overrides).
 
-## 2. グローバル規約
+## 2. Global conventions
 
-### 2.1 エンコーディング
-- **CBOR は決定的**: フィールド順序固定、最小整数、固定長 bstr、タグ禁止、未知キー拒否。
+### 2.1 Encoding
+- **CBOR must be deterministic:** fixed field order, minimal integers, fixed-length `bstr`, no tags, reject unknown keys.
 
-### 2.2 暗号プロファイル（最低要件）
-- H: SHA-256
+### 2.2 Cryptographic profile (minimum requirements)
+- Hash: SHA-256
 - HKDF: HKDF-SHA256
-- AEAD: XChaCha20-Poly1305（本文）
-- 署名: Ed25519
+- AEAD: XChaCha20-Poly1305 (payload)
+- Signature: Ed25519
 - DH: X25519
 - HPKE: RFC9180 base (X25519-HKDF-SHA256 + ChaCha20-Poly1305)
 
-**ProfileID** は上記パラメータの CBOR に対して `Ht("veen/profile", ...)` で計算。
+**ProfileID** is computed as `Ht("veen/profile", CBOR(profile_params))`.
 
-### 2.3 性能規約（O(1)/polylog n）
-**すべての外部操作**（送信、読み出し、証明、クエリ、検査、失効、ウォレット/ID など）は **O(1)** もしくは **O(polylog n)** を保証する。線形スキャンや順序再生に依存する運用パスは非準拠。
+### 2.3 Performance invariants (O(1)/polylog n)
+All external operations (submit, read, prove, query, inspect, revoke, wallet/ID, etc.) MUST be **O(1)** or **O(polylog n)**. Any O(n) or scan-based path is prohibited for the external surface.
 
-- **逐次依存の極小化**: フォールドは結合則を持つ `merge(S_left, S_right)` によって木構造で評価可能であること。
-- **レンジ要約**: K 件単位の要約を保持し、`fold(range)` を O(polylog n) で構成。
-- **ヘッドインデックス**: 各 Label の最新 `(StreamSeq, leaf_hash, checkpoint_ref)` を O(1) で参照可能。
+- **Minimize sequential dependence:** folds MUST be associative `merge(S_left, S_right)` so that evaluation is tree-structured.
+- **Range summaries:** store K-sized chunk summaries so `fold(range)` is **O(polylog n)**.
+- **Head index:** O(1) access to the latest `(StreamSeq, leaf_hash, checkpoint_ref)` per Label.
+- **No hidden linearity:** internal maintenance MAY be incremental, but any O(n) work MUST be amortized off the critical path and MUST NOT be observable in an external API/CLI.
 
-## 3. コア・ワイヤ仕様（v0.0.1）
+### 2.4 Architecture boundaries and dependency minimization
+- **Core protocol layer:** wire objects (MSG/RECEIPT/CHECKPOINT), ordering, and proofs. Depends only on crypto, CBOR, and append-only storage.
+- **Storage/index layer:** append-only log, MMR, per-label indices, and checkpoint snapshots. No dependency on overlays or application schemas.
+- **Overlay layer:** identity, wallet, query, products. Depends only on core proofs and indexed log access. No dependency on hub runtime internals.
+- **Operational tooling layer:** CLI, bridge, self-test. Depends on public APIs only. No privileged coupling to implementation-specific storage.
+- **No cross-layer leakage:** overlays must not reach into hub storage internals; core must not interpret overlay semantics.
 
-### 3.1 MSG（送信）
-フィールド順序固定:
+## 3. Core wire specification (v0.0.1)
+
+### 3.1 MSG (submit)
+Fixed field order:
 1. `ver` (uint=1)
 2. `profile_id` (bstr32)
 3. `label` (bstr32)
@@ -60,114 +68,132 @@
 9. `ciphertext` (bstr)
 10. `sig` (bstr64) = `Sig(client_id, Ht("veen/sig", CBOR(MSG without sig)))`
 
-### 3.2 Ciphertext 生成（規範）
-- `payload_hdr` と `body` は HPKE + AEAD で保護。
-- Nonce は `Trunc_24(Ht("veen/nonce", label || prev_ack || client_id || client_seq))`。
+### 3.2 Ciphertext generation (normative)
+- `payload_hdr` and `body` are protected with HPKE + AEAD.
+- Nonce = `Trunc_24(Ht("veen/nonce", label || prev_ack || client_id || client_seq))`.
 
-### 3.3 RECEIPT（受理）
-- Hub が MSG を受理した証明。必ず **署名**・**StreamSeq**・**MMR root** を含む。
-- 受理後の状態を第三者が検証できること。
+### 3.3 RECEIPT (admission proof)
+- Hub-issued proof that a MSG was admitted. MUST include hub signature, `StreamSeq`, and MMR root.
+- Third-party verification MUST be possible after admission.
 
-### 3.4 CHECKPOINT（ログ状態スナップショット）
-- `log_root`, `per-stream last_seq`, `hub_pk`, `timestamp` を含む。
-- MMR に整合すること。
+### 3.4 CHECKPOINT (log snapshot)
+- Includes `log_root`, per-stream `last_seq`, `hub_pk`, and `timestamp`.
+- MUST be consistent with the MMR.
 
-### 3.5 MMR/証明
-- MMR により `O(polylog n)` で inclusion proof を生成。
-- proof は決定的・再現可能であること。
+### 3.5 MMR and proofs
+- MMR provides inclusion proofs in **O(polylog n)**.
+- Proofs MUST be deterministic and reproducible.
 
-## 4. Hub の規範動作
+## 4. Hub normative behavior
 
-### 4.1 受理パス
-- `CapToken` 検証（署名/期限/レート/失効）
-- `client_seq` の単調増加検証
-- `label` に対する `StreamSeq` 付与
-- 受理後に RECEIPT を発行
+### 4.1 Admission path
+- Validate `CapToken` (signature/expiry/rate/revocation)
+- Enforce monotonic `client_seq`
+- Assign `StreamSeq` for the target `label`
+- Issue a RECEIPT after admission
 
-### 4.2 ログ・MMR
-- 受理順序に従って append-only で記録。
-- MMR root は各受理時点で更新。
+### 4.2 Log/MMR
+- Append-only in admission order
+- Update MMR root at each admission
 
-### 4.3 エラー
-- 受理拒否は決定的エラーコードで返す（例: `E.AUTH`, `E.RATE`, `E.SEQ`, `E.TIME`, `E.FORMAT`）。
+### 4.3 Errors
+- Rejections return deterministic error codes (e.g., `E.AUTH`, `E.RATE`, `E.SEQ`, `E.TIME`, `E.FORMAT`).
 
-## 5. クライアント動作
+## 5. Client behavior
 
-- **送信**: MSG 構築、署名、送信、RECEIPT 検証。
-- **読み出し**: `stream(range)` と `stream(with_proof=1)` を提供。
-- **検証**: RECEIPT/PROOF/Checkpoint を使って独立に検証可能。
+- **Submit:** build MSG, sign, send, verify RECEIPT.
+- **Read:** provide `stream(range)` and `stream(with_proof=1)`.
+- **Verify:** independent verification using RECEIPT/PROOF/CHECKPOINT.
 
-## 6. オーバーレイ（v0.0.1+ / v0.0.1++）
+## 6. Overlays (v0.0.1+ / v0.0.1++)
 
-### 6.1 Identity（ID）
-- **主体/デバイス/コンテキスト/組織/グループ/ハンドル**はログ由来状態。
-- セッションは **device key + cap_token chain + ID log** で検証可能であること。
-- 失効（revocation）は ID ログにより決定的に評価。
+### 6.1 Identity (ID)
+- **Subjects/devices/contexts/orgs/groups/handles** are log-derived state.
+- Sessions are verifiable via **device key + cap_token chain + ID log**.
+- Revocation is deterministically evaluated from ID logs.
 
-### 6.2 Wallet / Paid Operations
-- **残高・上限・凍結・調整**はすべてイベントのフォールドから導出。
-- Hub は残高を保持しない（運用上の一貫性はオーバーレイ側が保証）。
+### 6.2 Wallet / paid operations
+- **Balances/limits/freezes/adjustments** are derived solely from event folds.
+- Hubs do not store balances; operational consistency is ensured by the overlay.
 
-### 6.3 Query API Overlay
-- ログ由来状態に対する **構造化クエリ** を提供。
-- すべての検索可能フィールドに **永続インデックス** を必須とし、フルスキャン禁止。
+### 6.3 Query API overlay
+- Provide **structured queries** over log-derived state.
+- All searchable fields require **persistent indices**; full scans are forbidden.
 
-### 6.4 Products Overlay（SDR0 / AGB0）
-- **SDR0**: 監査・証拠ログ用途。`record/*` ストリーム、チェックポイント、リプレイ API。
-- **AGB0**: エアギャップ・ブリッジ用途。`export/*` → `import/*` の片方向/双方向転送を支援。
-- どちらも **CapToken/Revocation/Checkpoint** による統制を必須とする。
+### 6.4 Product overlays (SDR0 / AGB0)
+- **SDR0:** audit/evidence logging with `record/*` streams, checkpoints, and replay API.
+- **AGB0:** air-gap bridge via `export/*` → `import/*` unidirectional/bidirectional transfer.
+- Both require **CapToken/Revocation/Checkpoint** governance.
 
-### 6.5 補助オーバーレイ（運用系）
-- **KEX0**: 鍵交換・共有に関する補助ログ。
-- **AUTH1**: 認可/失効の基盤ログ。
-- **ANCHOR0**: 外部アンカリング（監査証跡の外部固定）。
-- **DR0**: DR/リカバリ補助ログ。
-- **OBS0**: 観測性・運用メトリクスのログ。
+### 6.5 Auxiliary overlays (operational)
+- **KEX0:** key exchange/share log.
+- **AUTH1:** authorization/revocation base log.
+- **ANCHOR0:** external anchoring of audit roots.
+- **DR0:** disaster recovery support log.
+- **OBS0:** observability/operations metrics log.
 
-## 7. CLI（運用 API）
+## 7. CLI (operational API)
 
-**必須コマンド（規範）**
-- `veen hub start|stop|status`（旧 `veen-hub` は互換）
-- `veen send` / `veen stream` / `veen inspect`
-- `veen bridge`（または `veen-bridge`）
-- `veen selftest`（または `veen-selftest`）
+**Canonical primitives (necessary and sufficient)**
 
-**CLI 仕様**
-- `--hub` は URL または data directory を受け付ける。
-- `--data-dir` が指定された場合は hub 操作の参照先として優先。
+**Hub control**
+- `veen hub start|stop|status` (legacy `veen-hub` accepted)
 
-## 8. 運用・デプロイ
+**Data plane**
+- `veen send` (submit MSG)
+- `veen stream` (range read)
+- `veen receipt` (fetch/verify receipts)
+- `veen proof` (fetch inclusion proofs)
+- `veen checkpoint` (create/fetch/verify checkpoints)
 
-- **OS**: Linux / WSL2 / Docker / k8s / k3s で同一の意味。
-- **データ**: hub data directory は単純なディレクトリ。可搬性を保証。
-- **観測性**: 受理遅延、証明生成、fsync を主要メトリクスとして公開。
-- **可用性**: Hub は使い捨て可能。ログが真実の唯一の源。
+**Authorization and policy**
+- `veen cap issue|revoke|inspect` (CapToken lifecycle)
+- `veen revocation list|check` (revocation view)
 
-## 9. セキュリティモデル
+**Operations**
+- `veen bridge` (or `veen-bridge`)
+- `veen selftest` (or `veen-selftest`)
+- `veen inspect` (local state and index health)
 
-- **信頼境界**: クライアント鍵・Hub 公開鍵・署名・MMR が信頼の中心。
-- **機密性**: ペイロードは AEAD/HPKE により Hub 非可視。
-- **完全性**: MSG.sig と Hub 署名で保証。
-- **失効/回転**: オーバーレイイベントと CapToken により決定的に評価。
+**CLI invariants**
+- `--hub` accepts a URL or local hub data directory.
+- If `--data-dir` is provided, it is authoritative for hub control commands.
+- All CLI operations MUST uphold O(1)/O(polylog n) behavior.
 
-## 10. 拡張・互換性
+## 8. Operations and deployment
 
-- 追加フィールド/エラーは **後方互換** が必須。
-- 既存ログを再解釈して意味が変わる変更は禁止。
+- **OS:** Linux / WSL2 / Docker / k8s / k3s with identical semantics.
+- **Data:** hub data directory is a plain, portable directory.
+- **Observability:** admission latency, proof generation time, and fsync time are core metrics.
+- **Availability:** hubs are disposable; logs are the sole source of truth.
 
-## 11. 非目標
+## 9. Security model
 
-- 汎用計算・スマートコントラクト
-- ブロックチェーン型の合意形成
-- 深いパケット解析や L7 ルーティング機能
+- **Trust boundary:** client keys, hub public keys, signatures, and MMR roots.
+- **Confidentiality:** payloads are AEAD/HPKE protected and opaque to the hub.
+- **Integrity:** guaranteed by MSG signatures and hub signatures.
+- **Revocation/rotation:** deterministically evaluated via overlays and CapTokens.
 
-## 12. 実装必須データ構造（抜粋）
+## 10. Evolution and compatibility
 
-- **MMR**: inclusion proof は O(polylog n)。
-- **Index**: Label/StreamSeq/ClientSeq/Query-field すべて永続化。
-- **Summaries**: chunk summary + merge tree による高速フォールド。
-- **Cache**: cap_token/issuer/public key の TTL キャッシュ。
+- Additive fields/errors are **backward compatible**.
+- Reinterpreting existing logs to change semantics is forbidden.
+
+## 11. Non-goals
+
+- General-purpose compute or smart contracts
+- Blockchain-style consensus
+- Deep packet inspection or L7 routing
+
+## 12. Required data structures (non-exhaustive)
+
+- **MMR:** inclusion proofs in O(polylog n).
+- **Persistent indices:** Label/StreamSeq/ClientSeq/Query fields.
+- **Summaries:** chunk summaries + merge trees for fast folds.
+- **Ordered sets:** y-fast tries, vEB trees, or rank/select bitsets for predecessor/successor queries.
+- **Fenwick/segment trees:** polylog fold and range aggregation.
+- **Caches:** TTL caches for CapToken/issuer/public keys.
 
 ---
 
-**注記**: `doc/reference.md` は旧仕様の完全なテキストを保存する参照資料であり、本 SSOT の規範性に影響しない。
+**Note:** `doc/reference.md` preserves the legacy text for historical reference and does not affect this SSOT.
