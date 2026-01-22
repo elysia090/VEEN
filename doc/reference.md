@@ -71,6 +71,47 @@ authoritative; later repetitions are non-normative commentary unless explicitly 
 - **Environment names:** “WSL” and “WSL2” are equivalent.
 - **Version overlays:** v0.0.1+ and v0.0.1++ only add features; they MUST NOT relax or override v0.0.1 invariants.
 
+### Function naming remediation (normative)
+The legacy sources use inconsistent or overloaded verbs. The following canonical names are REQUIRED for new
+implementations and documentation, and legacy names are treated as aliases only:
+
+- **Submit path** → **admission pipeline**: `admit_msg` (capability validation + sequence enforcement).
+- **Log append** → **append_log_entry** (append-only record + MMR update).
+- **Receipt issuance** → **issue_receipt** (sign receipt for admitted MSG).
+- **Stream read** → **read_stream_range** (range read with index bound checks).
+- **Proof generation** → **prove_inclusion** (MMR inclusion proof).
+- **Checkpoint** → **checkpoint_snapshot** (checkpoint creation + verification).
+- **Overlay folding** → **fold_overlay_state** (deterministic fold over indexed log ranges).
+- **Bridge replay** → **bridge_replay** (dedup + preserve payload bytes).
+
+Documentation and CLI text MUST use these canonical verbs to avoid ambiguity.
+
+### Architecture separation and dependency minimization (normative)
+To prevent implicit coupling across layers, the following boundaries are REQUIRED:
+
+- **Core protocol** depends only on crypto, deterministic CBOR, and append-only storage interfaces.
+- **Indexing/storage** exposes only stable lookup APIs (no overlay-aware shortcuts).
+- **Overlays** depend exclusively on the public read/proof APIs and are forbidden from accessing hub internals.
+- **Operational tooling** depends solely on public APIs; no direct filesystem or database coupling.
+
+Any implementation that leaks overlay behavior into the core, or relies on overlay-specific storage shortcuts,
+is non-conformant.
+
+### Strict asymptotics (O(1)/polylog n) and O(n) avoidance (normative)
+- Every externally visible API/CLI path MUST be O(1) or O(polylog n). O(n) work is forbidden on the request path.
+- If maintenance requires O(n) work, it MUST be incremental, bounded, and unobservable to external callers.
+- Required structures for strict asymptotics: per-label head index, persistent secondary indices, MMR peaks cache,
+  and chunk summaries with merge trees.
+- Any fallback to full scans, ordered replays, or unindexed queries violates the spec.
+
+### CLI primitives (necessary and sufficient)
+The CLI surface is fixed to a minimal, composable set. Additional commands MUST be derivable from these primitives:
+
+- **Hub control:** `veen hub start|stop|status`
+- **Data plane:** `veen send`, `veen stream`, `veen receipt`, `veen proof`, `veen checkpoint`
+- **Authorization:** `veen cap issue|revoke|inspect`, `veen revocation list|check`
+- **Operations:** `veen bridge`, `veen selftest`, `veen inspect`
+
 ### Hot paths (performance-sensitive)
 - **Submit path:** `veen send` → hub admission (cap_token + PoW + rate) → log append → receipt signing.
 - **Stream read path:** `veen stream`/`stream(with_proof=1)` → MMR proof generation → client verification.
