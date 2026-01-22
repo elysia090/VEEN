@@ -1,4 +1,4 @@
-use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet};
 use std::convert::{TryFrom, TryInto};
 use std::env;
 use std::fmt;
@@ -9584,21 +9584,21 @@ async fn handle_audit_enforce_check(args: AuditEnforceCheckArgs) -> Result<()> {
     for document in documents {
         rules.extend(document.rules);
     }
-    let stream_inventory = gather_stream_inventory(&reference).await?;
-    let mut streams_to_scan: BTreeSet<String> = stream_inventory.keys().cloned().collect();
-    for rule in &rules {
-        if let AuditPolicyRule::RequireAudit { stream, .. } = rule {
-            streams_to_scan.insert(stream.clone());
-        }
-    }
     let mut cache = StreamMessageCache::new(reference);
     let mut violations = Vec::new();
-    let mut recovery_events = Vec::new();
     let needs_recovery = rules
         .iter()
         .any(|rule| matches!(rule, AuditPolicyRule::RequireRecoveryThreshold { .. }));
+    let mut recovery_index = None;
     if needs_recovery {
-        recovery_events = collect_recovery_execution_events(&streams_to_scan, &mut cache).await?;
+        let stream_inventory = gather_stream_inventory(&cache.reference).await?;
+        let mut streams_to_scan: BTreeSet<String> = stream_inventory.keys().cloned().collect();
+        for rule in &rules {
+            if let AuditPolicyRule::RequireAudit { stream, .. } = rule {
+                streams_to_scan.insert(stream.clone());
+            }
+        }
+        recovery_index = Some(collect_recovery_execution_index(&streams_to_scan, &mut cache).await?);
     }
     for rule in &rules {
         match rule {
@@ -9606,19 +9606,8 @@ async fn handle_audit_enforce_check(args: AuditEnforceCheckArgs) -> Result<()> {
                 stream,
                 resource_class,
             } => {
-                let messages = cache.messages(stream).await?;
-                let mut found = false;
-                for message in messages {
-                    if !message_schema_matches(message, schema_query_audit()) {
-                        continue;
-                    }
-                    let payload: QueryAuditLog = parse_message_payload(message)?;
-                    if payload.resource_class == *resource_class {
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
+                let resource_classes = cache.audit_resource_classes(stream).await?;
+                if !resource_classes.contains(resource_class) {
                     violations.push(format!(
                         "stream `{}` missing query.audit.v1 events for resource_class `{}`",
                         stream, resource_class
@@ -9629,8 +9618,11 @@ async fn handle_audit_enforce_check(args: AuditEnforceCheckArgs) -> Result<()> {
                 target_identity_prefix,
                 min_approvals,
             } => {
+                let recovery_index = recovery_index
+                    .as_ref()
+                    .expect("recovery index populated when required");
                 let prefix = target_identity_prefix.to_ascii_lowercase();
-                for event in &recovery_events {
+                for event in recovery_index.iter_prefix(&prefix) {
                     if !event.target_identity_hex.starts_with(&prefix) {
                         continue;
                     }
@@ -9734,9 +9726,31 @@ struct RecoveryExecutionEvent {
     approval_count: usize,
 }
 
+#[derive(Default)]
+struct RecoveryExecutionIndex {
+    by_target: BTreeMap<String, Vec<RecoveryExecutionEvent>>,
+}
+
+impl RecoveryExecutionIndex {
+    fn insert(&mut self, event: RecoveryExecutionEvent) {
+        self.by_target
+            .entry(event.target_identity_hex.clone())
+            .or_default()
+            .push(event);
+    }
+
+    fn iter_prefix(&self, prefix: &str) -> impl Iterator<Item = &RecoveryExecutionEvent> {
+        let end = prefix_range_end(prefix);
+        self.by_target
+            .range(prefix.to_string()..=end)
+            .flat_map(|(_, events)| events.iter())
+    }
+}
+
 struct StreamMessageCache {
     reference: HubReference,
     cache: BTreeMap<String, Vec<StoredMessage>>,
+    audit_resource_classes: HashMap<String, HashSet<String>>,
 }
 
 impl StreamMessageCache {
@@ -9744,6 +9758,7 @@ impl StreamMessageCache {
         Self {
             reference,
             cache: BTreeMap::new(),
+            audit_resource_classes: HashMap::new(),
         }
     }
 
@@ -9757,6 +9772,26 @@ impl StreamMessageCache {
             .get(stream)
             .map(|messages| messages.as_slice())
             .expect("stream cache entry present"))
+    }
+
+    async fn audit_resource_classes(&mut self, stream: &str) -> Result<&HashSet<String>> {
+        if !self.audit_resource_classes.contains_key(stream) {
+            let messages = self.messages(stream).await?;
+            let mut classes = HashSet::new();
+            for message in messages {
+                if !message_schema_matches(message, schema_query_audit()) {
+                    continue;
+                }
+                let payload: QueryAuditLog = parse_message_payload(message)?;
+                classes.insert(payload.resource_class);
+            }
+            self.audit_resource_classes
+                .insert(stream.to_string(), classes);
+        }
+        Ok(self
+            .audit_resource_classes
+            .get(stream)
+            .expect("audit cache entry present"))
     }
 }
 
@@ -10041,11 +10076,11 @@ fn label_class_endpoint_missing(err: &anyhow::Error) -> bool {
     false
 }
 
-async fn collect_recovery_execution_events(
+async fn collect_recovery_execution_index(
     streams: &BTreeSet<String>,
     cache: &mut StreamMessageCache,
-) -> Result<Vec<RecoveryExecutionEvent>> {
-    let mut events = Vec::new();
+) -> Result<RecoveryExecutionIndex> {
+    let mut index = RecoveryExecutionIndex::default();
     for stream in streams {
         let messages = cache.messages(stream).await?;
         for message in messages {
@@ -10053,7 +10088,7 @@ async fn collect_recovery_execution_events(
                 continue;
             }
             let payload: RecoveryExecution = parse_message_payload(message)?;
-            events.push(RecoveryExecutionEvent {
+            index.insert(RecoveryExecutionEvent {
                 stream: stream.clone(),
                 seq: message.seq,
                 target_identity_hex: hex::encode(payload.target_identity.as_ref()),
@@ -10061,7 +10096,14 @@ async fn collect_recovery_execution_events(
             });
         }
     }
-    Ok(events)
+    Ok(index)
+}
+
+fn prefix_range_end(prefix: &str) -> String {
+    let mut end = String::with_capacity(prefix.len() + 1);
+    end.push_str(prefix);
+    end.push('\u{10FFFF}');
+    end
 }
 
 async fn handle_selftest_core() -> Result<()> {
