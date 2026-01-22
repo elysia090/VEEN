@@ -144,6 +144,43 @@ impl StreamRuntime {
             .and_then(|index| self.state.messages.get(*index))
     }
 
+    fn messages_from(&self, from: u64) -> Vec<StoredMessage> {
+        let start = self.state.messages.partition_point(|msg| msg.seq < from);
+        self.state.messages[start..].to_vec()
+    }
+
+    fn proven_messages_from(&self, from: u64) -> Vec<StreamMessageWithProof> {
+        if self.proven_messages.is_empty() {
+            return Vec::new();
+        }
+
+        let (front, back) = self.proven_messages.as_slices();
+        if front.is_empty() {
+            return Self::proven_slice_from(back, from).to_vec();
+        }
+
+        let front_last_seq = front
+            .last()
+            .expect("front slice checked for emptiness")
+            .message
+            .seq;
+        if from <= front_last_seq {
+            let mut out = Self::proven_slice_from(front, from).to_vec();
+            out.extend_from_slice(back);
+            return out;
+        }
+
+        Self::proven_slice_from(back, from).to_vec()
+    }
+
+    fn proven_slice_from(
+        slice: &[StreamMessageWithProof],
+        from: u64,
+    ) -> &[StreamMessageWithProof] {
+        let start = slice.partition_point(|entry| entry.message.seq < from);
+        &slice[start..]
+    }
+
     fn has_leaf_hash(&self, leaf_hash: &LeafHash) -> bool {
         self.leaf_index.contains(leaf_hash)
     }
@@ -939,18 +976,11 @@ impl HubPipeline {
                 .ok_or_else(|| anyhow!("stream {stream} has no stored messages"))?
         };
 
-        let StreamRuntime {
-            state,
-            proven_messages,
-            ..
-        } = runtime;
+        let state = &runtime.state;
+        let proven_messages = &runtime.proven_messages;
 
         if !with_proof {
-            let messages = state
-                .messages
-                .into_iter()
-                .filter(|msg| msg.seq >= from)
-                .collect();
+            let messages = runtime.messages_from(from);
             return Ok(StreamResponse::Messages(messages));
         }
 
@@ -966,11 +996,7 @@ impl HubPipeline {
                     );
                 }
             }
-            proven.extend(
-                proven_messages
-                    .into_iter()
-                    .filter(|entry| entry.message.seq >= from),
-            );
+            proven.extend(runtime.proven_messages_from(from));
         } else if from <= last_seq {
             proven.extend(load_proven_messages_range(&self.storage, stream, from, last_seq).await?);
         }
