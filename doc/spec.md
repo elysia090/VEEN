@@ -24,6 +24,104 @@ normalization rules are authoritative and resolve any conflicts across legacy se
 - **Version layering:** v0.0.1 is the core spec; v0.0.1+ and v0.0.1++ are additive overlays and MUST NOT redefine
   or contradict v0.0.1 semantics.
 
+## Spec refactoring & optimization addendum (SSOT)
+
+This addendum resolves remaining ambiguities, removes effective duplication by declaring canonical sections, and
+summarizes hot paths, critical paths, implementation risks, and dependencies for implementers and reviewers.
+
+### Canonical section map (authoritative for conflicts)
+- **Core wire objects and invariants:** `spec-1.txt` through `spec-4.txt` sections in this SSOT.
+- **Overlay semantics:** `id-spec.txt`, `wallet-spec.txt`, `query-api-spec.txt`, plus any `spec-5.txt` overlays.
+- **Operational CLI semantics:** `USAGE.md` and CLI goal documents consolidated below.
+- **Rationale and philosophy:** `Design-Philosophy.txt`, `Whyuse.txt`, `CORE-GOALS.txt`, `OS-GOALS.txt`.
+
+When a legacy section repeats or rephrases requirements, the first occurrence in the above canonical map is
+authoritative; later repetitions are non-normative commentary unless explicitly marked as an update.
+
+### Ambiguities resolved (normative)
+- **Stream vs label:** `stream_id` is the logical stream identifier; `label` is the routing label derived from
+  `label(stream_id, routing_key)` and MUST NOT be used as a stream identifier. If both appear, the stream identifier
+  always determines fold order and state derivation.
+- **Fold ordering with timestamps:** If a schema defines an explicit timestamp (`ts`, `updated_at`), use
+  `(timestamp, stream_seq, tie-breaker)` for ordering. If not defined, use `(stream_seq, tie-breaker)` only.
+  Timestamp fields are not required to be monotonic; they are only used to refine ordering.
+- **Hub target selection:** `--hub` accepts either an HTTP(S) URL or a local hub data directory. If both `--hub`
+  and `--data-dir` are supplied, `--data-dir` is authoritative for hub control commands.
+- **Authentication identifiers:** `client_id` on MSG is always `device_pk`; `ctx_id` is never sent on wire and is
+  derived by applications during authorization.
+- **Cross-hub mirroring:** Mirror processes MUST preserve payload bytes and schema identifiers; any rewrite is a
+  protocol violation and invalidates the fold.
+
+### Duplication resolved (normative)
+- **CLI binaries:** `veen` is canonical; `veen-cli` is an alias. References to `veen-hub` are legacy and resolve to
+  `veen hub`.
+- **Environment names:** “WSL” and “WSL2” are equivalent.
+- **Version overlays:** v0.0.1+ and v0.0.1++ only add features; they MUST NOT relax or override v0.0.1 invariants.
+
+### Hot paths (performance-sensitive)
+- **Submit path:** `veen send` → hub admission (cap_token + PoW + rate) → log append → receipt signing.
+- **Stream read path:** `veen stream`/`stream(with_proof=1)` → MMR proof generation → client verification.
+- **Checkpoint path:** hub checkpoint creation → snapshot verification → mirror/bridge replay.
+
+### Critical paths (correctness-sensitive)
+- **Admission correctness:** cap_token signature chain validation, rate limiting, revocation lookups.
+- **Deterministic folding:** schema-defined ordering + deterministic CBOR decoding + stable tie-breaker.
+- **Integrity proofs:** MMR leaf/branch consistency; receipt and checkpoint signature verification.
+- **Bridge/federation:** deduplication by stable ID and parent_id linkage preservation.
+
+### Implementation risk register (hard parts)
+- **Deterministic CBOR:** key order and canonical encoding MUST be enforced; unknown keys rejected.
+- **Clock ambiguity:** timestamps may be skewed; rely on stream_seq for total order where needed.
+- **State compaction:** compaction MUST preserve fold determinism and verifiable history when proofs are required.
+- **Concurrency hazards:** avoid races between admission checks and log append; ensure atomicity for receipt issuance.
+- **Backfill/replay:** replay order across hubs must be deterministic and consistent with bridge rules.
+
+### Dependency inventory (non-exhaustive)
+- **Crypto:** Ed25519, X25519, AEAD, hash function H, MMR implementation.
+- **Encoding:** CBOR with deterministic map ordering and minimal integer encoding.
+- **Storage:** append-only log, index for stream_seq, and snapshot/checkpoint storage.
+- **Networking:** HTTP(S) and/or local FS hub access, streaming RPC layer.
+- **Operational tooling:** CLI, bridge process, self-test harness, container/k8s manifests.
+
+### Bottleneck elimination & optimization toolkit (normative guidance)
+- **Admission hot path**
+  - Pre-validate cap_token chains and cache issuer public keys with bounded TTL.
+  - Deduplicate concurrent validation for the same auth_ref (single-flight).
+  - Keep revocation lookups in memory with periodic snapshot refresh.
+- **Append/log path**
+  - Batch fsync operations (configurable) while preserving receipt correctness.
+  - Use append-only segment files with bounded size for faster compaction.
+  - Maintain a write-ahead buffer per label to reduce lock contention.
+- **Proof generation**
+  - Cache MMR peaks and recent branches per stream label.
+  - Precompute checkpoints on a schedule and reuse during stream proofs.
+- **Bridge/mirror path**
+  - Apply idempotent deduplication before re-signing and publishing.
+  - Use backpressure and bounded queues to avoid runaway memory usage.
+
+### Operational efficiency levers (actionable)
+- **Cold start**
+  - Keep a warm standby hub pointed at the same data directory for fast recovery.
+  - Persist indexes; avoid rebuilding from raw logs when possible.
+- **Observability**
+  - Expose admission latency, proof generation time, and fsync durations as core metrics.
+  - Track revocation hit rate and cache evictions for tuning.
+- **Cost control**
+  - Prune or archive old segments while retaining checkpoints and required proofs.
+  - Use a separate storage tier for historical logs (bridge replay only).
+
+### Bottleneck inventory (current known choke points)
+- **Signature verification fan-out:** cap_token chains and receipt validation dominate CPU.
+- **MMR proof fan-out:** large stream history drives proof generation cost.
+- **I/O sync latency:** receipt issuance on fsync can be tail-latency sensitive.
+- **Bridge replay storms:** cross-hub resync can saturate CPU and disk.
+
+### Optimization priorities (recommended order)
+1. **Admission caching** (keys, revocations, single-flight validation).
+2. **MMR proof reuse** (checkpointing and branch caching).
+3. **Append-path batching** (bounded fsync + segmented logs).
+4. **Bridge throttling** (dedupe + backpressure).
+
 ## Source index (consolidated)
 
 ### Documents merged into this SSOT (original files removed)
