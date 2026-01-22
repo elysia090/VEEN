@@ -278,20 +278,23 @@ enforce PoW on the service side with `veen hub start --pow-difficulty` (or
 ### Containerised deployment
 
 This repository ships with Docker packaging that exposes the hub runtime via
-`docker compose`. The image builds the audited binaries, runs the hub as an
-unprivileged user, and persists receipts, payloads, checkpoints, and state in a
-named volume so the event history remains available for inspection.
+`docker compose`. The compose definition now lives in
+[`docker/docker-compose.yml`](docker/docker-compose.yml) so the repository
+root stays focused on the Rust workspace. The image builds the audited binaries,
+runs the hub as an unprivileged user, and persists receipts, payloads,
+checkpoints, and state in a named volume so the event history remains available
+for inspection.
 
 1. **Build and start the hub**
    ```shell
-   docker compose up --build -d
+   docker compose -f docker/docker-compose.yml up --build -d
    ```
    The service listens on `0.0.0.0:37411` by default, exports an HTTP health
    endpoint, and is configured with `restart: unless-stopped`.
 2. **Check health or tail logs**
    ```shell
-   docker compose logs -f hub
-   docker compose ps
+   docker compose -f docker/docker-compose.yml logs -f hub
+   docker compose -f docker/docker-compose.yml ps
    ```
    A built-in healthcheck uses `veen hub health` against the container-local
    endpoint to confirm readiness.
@@ -299,20 +302,20 @@ named volume so the event history remains available for inspection.
    Use the shared volume to keep client identities, receipts, and audit
    artefacts alongside the hub data:
    ```shell
-   docker compose run --rm hub veen keygen --out /var/lib/veen/clients/alice
-   docker compose exec hub veen send \
+   docker compose -f docker/docker-compose.yml run --rm hub veen keygen --out /var/lib/veen/clients/alice
+   docker compose -f docker/docker-compose.yml exec hub veen send \
      --hub /var/lib/veen \
      --client /var/lib/veen/clients/alice \
      --stream core/main \
      --body '{"text":"hello-veens"}'
-   docker compose exec hub veen stream \
+   docker compose -f docker/docker-compose.yml exec hub veen stream \
      --hub /var/lib/veen \
      --client /var/lib/veen/clients/alice \
      --stream core/main \
      --from 0
   ```
-  Shut the hub down with `docker compose down` (add `--volumes` to remove the
-  persisted audit log).
+  Shut the hub down with `docker compose -f docker/docker-compose.yml down`
+  (add `--volumes` to remove the persisted audit log).
 
 ### Environment descriptors
 
@@ -444,7 +447,7 @@ from the checkpoint, the output highlights the first mismatch so operators know
 whether the ledger contents or the stream history failed verification.
 
 Environment variables such as `VEEN_LISTEN`, `VEEN_LOG_LEVEL`, or
-`VEEN_PROFILE_ID` can be overridden in `docker-compose.yml` (or via
+`VEEN_PROFILE_ID` can be overridden in `docker/docker-compose.yml` (or via
 `docker compose run -e`) to adjust listening addresses, logging verbosity, or
 profile identifiers. To supply a custom hub configuration file, mount it into
 the container and set `VEEN_CONFIG_PATH` to the path inside the container.
