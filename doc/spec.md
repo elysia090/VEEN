@@ -6,7 +6,6 @@ Original spec files have been merged here and should no longer be referenced ind
 **SSOT policy**
 - Update **only** this file for spec changes.
 - Keep sections aligned to prevent drift across implementations.
-- Any other file under `doc/` is a pointer to this SSOT and MUST NOT be edited for spec changes.
 - If any legacy text conflicts with the normalization rules below, the normalization rules take precedence.
 
 ## Normalization and conflict resolution
@@ -27,15 +26,15 @@ normalization rules are authoritative and resolve any conflicts across legacy se
 
 ## Source index (consolidated)
 
-### Current documents merged into this SSOT
-- doc/Design-Philosophy.txt
-- doc/Whyuse.txt
-- doc/USAGE.md
-- doc/CORE-GOALS.txt
-- doc/CLI-GOALS-1.txt
-- doc/CLI-GOALS-2.txt
-- doc/CLI-GOALS-3.txt
-- doc/OS-GOALS.txt
+### Documents merged into this SSOT (original files removed)
+- Design-Philosophy.txt
+- Whyuse.txt
+- USAGE.md
+- CORE-GOALS.txt
+- CLI-GOALS-1.txt
+- CLI-GOALS-2.txt
+- CLI-GOALS-3.txt
+- OS-GOALS.txt
 
 ### Legacy sources already embedded below
 - id-spec.txt
