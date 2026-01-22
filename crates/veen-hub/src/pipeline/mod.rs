@@ -74,6 +74,7 @@ struct HubState {
     anchors: AnchorLog,
     revocations: RevocationView,
     revocation_log: Vec<RevocationRecord>,
+    revocation_index: HashMap<(RevocationKind, RevocationTarget), RevocationRecord>,
     admission_events: VecDeque<AdmissionLogEvent>,
     authority_records: Vec<AuthorityRecord>,
     authority_view: AuthorityView,
@@ -88,6 +89,8 @@ struct StreamRuntime {
     state: HubStreamState,
     proven_messages: VecDeque<StreamMessageWithProof>,
     mmr: Mmr,
+    message_index: HashMap<u64, usize>,
+    leaf_index: HashSet<LeafHash>,
 }
 
 impl StreamRuntime {
@@ -100,14 +103,20 @@ impl StreamRuntime {
             );
         }
         let mut mmr = Mmr::new();
-        for message in &state.messages {
+        let mut message_index = HashMap::with_capacity(state.messages.len());
+        let mut leaf_index = HashSet::with_capacity(state.messages.len());
+        for (idx, message) in state.messages.iter().enumerate() {
             let leaf = leaf_hash_for(message)?;
             mmr.append(leaf);
+            message_index.insert(message.seq, idx);
+            leaf_index.insert(leaf);
         }
         let mut runtime = Self {
             state,
             proven_messages: VecDeque::from(proven_messages),
             mmr,
+            message_index,
+            leaf_index,
         };
         runtime.trim_proven_messages();
         Ok(runtime)
@@ -120,6 +129,23 @@ impl StreamRuntime {
     fn push_proven(&mut self, message: StreamMessageWithProof) {
         self.proven_messages.push_back(message);
         self.trim_proven_messages();
+    }
+
+    fn insert_message_with_leaf(&mut self, message: StoredMessage, leaf: LeafHash) {
+        let index = self.state.messages.len();
+        self.message_index.insert(message.seq, index);
+        self.leaf_index.insert(leaf);
+        self.state.messages.push(message);
+    }
+
+    fn message_by_seq(&self, seq: u64) -> Option<&StoredMessage> {
+        self.message_index
+            .get(&seq)
+            .and_then(|index| self.state.messages.get(*index))
+    }
+
+    fn has_leaf_hash(&self, leaf_hash: &LeafHash) -> bool {
+        self.leaf_index.contains(leaf_hash)
     }
 
     fn trim_proven_messages(&mut self) {
@@ -244,6 +270,7 @@ impl HubPipeline {
         let revocation_log = load_revocation_log(storage).await?;
         let mut revocations = RevocationView::new();
         revocations.extend(revocation_log.iter().cloned());
+        let revocation_index = build_revocation_index(&revocation_log);
         let authority_records = load_authority_records(storage).await?;
         let mut authority_view = AuthorityView::new();
         authority_view.extend(authority_records.iter().cloned());
@@ -268,6 +295,7 @@ impl HubPipeline {
             anchors,
             revocations,
             revocation_log,
+            revocation_index,
             authority_records,
             authority_view,
             label_class_records,
@@ -619,7 +647,7 @@ impl HubPipeline {
         }
         let (computed_seq, mmr_root, proof) = stream_runtime.mmr.append_with_proof(leaf);
         debug_assert_eq!(computed_seq, seq, "stream mmr seq must match message seq");
-        stream_runtime.state.messages.push(stored_message.clone());
+        stream_runtime.insert_message_with_leaf(stored_message.clone(), leaf);
         let mmr_root_hex = hex::encode(mmr_root.as_bytes());
         let receipt = StreamReceipt {
             seq,
@@ -726,12 +754,7 @@ impl HubPipeline {
             .entry(stream.clone())
             .or_insert_with(StreamRuntime::empty);
 
-        if let Some(existing) = stream_runtime
-            .state
-            .messages
-            .iter()
-            .find(|stored| stored.seq == message.seq)
-        {
+        if let Some(existing) = stream_runtime.message_by_seq(message.seq) {
             if existing != &message {
                 bail!(
                     "replica already has divergent message for {}#{}",
@@ -783,7 +806,7 @@ impl HubPipeline {
             );
         }
 
-        stream_runtime.state.messages.push(message.clone());
+        stream_runtime.insert_message_with_leaf(message.clone(), leaf);
         let receipt = StreamReceipt {
             seq: message.seq,
             leaf_hash: hex::encode(leaf.as_bytes()),
@@ -835,6 +858,7 @@ impl HubPipeline {
 
         let mut guard = self.inner.write().await;
         guard.revocations.insert(record.clone());
+        update_revocation_index(&mut guard.revocation_index, &record);
         guard.revocation_log.push(record);
         persist_revocations(&self.storage, &guard.revocation_log).await
     }
@@ -1385,10 +1409,8 @@ impl HubPipeline {
         let guard = self.inner.read().await;
         let record = guard.capabilities.records.get(auth_ref_hex);
         let mut revocation_detail: Option<(RevocationKind, RevocationRecord)> = guard
-            .revocation_log
-            .iter()
-            .rev()
-            .find(|rev| rev.kind == RevocationKind::AuthRef && rev.target == auth_target)
+            .revocation_index
+            .get(&(RevocationKind::AuthRef, auth_target))
             .cloned()
             .map(|record| (RevocationKind::AuthRef, record));
 
@@ -1397,12 +1419,8 @@ impl HubPipeline {
                 if let Some(token_hash) = cap_record.token_hash.as_ref() {
                     if let Ok(target) = revocation_target_from_hex_str(token_hash) {
                         if let Some(entry) = guard
-                            .revocation_log
-                            .iter()
-                            .rev()
-                            .find(|rev| {
-                                rev.kind == RevocationKind::CapToken && rev.target == target
-                            })
+                            .revocation_index
+                            .get(&(RevocationKind::CapToken, target))
                             .cloned()
                         {
                             revocation_detail = Some((RevocationKind::CapToken, entry));
@@ -2564,12 +2582,7 @@ async fn persist_recent_dedup_cache(storage: &HubStorage, entries: &[DedupKey]) 
 }
 
 fn leaf_hash_exists(runtime: &StreamRuntime, leaf_hash: &LeafHash) -> Result<bool> {
-    for message in &runtime.state.messages {
-        if &leaf_hash_for(message)? == leaf_hash {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    Ok(runtime.has_leaf_hash(leaf_hash))
 }
 
 async fn rebuild_attachment_ref_counts(
@@ -3385,6 +3398,32 @@ fn build_label_class_index(records: &[LabelClassRecord]) -> HashMap<Label, Label
     index
 }
 
+fn update_revocation_index(
+    index: &mut HashMap<(RevocationKind, RevocationTarget), RevocationRecord>,
+    record: &RevocationRecord,
+) {
+    match index.entry((record.kind, record.target)) {
+        Entry::Vacant(entry) => {
+            entry.insert(record.clone());
+        }
+        Entry::Occupied(mut entry) => {
+            if record.ts >= entry.get().ts {
+                entry.insert(record.clone());
+            }
+        }
+    }
+}
+
+fn build_revocation_index(
+    records: &[RevocationRecord],
+) -> HashMap<(RevocationKind, RevocationTarget), RevocationRecord> {
+    let mut index = HashMap::new();
+    for record in records {
+        update_revocation_index(&mut index, record);
+    }
+    index
+}
+
 fn build_schema_registry(records: &[SchemaDescriptor]) -> SchemaRegistry {
     let mut registry = SchemaRegistry::new();
     for (idx, descriptor) in records.iter().cloned().enumerate() {
@@ -3918,7 +3957,8 @@ mod tests {
                     .cloned()
                     .expect("message present");
                 dup.seq += 1;
-                runtime.state.messages.push(dup);
+                let leaf = leaf_hash_for(&dup).expect("leaf hash");
+                runtime.insert_message_with_leaf(dup, leaf);
             }
 
             let report = pipeline.readiness_report().await?;
@@ -4092,6 +4132,8 @@ mod tests {
                     .get_mut("core/dup")
                     .expect("stream runtime present");
                 runtime.state.messages.clear();
+                runtime.message_index.clear();
+                runtime.leaf_index.clear();
                 runtime.proven_messages.clear();
                 runtime.mmr = Mmr::new();
             }
@@ -4155,6 +4197,8 @@ mod tests {
                     .get_mut("core/dup-seed")
                     .expect("stream runtime present");
                 runtime.state.messages.clear();
+                runtime.message_index.clear();
+                runtime.leaf_index.clear();
                 runtime.proven_messages.clear();
                 runtime.mmr = Mmr::new();
             }
