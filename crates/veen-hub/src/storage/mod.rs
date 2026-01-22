@@ -78,6 +78,11 @@ impl HubStorage {
             .join(format!("{}.index", stream_storage_name(stream)))
     }
 
+    pub fn stream_index_head_path(&self, stream: &str) -> PathBuf {
+        self.streams_dir()
+            .join(format!("{}.head.json", stream_storage_name(stream)))
+    }
+
     pub fn capabilities_dir(&self) -> PathBuf {
         self.state_dir().join(CAPABILITIES_DIR)
     }
