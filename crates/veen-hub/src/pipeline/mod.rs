@@ -2441,6 +2441,13 @@ async fn load_existing_streams(storage: &HubStorage) -> Result<HashMap<String, S
             .is_file()
         {
             let path = entry.path();
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".head.json"))
+            {
+                continue;
+            }
             let loaded = if matches!(path.extension().and_then(|ext| ext.to_str()), Some("json")) {
                 load_legacy_stream_state(&path).await?
             } else {
@@ -2694,6 +2701,35 @@ async fn read_message_bundle(path: &Path) -> Result<StoredMessageBundle> {
     }
 }
 
+async fn read_proven_bundle(
+    stream: &str,
+    seq: u64,
+    bundle_path: &Path,
+) -> Result<StreamMessageWithProof> {
+    let bundle = read_message_bundle(bundle_path).await?;
+    let StoredMessageBundle {
+        message,
+        receipt,
+        proof,
+    } = bundle;
+    let (receipt, proof) = match (receipt, proof) {
+        (Some(receipt), Some(proof)) => (receipt, proof),
+        _ => {
+            bail!(
+                "missing receipt or proof in bundle for {}#{} at {}",
+                stream,
+                seq,
+                bundle_path.display()
+            );
+        }
+    };
+    Ok(StreamMessageWithProof {
+        message,
+        receipt,
+        proof,
+    })
+}
+
 fn build_proven_messages(messages: &[StoredMessage]) -> Result<Vec<StreamMessageWithProof>> {
     let mut mmr = Mmr::new();
     let mut proven = Vec::with_capacity(messages.len());
@@ -2730,36 +2766,68 @@ async fn load_proven_messages_range(
     if from > to {
         return Ok(Vec::new());
     }
+    if let Some(head) = stream_index::load_stream_index_head(storage, stream).await? {
+        if from > head.last_seq {
+            return Ok(Vec::new());
+        }
+        let upper = to.min(head.last_seq);
+        let start = from.max(1);
+        if start > upper {
+            return Ok(Vec::new());
+        }
+        let expected = (upper - start + 1) as usize;
+        let mut results = vec![None; expected];
+        let mut join_set = tokio::task::JoinSet::new();
+        const MAX_BUNDLE_READ_CONCURRENCY: usize = 32;
+        let concurrency = MAX_BUNDLE_READ_CONCURRENCY.min(expected);
+        let stream_name: Arc<str> = Arc::from(stream);
+
+        for seq in start..=upper {
+            let bundle_path = storage.message_bundle_path(stream, seq);
+            let stream_name = Arc::clone(&stream_name);
+            join_set.spawn(async move {
+                let entry = read_proven_bundle(stream_name.as_ref(), seq, &bundle_path).await?;
+                Ok::<_, anyhow::Error>((seq, entry))
+            });
+            if join_set.len() >= concurrency {
+                if let Some(result) = join_set.join_next().await {
+                    let (seq, entry) = result??;
+                    let index = (seq - start) as usize;
+                    results[index] = Some(entry);
+                }
+            }
+        }
+
+        while let Some(result) = join_set.join_next().await {
+            let (seq, entry) = result??;
+            let index = (seq - start) as usize;
+            results[index] = Some(entry);
+        }
+
+        let mut proven = Vec::with_capacity(expected);
+        for (offset, entry) in results.into_iter().enumerate() {
+            let entry = entry.ok_or_else(|| {
+                anyhow!(
+                    "missing bundle result for {}#{}",
+                    stream_name.as_ref(),
+                    start + offset as u64
+                )
+            })?;
+            proven.push(entry);
+        }
+        return Ok(proven);
+    }
+
+    let mut proven = Vec::new();
     let index_path = storage.stream_index_path(stream);
     let entries = stream_index::load_stream_index(&index_path).await?;
-    let mut proven = Vec::new();
     for entry in entries {
         if entry.seq < from || entry.seq > to {
             continue;
         }
         let bundle_path = stream_index::bundle_path(storage, &entry);
-        let bundle = read_message_bundle(&bundle_path).await?;
-        let StoredMessageBundle {
-            message,
-            receipt,
-            proof,
-        } = bundle;
-        let (receipt, proof) = match (receipt, proof) {
-            (Some(receipt), Some(proof)) => (receipt, proof),
-            _ => {
-                bail!(
-                    "missing receipt or proof in bundle for {}#{} at {}",
-                    stream,
-                    entry.seq,
-                    bundle_path.display()
-                );
-            }
-        };
-        proven.push(StreamMessageWithProof {
-            message,
-            receipt,
-            proof,
-        });
+        let entry = read_proven_bundle(stream, entry.seq, &bundle_path).await?;
+        proven.push(entry);
     }
     Ok(proven)
 }

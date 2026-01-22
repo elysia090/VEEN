@@ -15,6 +15,12 @@ pub struct StreamIndexEntry {
     pub bundle: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StreamIndexHead {
+    pub last_seq: u64,
+    pub last_leaf_hash: String,
+}
+
 pub async fn append_stream_index(
     storage: &HubStorage,
     stream: &str,
@@ -40,6 +46,8 @@ pub async fn append_stream_index(
     file.write_all(&encoded)
         .await
         .with_context(|| format!("appending stream index record for {stream}"))?;
+
+    write_stream_index_head(storage, stream, entry).await?;
 
     Ok(())
 }
@@ -102,6 +110,45 @@ pub async fn load_stream_index(path: &Path) -> Result<Vec<StreamIndexEntry>> {
     }
 
     Ok(entries)
+}
+
+pub async fn load_stream_index_head(
+    storage: &HubStorage,
+    stream: &str,
+) -> Result<Option<StreamIndexHead>> {
+    let path = storage.stream_index_head_path(stream);
+    let data = match fs::read(&path).await {
+        Ok(data) => data,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("reading stream index head {}", path.display()))
+        }
+    };
+    let head = serde_json::from_slice(&data)
+        .with_context(|| format!("decoding stream index head {}", path.display()))?;
+    Ok(Some(head))
+}
+
+async fn write_stream_index_head(
+    storage: &HubStorage,
+    stream: &str,
+    entry: &StreamIndexEntry,
+) -> Result<()> {
+    let head = StreamIndexHead {
+        last_seq: entry.seq,
+        last_leaf_hash: entry.leaf_hash.clone(),
+    };
+    let data = serde_json::to_vec(&head).context("serialising stream index head")?;
+    let path = storage.stream_index_head_path(stream);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("ensuring stream head directory {}", parent.display()))?;
+    }
+    fs::write(&path, data)
+        .await
+        .with_context(|| format!("writing stream index head {}", path.display()))
 }
 
 pub fn bundle_path(storage: &HubStorage, entry: &StreamIndexEntry) -> PathBuf {

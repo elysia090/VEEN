@@ -103,6 +103,8 @@ authoritative; later repetitions are non-normative commentary unless explicitly 
 - **Cold start**
   - Keep a warm standby hub pointed at the same data directory for fast recovery.
   - Persist indexes; avoid rebuilding from raw logs when possible.
+  - Maintain a per-stream index head sidecar that records the latest stream_seq and leaf_hash so range reads can bound work in O(1) without scanning the full index.
+  - Avoid extra filesystem metadata probes in range reads; prefer direct bundle reads to cut constant-factor latency.
 - **Observability**
   - Expose admission latency, proof generation time, and fsync durations as core metrics.
   - Track revocation hit rate and cache evictions for tuning.
