@@ -362,6 +362,6 @@ Temporary directories under `/tmp` are removed automatically on success or failu
 
 ## 10. Further reading
 
-- Protocol/overlay specs: `doc/spec-1.txt`–`spec-5.txt`, `doc/wallet-spec.txt`, `doc/products-spec-1.txt`
+- Protocol/overlay specs (SSOT): `doc/spec.md`
 - CLI/OS goals: `doc/CLI-GOALS-1.txt`–`CLI-GOALS-3.txt`, `doc/OS-GOALS.txt`
 - Design rationale: `doc/Design-Philosophy.txt`

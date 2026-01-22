@@ -1,8 +1,7 @@
 //! Core primitives and helpers for the Verifiable End-to-End Network (VEEN).
 //!
 //! The crate focuses on providing strongly typed helpers around the immutable
-//! wire-format specification documented in `doc/spec-1.txt` and the
-//! operational overlays captured in `doc/spec-2.txt`. The intent is to
+//! wire-format specification documented in `doc/spec.md`. The intent is to
 //! make it straightforward to experiment with protocol implementations while
 //! enforcing consistent hashing and encoding behaviour across binaries.
 

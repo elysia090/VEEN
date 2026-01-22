@@ -58,11 +58,8 @@ the VEEN protocol stack:
 
 ### Reference specifications
 
-The current release targets the v0.0.1 protocol suite described in
-[`doc/spec-1.txt`](doc/spec-1.txt) through [`doc/spec-5.txt`](doc/spec-5.txt),
-along with overlay/application references such as
-[`doc/wallet-spec.txt`](doc/wallet-spec.txt) and
-[`doc/products-spec-1.txt`](doc/products-spec-1.txt). Operational goals are
+The current release targets the v0.0.1 protocol suite described in the SSOT
+specification document [`doc/spec.md`](doc/spec.md). Operational goals are
 captured in [`doc/CLI-GOALS-1.txt`](doc/CLI-GOALS-1.txt) through
 [`doc/CLI-GOALS-3.txt`](doc/CLI-GOALS-3.txt) and
 [`doc/OS-GOALS.txt`](doc/OS-GOALS.txt). Compatibility and minimum supported
@@ -602,5 +599,4 @@ them automatically on success or failure.
   [`doc/CLI-GOALS-3.txt`](doc/CLI-GOALS-3.txt) – operational contract for the CLI
 - [`doc/OS-GOALS.txt`](doc/OS-GOALS.txt) – host operating system expectations
 - [`doc/Design-Philosophy.txt`](doc/Design-Philosophy.txt) – guiding principles
-- [`doc/wallet-spec.txt`](doc/wallet-spec.txt) and related documents describing
-  the overlay schemas layered on top of the VEEN core wire objects.
+- [`doc/spec.md`](doc/spec.md) – SSOT for protocol and overlay specifications.
