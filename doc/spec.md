@@ -8,7 +8,19 @@ Original spec files have been merged here and should no longer be referenced ind
 - Keep sections aligned to prevent drift across implementations.
 - If any legacy text conflicts with the normalization rules below, the normalization rules take precedence.
 
+## Document structure
+
+This SSOT is reorganized into clear layers so that normative protocol rules, overlay schemas, and operational guidance are easy to locate. All content is preserved; headings are reordered and grouped without semantic changes.
+
+- **Normalization & global rules:** Cross-cutting invariants and conflict resolution.
+- **Protocol specifications:** Core wire protocol and invariants.
+- **Overlay specifications:** Identity, wallet, products, and query API overlays.
+- **Operational guidance & tooling:** CLI, goals, deployment, and workflows.
+- **Rationale & philosophy:** Design intent and adoption rationale.
+- **Source index:** Legacy source list (reference only).
+
 ## Normalization and conflict resolution
+
 
 The documents consolidated here were authored at different times. To avoid implementation drift, the following
 normalization rules are authoritative and resolve any conflicts across legacy sections:
@@ -25,6 +37,7 @@ normalization rules are authoritative and resolve any conflicts across legacy se
   or contradict v0.0.1 semantics.
 
 ## Spec refactoring & optimization addendum (SSOT)
+
 
 This addendum resolves remaining ambiguities, removes effective duplication by declaring canonical sections, and
 summarizes hot paths, critical paths, implementation risks, and dependencies for implementers and reviewers.
@@ -199,1636 +212,10 @@ linear rebuilds, or sequential dependency on the full history is **non-compliant
 These constraints are **normative** and supersede any legacy text that implies or permits linear-time scans,
 full-log replays, or sequential-only folding in operational paths.
 
-## Source index (consolidated)
+## Protocol specifications
 
-### Documents merged into this SSOT (original files removed)
-- Design-Philosophy.txt
-- Whyuse.txt
-- USAGE.md
-- CORE-GOALS.txt
-- CLI-GOALS-1.txt
-- CLI-GOALS-2.txt
-- CLI-GOALS-3.txt
-- OS-GOALS.txt
+### spec-1.txt
 
-### Legacy sources already embedded below
-- id-spec.txt
-- products-spec-1.txt
-- query-api-spec.txt
-- spec-1.txt
-- spec-2.txt
-- spec-3.txt
-- spec-4.txt
-- spec-5.txt
-- wallet-spec.txt
-
-
-## id-spec.txt
-
-VEEN Identity Layer (ID) v0.0.1
-Principals, Realms, Context IDs, Orgs, and Bridging
-(Overlay on VEEN v0.0.1, no wire-format changes)
-	0.	Scope
-
-This document defines the VEEN Identity Layer (ID) v0.0.1. ID is an overlay on VEEN v0.0.1 that provides:
-	•	cryptographic principals and devices,
-	•	realm-scoped pseudonymous account identifiers (context IDs),
-	•	organizations, groups, and roles,
-	•	handle and external-ID mapping,
-	•	capability-based delegation and revocation,
-	•	cross-hub and cross-realm identity bridging.
-
-ID introduces only payload schemas and processing rules. It does not change VEEN core wire objects (MSG, RECEIPT, CHECKPOINT, cap_token) and does not alter VEEN invariants.
-
-All identity semantics are carried as encrypted VEEN payloads and folded deterministically. Hubs remain blind to identity contents.
-	1.	Notation and common rules
-
-Ht(tag,x) = H(ascii(tag) || 0x00 || x) as in VEEN core.
-
-Keys:
-	•	principal_pk: Ed25519 public key (32 bytes) for a root identity (human or service).
-	•	device_pk: Ed25519 public key (32 bytes) for a device.
-	•	dh_pk: X25519 public key (32 bytes) for a device.
-
-All payload bodies defined in this document are deterministic CBOR maps:
-	•	exact key set and key order as listed per schema,
-	•	minimal-length unsigned integers,
-	•	definite-length byte strings and arrays,
-	•	no floats,
-	•	no CBOR tags,
-	•	unknown keys MUST be rejected.
-
-Events are folded per stream in a deterministic order:
-	•	primarily by VEEN stream_seq,
-	•	optionally refined by an explicit timestamp field (ts/updated_at) when defined,
-	•	with a stable, implementation-defined tie-breaker if required (e.g. leaf_hash).
-
-	2.	Identity model
-
-ID separates the following layers:
-	•	Principal: long-lived cryptographic root identity (principal_pk).
-	•	Realm: identity scope for an application, tenant, or federation (realm_id).
-	•	Context identity: realm-scoped pseudonymous account identifier (ctx_id).
-	•	Devices: device_pk attached to a principal, used as authenticators.
-	•	Organizations: org_id representing multi-account entities.
-	•	Groups and roles: sets and labels over ctx_id for access control.
-	•	Handles: human-readable identifiers mapped to ctx_id or org_id.
-	•	External IDs: references to legacy IdPs or systems.
-
-Applications SHOULD primarily interact with ctx_id and realm_id. Principals are used as cryptographic roots and are not necessarily exposed to applications.
-	3.	Identifiers
-
-3.1 Realm identifiers
-
-A realm is a scope for context identities.
-
-realm_id = Ht(“id/realm”, ascii(realm_name))
-
-realm_name is an implementation-chosen UTF-8 string (e.g. “example-app”, “tenant-123”). Realm identifiers are 32-byte opaque values.
-
-3.2 Principals
-
-Each principal_pk defines a root identity. No derived identifier is required beyond principal_pk itself, but a stable reference can be defined if needed:
-
-principal_id = Ht(“id/principal”, principal_pk)
-
-principal_id is not required for protocol correctness and is informative.
-
-3.3 Context identifiers (ctx_id)
-
-For a principal_pk in a given realm_id:
-
-ctx_id = Ht(“id/ctx”, principal_pk || realm_id)
-
-Properties:
-	•	ctx_id is 32 bytes.
-	•	The same principal_pk yields different ctx_id for different realm_id.
-	•	Within a realm_id, ctx_id is stable for the lifetime of principal_pk.
-	•	No global user identifier is imposed; correlation across realms is optional and explicit.
-
-Applications SHOULD treat ctx_id as the primary account identifier inside a realm.
-
-3.4 Device identifiers
-
-Each device keypair (device_sk, device_pk) and DH key (dh_sk, dh_pk) defines:
-
-device_id = Ht(“id/device”, device_pk)
-
-device_id is used only within identity payloads. On-wire VEEN MSG.client_id remains device_pk.
-
-3.5 Organizations
-
-An organization root key org_pk (Ed25519) defines:
-
-org_id = Ht(“id/org”, org_pk)
-
-org_id is stable for the lifetime of org_pk. For realm-scoped organizations, an additional scoped id MAY be used:
-
-scoped_org_id = Ht(“id/org/realm”, org_id || realm_id)
-
-When scoped_org_id is used, group and role bindings inside that realm MUST reference scoped_org_id, not bare org_id.
-
-3.6 Groups
-
-Groups are identified under an organization (scoped or not):
-
-group_id = Ht(“id/group”, org_id || ascii(group_local_name))
-
-group_local_name is a UTF-8 string chosen by the application and MUST be stable for the logical group’s lifetime.
-	4.	Streams
-
-4.1 Recommended identity streams
-
-The following VEEN stream identifiers are RECOMMENDED:
-
-stream_id_principal   = Ht(“id/stream/principal”, principal_pk)
-stream_id_ctx         = Ht(“id/stream/ctx”, ctx_id || realm_id)
-stream_id_org         = Ht(“id/stream/org”, org_id)
-stream_id_handle_ns   = Ht(“id/stream/handle”, realm_id)
-
-Implementations MAY merge multiple logical streams into one VEEN stream or split them further, as long as folding rules remain deterministic.
-
-4.2 Labels
-
-For each stream_id, labels are derived using VEEN’s label function from a routing_key and stream_id. Multiple labels MAY be used per stream_id (e.g. for sharding or epoching) if fold order is well defined.
-	5.	Schemas
-
-Schema identifiers (H is the VEEN-wide hash):
-
-schema_principal      = H(“id.principal.v1”)
-schema_device         = H(“id.device.v1”)
-schema_ctx_profile    = H(“id.ctx.profile.v1”)
-schema_org_profile    = H(“id.org.profile.v1”)
-schema_group          = H(“id.group.v1”)
-schema_role_binding   = H(“id.role.v1”)
-schema_handle_map     = H(“id.handlemap.v1”)
-schema_external_link  = H(“id.external.v1”)
-schema_revocation     = H(“id.revoke.v1”)
-
-Each schema is identified by setting payload_hdr.schema to the corresponding hash value. All payload_hdr and body data are AEAD-protected inside the VEEN ciphertext.
-	6.	Principals and devices
-
-6.1 Principal record
-
-Schema: schema_principal
-Stream: stream_id_principal
-
-Body:
-
-{
-principal_pk: bstr(32),
-created_at: uint,        // unix time seconds
-info: map?               // optional, application-defined
-}
-
-Rules:
-	•	principal_pk MUST match the public key used to derive stream_id_principal.
-	•	Multiple principal records MAY exist; later records MAY override info but MUST NOT change principal_pk.
-
-6.2 Device record
-
-Schema: schema_device
-Stream: stream_id_principal
-
-Body:
-
-{
-principal_pk: bstr(32),
-device_id: bstr(32),      // Ht(“id/device”, device_pk)
-device_pk: bstr(32),      // Ed25519
-dh_pk: bstr(32),          // X25519
-label: text?,             // e.g. “phone”, “laptop”
-created_at: uint,
-expires_at: uint?,        // unix time seconds
-flags: { disabled: bool? }?
-}
-
-Rules:
-	•	principal_pk MUST equal the principal_pk of stream_id_principal.
-	•	device_id MUST equal Ht(“id/device”, device_pk).
-	•	Device is ACTIVE if:
-	•	flags.disabled is absent or false, and
-	•	expires_at is absent or now <= expires_at.
-	•	Folding:
-	•	For each device_id, events are ordered as in section 1.
-	•	The last event determines flags and expiry.
-
-ACTIVE devices are permitted authenticators for ctx_id derived from the same principal_pk, subject to delegation via cap_token.
-	7.	Context accounts (per-realm identities)
-
-7.1 Context profile
-
-Schema: schema_ctx_profile
-Stream: stream_id_ctx
-
-Body:
-
-{
-ctx_id: bstr(32),
-realm_id: bstr(32),
-display_name: text?,
-avatar_coid: bstr(32)?,   // content object ID for avatar
-prefs: map?,
-updated_at: uint          // unix time seconds
-}
-
-Rules:
-	•	ctx_id MUST equal Ht(“id/ctx”, principal_pk || realm_id) for some principal_pk; the principal linkage may be implicit or explicit (via delegation).
-	•	realm_id MUST match the stream’s realm_id.
-	•	CRDT semantics:
-	•	For each (ctx_id, realm_id), the context profile is an LWW-register.
-	•	The winner is the record with maximum (updated_at, stream_seq).
-	•	Conflicts with equal (updated_at, stream_seq) MUST be treated as equivalent or rejected as duplicates.
-
-Applications SHOULD read ctx_profile via stream_id_ctx and MUST NOT assume uniqueness of display_name.
-	8.	Organizations, groups, and roles
-
-8.1 Organization profile
-
-Schema: schema_org_profile
-Stream: stream_id_org
-
-Body:
-
-{
-org_id: bstr(32),
-display_name: text?,
-metadata: map?,
-created_at: uint,
-updated_at: uint
-}
-
-Rules:
-	•	org_id MUST match the org_id used to derive stream_id_org.
-	•	Organization profile is an LWW-register per org_id using (updated_at, stream_seq).
-
-8.2 Group membership
-
-Schema: schema_group
-Stream: stream_id_org or a realm-scoped variant
-
-Body:
-
-{
-org_id: bstr(32),
-realm_id: bstr(32)?,
-group_id: bstr(32),
-name: text,
-members_add: [ bstr(32) ]?,      // ctx_id list
-members_remove: [ bstr(32) ]?,   // ctx_id list
-updated_at: uint
-}
-
-CRDT semantics:
-	•	Group membership is an OR-set per (org_id, group_id).
-	•	For each ctx_id:
-	•	membership is true if there exists at least one add event listing ctx_id that is not fully tombstoned by later remove events listing the same ctx_id.
-	•	Group name:
-	•	name is LWW per (org_id, group_id) using (updated_at, stream_seq).
-
-8.3 Role binding
-
-Schema: schema_role_binding
-Stream: stream_id_org or a realm-scoped variant
-
-Body:
-
-{
-org_id: bstr(32),
-realm_id: bstr(32)?,
-role: text,                   // e.g. “admin”, “editor”
-targets_ctx: [ bstr(32) ]?,   // ctx_id list
-targets_group: [ bstr(32) ]?, // group_id list
-ts: uint
-}
-
-Semantics:
-	•	Roles are additive by default:
-	•	For each ctx_id, assigned roles are:
-	•	roles mentioned in events where ctx_id is in targets_ctx, and
-	•	roles applied to group_id where ctx_id is a member.
-	•	Explicit role revocation MAY be modeled by:
-	•	a role naming convention (e.g. “no-admin”), or
-	•	a separate revocation schema (implementation-specific).
-	•	ID v0.0.1 does not define negative roles or hierarchical roles; these are left to applications.
-
-	9.	Delegation and authentication
-
-9.1 Delegation via cap_token
-
-Delegation uses VEEN cap_token unchanged.
-
-Issuer: principal_pk (for account-level delegation) or org_pk (for org-level delegation).
-Subject: device_pk or a service key.
-
-cap_token:
-
-{
-ver: 1,
-issuer_pk: bstr(32),
-subject_pk: bstr(32),
-allow: {
-stream_ids: [ bstr(32) … ],
-ttl: uint,
-rate: { per_sec: uint, burst: uint }?
-},
-sig_chain: [ 64-byte signatures … ]
-}
-
-Rules:
-	•	For principal-based delegation:
-	•	issuer_pk MUST equal principal_pk.
-	•	subject_pk MUST equal device_pk of an ACTIVE device.
-	•	allow.stream_ids SHOULD include required identity and application streams (including stream_id_ctx for relevant realms).
-	•	For org-based delegation:
-	•	issuer_pk MUST equal org_pk.
-	•	subject_pk MAY be principal_pk, device_pk, or a service key.
-	•	ttl and rate MUST be enforced by admission logic according to OP0.3-style policies.
-
-9.2 Authentication path for ctx_id
-
-To authenticate a client as a ctx_id in a realm:
-	1.	Client submits MSG with:
-	•	client_id = device_pk,
-	•	MSG.sig signed by device_sk,
-	•	optional auth_ref referencing a cap_token.
-	2.	Application obtains cap_token via auth_ref and verifies:
-	•	sig_chain matches issuer_pk root (principal_pk or org_pk),
-	•	subject_pk equals device_pk,
-	•	allow.stream_ids includes the target application/identity streams,
-	•	ttl and optional rate are satisfied.
-	3.	If issuer_pk is principal_pk:
-	•	Application computes ctx_id_expected = Ht(“id/ctx”, principal_pk || realm_id).
-	•	Application binds this session to ctx_id_expected.
-	4.	Additionally, application SHOULD check:
-	•	device_pk is ACTIVE in schema_device for principal_pk,
-	•	any required org/group/role bindings are present.
-
-The application does not need to store passwords, session IDs, or bearer tokens; possession of device_sk and a valid cap_token chain is sufficient.
-	10.	Handles and external IDs
-
-10.1 Handle mapping
-
-Schema: schema_handle_map
-Stream: stream_id_handle_ns for a given realm_id
-
-Body:
-
-{
-realm_id: bstr(32),
-handle: text,                    // “@user”, “user@example.com”, etc.
-target_type: text,               // “ctx” or “org”
-target_id: bstr(32),             // ctx_id or org_id
-ts: uint
-}
-
-Semantics:
-	•	The handle namespace is per realm_id.
-	•	For each (realm_id, handle), mapping is an LWW-register:
-	•	winner is record with maximum (ts, stream_seq).
-	•	Implementations MUST define:
-	•	which handles are valid (syntax),
-	•	whether and how handles can be reassigned,
-	•	how to handle conflicts or squatting.
-
-10.2 External ID link
-
-Schema: schema_external_link
-Stream: stream_id_ctx (recommended) or stream_id_org
-
-Body:
-
-{
-realm_id: bstr(32),
-ctx_id: bstr(32)?,
-org_id: bstr(32)?,
-provider: text,                  // “google”, “github”, “saml:corp”, etc.
-external_sub: text,              // subject from external IdP or system
-attributes: map?,                // optional mirrored claims
-ts: uint
-}
-
-Semantics:
-	•	At least one of ctx_id or org_id MUST be present.
-	•	For each (provider, external_sub) there SHOULD be at most one active linkage across trusted streams.
-	•	On external login:
-	•	a gateway validates the external token,
-	•	locates or creates ctx_id in the target realm,
-	•	emits or updates an external_link binding external_sub to ctx_id.
-
-ID v0.0.1 does not define global uniqueness or trust policies for providers; deployments MUST define which providers are trusted and how conflicts are resolved.
-	11.	Revocation and rotation
-
-11.1 Revocation record
-
-Schema: schema_revocation
-Stream: stream_id_principal or stream_id_org
-
-Body:
-
-{
-principal_pk: bstr(32)?,
-org_id: bstr(32)?,
-device_id: bstr(32)?,
-revoked_auth_ref: bstr(32)?,
-realm_id: bstr(32)?,
-ctx_id: bstr(32)?,
-reason: text?,
-ts: uint
-}
-
-Rules:
-	•	At least one of device_id, revoked_auth_ref, ctx_id, org_id MUST be present.
-	•	Revocation is advisory and MUST be enforced by:
-	•	hubs (for admission) and/or
-	•	applications (for authorization decisions).
-
-Recommended enforcement:
-	•	If revoked_auth_ref matches auth_ref, hubs SHOULD deny /submit for that auth_ref.
-	•	If device_id is revoked, applications MUST treat the corresponding device as INACTIVE even if schema_device flags are not updated.
-	•	If ctx_id is revoked in a realm, applications SHOULD treat that ctx_id as disabled for that realm.
-
-11.2 Device rotation
-
-To rotate a device:
-	•	Generate new device_pk2 / dh_pk2.
-	•	Create a schema_device event for device_pk2 (ACTIVE).
-	•	Create a schema_revocation event for old device_id and/or old revoked_auth_ref.
-	•	Optionally disable old device via a schema_device record with flags.disabled = true.
-
-11.3 Principal and organization key rotation
-
-Principal and org key rotation are advanced operations and are not fully standardized in ID v0.0.1. A deployment MAY define:
-	•	a dedicated key-rotation schema, and
-	•	rules mapping old principal_pk/org_pk to new ones.
-
-Until such schema exists, principal_pk and org_pk SHOULD be treated as long-lived roots.
-	12.	Bridging and federation
-
-12.1 Cross-hub identity mirroring
-
-Bridging uses the VEEN bridging overlay.
-
-A bridge process:
-	•	subscribes to identity streams on hub A (principal, ctx, org, handle, external_link, revocation) using stream(with_proof=1),
-	•	for each MSG:
-	•	preserves payload_hdr.schema and payload body byte-for-byte,
-	•	sets parent_id of the mirrored MSG to the original msg_id,
-	•	publishes a new MSG to hub B on the corresponding identity stream.
-
-Semantics:
-	•	Logical identity state is the union of events from all trusted hubs.
-	•	Events are deduplicated using a stable identifier:
-	•	for example, (payload hash, parent_id) or original msg_id.
-	•	The fold order MUST be deterministic across hubs.
-
-12.2 Realm-level federation
-
-Realms support multiple federation patterns:
-	•	Single realm for all applications in a deployment.
-	•	Per-tenant realm for multi-tenant SaaS.
-	•	Per-product realm for independent products sharing principals at a higher layer.
-
-Root-level federation (e.g. a “meta realm”) that links multiple realms via external_link is permitted but not specified in detail by ID v0.0.1.
-	13.	Privacy
-
-ID v0.0.1 aims to minimise implicit correlation:
-	•	ctx_id differs per realm by construction.
-	•	Principals are not required to be exposed to applications.
-	•	Identity payloads are encrypted; hubs do not see principal_pk, ctx_id, org_id, or handles in plaintext.
-	•	Cross-realm correlation is opt-in via external_link or application-specific logic.
-
-Deployments SHOULD:
-	•	avoid using principal_pk as a global account identifier in plaintext,
-	•	scope handles per realm_id,
-	•	use external_link only for explicit federation or legacy integration.
-
-	14.	Compliance levels
-
-An implementation MAY claim:
-	•	“ID v0.0.1 Core” if it implements:
-	•	realm_id and ctx_id derivation,
-	•	schema_ctx_profile,
-	•	schema_device,
-	•	delegation and authentication as in section 9.
-	•	“ID v0.0.1 Orgs” if it additionally implements:
-	•	schema_org_profile,
-	•	schema_group,
-	•	schema_role_binding.
-	•	“ID v0.0.1 Handles” if it additionally implements:
-	•	schema_handle_map,
-	•	resolve-by-handle logic.
-	•	“ID v0.0.1 External” if it additionally implements:
-	•	schema_external_link and a gateway for at least one external provider.
-	•	“ID v0.0.1 Bridge” if it additionally implements:
-	•	cross-hub identity mirroring as in section 12.1.
-
-	15.	Summary
-
-ID v0.0.1 defines a minimal, coherent identity layer for VEEN:
-	•	cryptographic principals and devices as roots,
-	•	realm-scoped pseudonymous context IDs (ctx_id) as primary account identifiers,
-	•	organizations, groups, and roles as CRDT overlays,
-	•	handle and external-ID mapping as additional overlays,
-	•	delegation via cap_token and event-driven revocation,
-	•	bridging across hubs and realms without changing VEEN wire formats.
-
-
-## products-spec-1.txt
-
-Server Drive Recorder and Air-gap Bridge Product Specification
-Version v0.0.2 (Products)
-	0.	Scope
-
-This document defines two product-grade profiles built on a VEEN-compatible deployment:
-	1.	VEEN Server Drive Recorder (SDR0)
-Continuous, tamper-evident recording and replay of selected events inside a trust domain.
-	2.	VEEN Air-gap Bridge (AGB0)
-Controlled, auditable, and optionally one-way transfer of events and proofs between two trust domains.
-
-The goal of v0.0.2 is to turn the previous conceptual profiles into concrete products:
-	•	with explicit SKUs,
-	•	with concrete CLI and deployment expectations,
-	•	with testable invariants,
-	•	with minimal but sufficient threat model and operations model.
-
-This specification assumes:
-	•	VEEN core (hub, streams, receipts, checkpoints, MMR log) is available,
-	•	0-series overlays (KEX0, AUTH1, ANCHOR0, DR0, OBS0) are present where referenced,
-	•	VEEN CLI v0.0.1+ is available and self-tests are green.
-
-	1.	Product line and SKUs
-
-1.1. SKUs
-
-SKU SDR0:
-	•	Name: VEEN Server Drive Recorder
-	•	Purpose: domain-internal forensic and operational evidence log
-	•	Dependencies: VEEN hub, VEEN CLI, ANCHOR0 optional but recommended
-
-SKU AGB0:
-	•	Name: VEEN Air-gap Bridge
-	•	Purpose: inter-domain evidence-carrying event transfer, optionally strictly one-way
-	•	Dependencies: VEEN hub (both zones), VEEN CLI, ANCHOR0 recommended, DR0 optional
-
-SKU SDR0+AGB0:
-	•	Name: VEEN Recorder + Bridge bundle
-	•	Purpose: combined deployment of SDR0 in both zones plus AGB0 between them
-
-1.2. Minimal VEEN feature set required
-
-All SKUs require at least:
-	•	Ordered encrypted streams
-	•	Message receipts with:
-	•	stream id
-	•	sequence number
-	•	MMR root
-	•	signatures (hub and sender)
-	•	Checkpoint support:
-	•	log root
-	•	per-stream last sequence
-	•	hub identity
-	•	timestamp
-	•	Capability tokens:
-	•	stream-level access
-	•	rate and TTL limits
-	•	Revocation support (AUTH1):
-	•	revocation records for client ids and cap tokens
-
-	2.	Common terminology and types
-
-2.1. Core terms
-
-hub: VEEN-compatible message hub.
-stream: named ordered sequence of messages in a hub.
-event: application-level payload plus metadata emitted as one message to a stream.
-receipt: verifiable record of a committed event.
-checkpoint: compact snapshot of log state and stream positions.
-trust domain: set of systems and operators sharing security policy and boundary.
-zone: specific deployment region within or adjacent to a trust domain.
-bridge: process that transfers events and proofs between hubs.
-
-2.2. Stream namespaces (product-level)
-
-SDR0 streams:
-	•	Namespace: record/*
-	•	record/app/*
-	•	record/security/*
-	•	record/infrastructure/*
-
-AGB0 streams:
-	•	Export: export/*
-	•	Import: import/*
-	•	Bridge audit: bridge/online/log, bridge/offline/log
-
-2.3. Identity and capability roles
-
-Shared patterns:
-	•	recorder_producer:
-	•	one identity per emitting service
-	•	append-only to specific record/* streams
-	•	recorder_admin:
-	•	manage label_class, retention, checkpoint triggers
-	•	read access across record/*
-	•	bridge_online:
-	•	read-only on export/* (Z1)
-	•	optional read-only on specific record/* where export is derived
-	•	bridge_offline:
-	•	write-only on import/* (Z2)
-
-No identity may simultaneously hold read access in one zone and write access in the opposite direction for the same logical bridge.
-	3.	VEEN Server Drive Recorder (SDR0)
-
-3.1. Product goal
-
-Provide a deterministic and verifiable logging fabric that answers:
-	•	“What happened, in which order, and who caused it?”
-	•	“Up to which point is the log provably consistent?”
-	•	“Which subset of events belongs to a given actor or time window?”
-
-without introducing new cryptography.
-
-3.2. Functional requirements
-
-3.2.1. Event shape
-
-Each recorder event MUST expose the following fields (payload or metadata):
-	1.	subject_id       (stable actor id)
-	2.	principal_id     (client public key id)
-	3.	event_type       (string, application-defined)
-	4.	event_time       (application-observed timestamp)
-	5.	hub_commit_seq   (implicit from stream / receipt)
-	6.	hub_commit_time  (hub-observed timestamp)
-	7.	origin           (service/component identifier)
-	8.	payload          (opaque structured content)
-
-The hub MUST:
-	•	sign committed messages,
-	•	include them in an append-only log,
-	•	provide inclusion proofs.
-
-3.2.2. Stream configuration
-
-For SDR0 compliance:
-	•	All in-scope events MUST be written to record/* streams.
-	•	Each application event type MUST map to exactly one recorder stream.
-	•	record/* streams MUST have:
-	•	retention_hint = long_term
-	•	admission policy forbidding oversized payloads beyond configured bound
-	•	renames and splits MUST be logged as explicit migration events in a dedicated management stream (e.g. record/infrastructure/changes).
-
-3.2.3. Capability and isolation
-	•	recorder_producer identities:
-	•	capabilities limited to:
-	•	append to specific record/* streams,
-	•	no delete, no stream admin operations.
-	•	recorder_admin identities:
-	•	may manage label_class and retention policies,
-	•	may read across record/* streams,
-	•	MUST be distinct from any producer identity.
-
-3.2.4. Checkpointing
-
-Deployment MUST define:
-	•	checkpoint frequency:
-	•	by time (e.g. every 5 minutes) and/or
-	•	by volume (e.g. every 10k events).
-	•	checkpoint content MUST include:
-	•	log_root (MMR root or equivalent)
-	•	per-stream last sequence for all record/*
-	•	hub_public key
-	•	profile id identifying the SDR0 configuration
-	•	creation timestamp
-
-3.2.5. Replay API
-
-Minimal replay interface:
-	•	Replay by range:
-	•	input: stream id, from_seq, to_seq (inclusive range [from_seq, to_seq], 1-based, from_seq <= to_seq)
-	•	output: ordered events plus receipts
-	•	Replay by time window:
-	•	input: stream set, start_time, end_time
-	•	output: events with hub_commit_time in [start_time, end_time]
-
-Replay consumers MUST, at least for critical flows:
-	•	verify hub identity against configured root-of-trust,
-	•	verify selected inclusion proofs against log_root.
-
-3.3. Non-functional requirements
-
-3.3.1. Operational
-	•	Checkpoint generation MUST be scriptable via CLI.
-	•	Replay MUST be automatable (non-interactive CLI mode).
-	•	Operators MUST have a documented runbook for:
-	•	generating an ad-hoc checkpoint,
-	•	validating the last checkpoint after incident,
-	•	deriving a safe replay window.
-
-3.3.2. Performance
-	•	Recorder logging path MUST not require additional interactive network round-trips beyond normal VEEN submit path.
-	•	Checkpoints MAY be generated asynchronously from the event ingestion path, provided consistency is preserved.
-
-3.4. Invariants (SDR0)
-
-Informal invariants:
-
-I1. Order:
-For any stream S and events e_i, e_j with i < j, any replay by sequence range on S MUST return e_i before e_j.
-
-I2. Stability up to checkpoint:
-Given checkpoint C with log_root R_C and per-stream last_seq_C(S), any event e in S with seq <= last_seq_C(S) is either:
-	•	verifiable against R_C, or
-	•	causes verification failure; silent omission is forbidden.
-
-I3. Actor consistency:
-For any principal_id P, the set of events recorded with principal_id = P corresponds to all uses of that VEEN client identity on recorder streams under the configured policies. Implementation MUST NOT multiplex multiple unrelated principals behind one VEEN client if that breaks auditability.
-
-3.5. VEEN CLI mapping (SDR0)
-
-A minimal SDR0 product MUST expose at least:
-	•	Recorder event emission:
-	•	via existing veen send with fixed schemas for record/*
-	•	Recorder stream management:
-	•	veen label-class set/list/show for record/*
-	•	Checkpoints:
-	•	veen hub checkpoint (or equivalent)
-	•	veen hub anchor for external anchoring (recommended with ANCHOR0)
-	•	Replay:
-	•	veen stream … –with-proofs for record/* streams
-	•	Self-test:
-	•	veen selftest core
-	•	SDR0-specific selftest scenario MAY be added as selftest recorder
-
-AGCI (Acceptance-grade CI) MUST ensure:
-	•	veen-core tests green,
-	•	veen-hub tests green,
-	•	goals_core_pipeline green,
-	•	goals_audit_anchor green when ANCHOR0 is enabled.
-
-	4.	VEEN Air-gap Bridge (AGB0)
-
-4.1. Product goal
-
-Provide a controlled and auditable path to move events (and their cryptographic evidence) from zone Z1 to zone Z2, preserving:
-	•	directionality constraints,
-	•	tamper-evident properties,
-	•	traceable operational actions.
-
-4.2. Topology and roles
-
-Zones:
-	•	Z1 (online zone):
-	•	hub_online
-	•	export/* streams
-	•	optional record/* streams feeding export/*
-	•	bridge/online/log audit stream
-	•	Z2 (offline or higher-trust zone):
-	•	hub_offline
-	•	import/* streams
-	•	bridge/offline/log audit stream
-
-Bridge:
-	•	AGB0 bridge process:
-	•	runs in its own environment,
-	•	has:
-	•	read-only capabilities in Z1 (export/*),
-	•	write-only capabilities in Z2 (import/*),
-	•	has no shared private keys between hubs.
-
-4.3. Directionality
-
-AGB0 product MUST enforce:
-	•	At capability level:
-	•	bridge_online identities:
-	•	read-only on export/*,
-	•	MUST NOT have write access in Z1.
-	•	bridge_offline identities:
-	•	write-only on import/*,
-	•	MUST NOT have read access in Z2 beyond import control scope.
-	•	At network/physical level:
-	•	Strict one-way option:
-	•	transfer via removable media or one-way link,
-	•	no route from Z2 back to Z1 under same operator control.
-
-4.4. Export bundle format
-
-Bundle B has:
-	•	header:
-	•	bundle_id (hash of bundle contents)
-	•	source_hub_id
-	•	source_profile_id (SDR0 or other)
-	•	export_stream_id
-	•	export_seq_from, export_seq_to
-	•	export_time_from, export_time_to
-	•	export_checkpoint:
-	•	root
-	•	per-stream last_seq
-	•	timestamp
-	•	hub_public
-	•	events:
-	•	ordered list of events in [export_seq_from, export_seq_to]
-	•	for each:
-	•	payload
-	•	metadata (including subject_id, principal_id, event_type, times, origin)
-	•	receipt or a reference to a bundled proof index
-	•	proof:
-	•	evidence that all events are consistent with export_checkpoint:
-	•	minimal subset of MMR peaks, membership proofs, or aggregated structure
-
-Bundle immutability:
-	•	Any change to payload, metadata, or proof MUST change bundle_id.
-	•	Import MUST fail if bundle_id or internal signatures do not verify.
-
-4.5. Import procedure
-
-For each bundle B:
-	1.	Receive B via physical or network means.
-	2.	Validate:
-	•	source_hub_id against trusted list,
-	•	export_checkpoint signature,
-	•	bundle_proof against export_checkpoint,
-	•	internal receipts.
-	3.	Apply stream mapping:
-	•	export/zoneX/foo -> import/zoneX/foo
-	4.	For each event:
-	•	create new event in import stream with:
-	•	original payload and metadata,
-	•	origin_receipt (or reference),
-	•	import_time,
-	•	bridge_id.
-	5.	Commit events to hub_offline.
-	6.	Optionally generate and anchor an import checkpoint.
-
-Import MUST NOT:
-	•	reuse source sequence numbers as hub_offline commit sequence,
-	•	silently drop events on verification failure,
-	•	modify payload content.
-
-On any failure:
-	•	record an audit entry in bridge/offline/log including:
-	•	bundle_id,
-	•	reason,
-	•	position in bundle.
-
-4.6. Bridge audit streams
-
-bridge/online/log:
-	•	records bundle creation:
-	•	bundle_id, hash
-	•	export_stream_id and seq range
-	•	event count
-	•	export_checkpoint id
-	•	operator/automation id
-
-bridge/offline/log:
-	•	records imports:
-	•	bundle_id
-	•	target import streams and seq ranges
-	•	event count
-	•	verification_result (success/failure, error code)
-	•	operator/automation id
-
-4.7. Reconciliation and consistency
-
-Given a chosen export checkpoint C1 in Z1:
-	•	In Z1:
-	•	compute exported ranges per export/* stream up to C1 from bundle headers.
-	•	In Z2:
-	•	compute imported ranges per import/* stream,
-	•	track origin_receipt set.
-
-AGB0 MUST offer a reconciliation tool or script that can:
-	•	detect missing bundles,
-	•	detect duplicate imports,
-	•	detect partial imports,
-	•	report them in a machine-readable format.
-
-4.8. Invariants (AGB0)
-
-Informal invariants:
-
-J1. One-to-one origin mapping:
-For any imported event in Z2, there exists exactly one origin_receipt in Z1, and reconciliation MUST be able to map between them.
-
-J2. No silent loss in normal operation:
-If bundle B is marked as successfully imported, then all events in B MUST have corresponding imported events, unless an explicit and logged exclusion policy is configured.
-
-J3. Directionality:
-For a strictly one-way Z1→Z2 bridge, there exists no identity and no network path that allows events originating in Z2 to directly influence any stream in hub_online under the same bridge operator’s control.
-
-4.9. VEEN CLI mapping (AGB0)
-
-AGB0 implementation SHOULD be expressed mainly as:
-	•	Bundle exporter:
-	•	veen bridge export or equivalent:
-	•	pulls from export/* streams,
-	•	builds bundle CBOR/JSON artifact,
-	•	writes audit event to bridge/online/log.
-	•	Bundle importer:
-	•	veen bridge import or equivalent:
-	•	verifies bundle,
-	•	writes events to import/*,
-	•	writes audit event to bridge/offline/log.
-	•	Hubs and anchors:
-	•	veen hub start/stop/status
-	•	veen hub anchor /anchor endpoint for anchoring checkpoints.
-	•	Self-test:
-	•	goals_dr_cutover MUST be green when DR0 overlay is used.
-	•	goals_k8s_disposable_mesh SHOULD be green for k8s deployments.
-	•	AGB0-specific selftest MAY be added that:
-	•	starts temporary hubs for Z1/Z2,
-	•	exports synthetic events,
-	•	imports them,
-	•	runs reconciliation.
-
-	5.	Combined product: SDR0+AGB0
-
-5.1. Pattern
-
-Recommended pattern:
-	1.	Run SDR0 in both Z1 and Z2:
-	•	record/* streams with long_term retention.
-	2.	Select subset of record/* as export candidates:
-	•	e.g. record/security/* and record/infrastructure/changes.
-	3.	Configure AGB0 to:
-	•	export from export/* (derived from record/* or mapped 1–1),
-	•	import to import/* in Z2,
-	•	log all bridge operations.
-	4.	Use SDR0 replay in Z2 for analysis:
-	•	import/* plus local record/*.
-	5.	Optionally anchor:
-	•	SDR0 checkpoints in both zones via ANCHOR0,
-	•	AGB0 bundle ids and reconciliation results.
-
-5.2. Shared invariants
-
-K1. End-to-end trace:
-
-For any critical event that originated in Z1 and is imported to Z2:
-	•	there MUST exist:
-	•	a chain:
-	•	SDR0 event in record/* in Z1,
-	•	inclusion in export bundle,
-	•	audit record in bridge/online/log,
-	•	audit record in bridge/offline/log,
-	•	imported event in import/* in Z2,
-	•	optional SDR0 event in record/* in Z2 that references the import.
-
-K2. Bounded uncertainty window:
-
-Given checkpoints C1 in Z1 and C2 in Z2 and a reconciliation run, the system MUST be able to:
-	•	identify a closed region of time/sequence where log state is provably consistent across bridge operations,
-	•	identify any gaps beyond that region.
-
-	6.	Threat model and non-goals
-
-6.1. In-scope threats
-	•	Attempted log tampering at VEEN API level:
-	•	removing or reordering events,
-	•	injecting forged events not signed by valid keys.
-	•	Attempted bundle tampering:
-	•	modification of payload, receipts, or proofs after export.
-	•	Misconfiguration of capabilities:
-	•	accidentally granting write where only read is intended (AGB0),
-	•	bypassing append-only policy for recorder streams.
-	•	Bridge operation errors:
-	•	partial imports,
-	•	duplicated imports.
-
-6.2. Out-of-scope threats
-	•	OS-level compromise of hub hosts or bridge hosts:
-	•	arbitrary root access on machines is treated as out-of-scope.
-	•	Physical access to storage leading to complete data replacement without VEEN validation paths being used.
-	•	Side-channel attacks on cryptographic primitives (reuse of VEEN’s crypto assumptions).
-
-6.3. Expected mitigations
-	•	Anchoring (ANCHOR0) to external services or ledgers is RECOMMENDED for:
-	•	SDR0 checkpoints,
-	•	AGB0 bundle ids,
-	•	reconciliation reports.
-	•	Strict identity and key management MUST be enforced by deployment processes and is not provided by the spec.
-
-	7.	Implementation and test requirements for v0.0.2
-
-To claim v0.0.2 product compliance:
-	•	All existing VEEN test suites MUST be green:
-	•	veen-core, veen-hub, veen-cli, veen-bridge, veen-selftest,
-	•	goals_core_pipeline,
-	•	goals_audit_anchor,
-	•	goals_dr_cutover,
-	•	goals_k8s_disposable_mesh (for k8s environments).
-	•	At least one SDR0 integration selftest MUST exist that:
-	•	emits events to record/*,
-	•	generates and verifies checkpoints,
-	•	replays with proofs.
-	•	At least one AGB0 integration selftest MUST exist that:
-	•	creates hubs for Z1/Z2,
-	•	exports bundles,
-	•	imports them,
-	•	runs reconciliation,
-	•	asserts invariants J1–J3.
-
-This v0.0.2 spec is intentionally minimal at the product surface: UI, billing, and higher-level workflows may be added freely as long as the invariants and capabilities defined above remain satisfied.
-
-## query-api-spec.txt
-
-Query API Specification v0.0.1 (Tightened)
-	0.	Scope
-
-This document tightens the Query API on top of a VEEN deployment that already implements:
-	•	Server Drive Recorder profile
-	•	Air-gap Bridge profile
-
-The Query API:
-	1.	Treats queries and results as first-class recorder events.
-	2.	Provides deterministic, verifiable digests for returned result sets.
-	3.	Allows reconstruction and replay of queries across zones.
-
-No new cryptography is introduced. The API is a structured way to:
-	•	express queries,
-	•	record them as events,
-	•	produce and verify results.
-
-	1.	Terminology
-
-hub: VEEN-compatible message hub.
-stream: named ordered stream of VEEN messages.
-event: application-level payload plus metadata in a VEEN message.
-receipt: cryptographically verifiable record of a committed VEEN message.
-checkpoint: compact snapshot: log root + stream positions + metadata.
-trust domain: set of systems under a shared security policy.
-zone: concrete deployment region (e.g. online zone, offline zone).
-query: structured request for a derived view of recorder events.
-QueryDescriptor: canonical JSON representation of a query.
-ResultRow: single row of a query result.
-ResultDigest: compact summary and hash of a result set.
-evidence: cryptographic material to verify that result rows match underlying events.
-principal: VEEN client identity (key) that submits a query.
-	2.	Namespaces and resources
-
-2.1. Streams
-
-The Query API uses the following recorder streams:
-	1.	Query request stream
-	•	Name: record/query/requests
-	•	Direction: append-only
-	•	Payload: normalized QueryDescriptor
-	2.	Query result stream
-	•	Name: record/query/results
-	•	Direction: append-only
-	•	Payload: ResultDigest
-	3.	Optional query audit streams
-	•	Name: record/query/audit/*
-	•	Direction: append-only
-	•	Payload: implementation-specific execution logs
-
-All streams inherit the guarantees of the underlying Recorder profile: signed messages, inclusion in an append-only log, and MMR-based proofs.
-
-2.2. Identifiers
-
-The following identifiers are treated as opaque ASCII strings:
-
-query_id: unique per query submission.
-result_id: unique per query execution.
-receipt_id: reference to a VEEN receipt for a source event.
-hub_id: identifier of a VEEN hub instance.
-profile_id: identifier of a hub profile or deployment configuration.
-
-Constraints:
-	•	query_id and result_id MUST be unique in the hub.
-	•	Implementations MAY use UUIDv4 or cryptographic hashes; the format MUST be stable and documented.
-
-	3.	Data types and encoding
-
-3.1. JSON encoding
-
-All API payloads and stored QueryDescriptor and ResultDigest objects use JSON with:
-	1.	UTF-8 encoding.
-	2.	No binary blobs; binary data must be hex or base64.
-	3.	Deterministic canonicalization for hashing:
-	•	object keys sorted lexicographically (byte order),
-	•	no insignificant whitespace,
-	•	numeric values encoded in minimal decimal form (no leading zeros, no unnecessary trailing zeros),
-	•	strings encoded as UTF-8 with standard JSON escaping,
-	•	arrays preserve order.
-
-When this document refers to “canonical JSON” it means this encoding.
-
-3.2. Timestamps
-
-All timestamps are ISO-8601 UTC strings:
-	•	Format: YYYY-MM-DDTHH:MM:SSZ
-	•	Example: 2025-11-19T03:20:00Z
-
-Sub-second precision MAY be added as fractional seconds, but MUST be consistent across implementation (e.g. always millisecond 3 decimal digits).
-	4.	QueryDescriptor model
-
-4.1. Shape
-
-A QueryDescriptor is a JSON object:
-
-{
-“query_id”: “string”,
-“version”: 1,
-“scope”: [ “string”, … ],
-“filter”: { … },
-“projection”: [ “string”, … ],
-“aggregate”: { … },   // optional
-“evidence”: { … },
-“meta”: { … }         // optional
-}
-
-4.2. Fields (required core)
-	1.	query_id (string)
-	•	Globally unique per submitted query.
-	•	If not supplied by the client, the server MUST generate it and include it in the normalized descriptor.
-	2.	version (integer)
-	•	MUST be 1 for this specification.
-	3.	scope (array of string)
-	•	Non-empty array of stream names.
-	•	Each entry SHOULD be a recorder stream (e.g. “record/app/http”).
-	•	Implementations MUST reject unknown or unauthorized streams.
-	4.	filter (object)
-	•	Minimal required fields:
-{
-“subject_id”: “string or null”,           // optional
-“event_type”: [“string”, …] or null,    // optional
-“time”: {
-“from”: “timestamp or null”,
-“to”: “timestamp or null”
-}
-}
-Semantics:
-	•	subject_id: include only events with matching subject_id if present.
-	•	event_type: include only events whose event_type is in the list.
-	•	time.from / time.to: filter by hub_commit_time or event_time (implementation MUST document which).
-If a field is omitted or null, it does not constrain the result.
-	5.	projection (array of string)
-	•	Non-empty.
-	•	Each entry names a logical field or path. Minimal required fields:
-	•	“subject_id”
-	•	“principal_id”
-	•	“event_time”
-	•	“origin”
-	•	“event_type”
-	•	“payload.*” (implementation MAY support dotted paths)
-	•	“receipt_id” (if available from storage)
-If projection is [”*”], implementation MAY return a default field set.
-	6.	evidence (object)
-	•	Evidence policy:
-{
-“mode”: “none” | “spot” | “full”,
-“sample_rate”: number  // required for “spot”
-}
-Constraints:
-	•	mode “none”: sample_rate MUST be omitted or null.
-	•	mode “spot”: sample_rate MUST be in (0, 1].
-	•	mode “full”: sample_rate MUST be omitted or null.
-
-4.3. Fields (optional extensions)
-	1.	aggregate (object)
-	•	Optional; if absent, the query is a row-level selection.
-	•	Minimal structure:
-{
-“group_by”: [“field”, …],      // optional; empty or omitted = no grouping
-“metrics”: [
-“count”,
-“min(event_time)”,
-“max(event_time)”
-]
-}
-	•	count MUST be supported; other metrics are implementation-defined.
-	2.	meta (object)
-	•	Free-form metadata. Recommended keys:
-{
-“requested_by”: “principal-id or human id”,
-“requested_at”: “timestamp”,
-“reason”: “string”
-}
-
-4.4. Normalization
-
-On submission:
-	1.	The server parses the client-supplied descriptor.
-	2.	It fills defaults:
-	•	set version = 1 if missing,
-	•	generate query_id if missing,
-	•	normalize filter, projection, evidence, meta to canonical JSON.
-	3.	It validates:
-	•	required fields are present,
-	•	types are correct,
-	•	references (streams, metrics, fields) are supported.
-
-If validation fails, the API MUST return HTTP 400 with an error payload (see section 7.4).
-
-The normalized QueryDescriptor is the one stored in record/query/requests.
-
-4.5. Recording as VEEN event
-
-The normalized QueryDescriptor MUST be embedded in a VEEN message:
-	•	stream: record/query/requests
-	•	body: canonical JSON of the descriptor
-	•	recorder layer MUST populate:
-	•	subject_id: the actor on whose behalf the query is run,
-	•	principal_id: the VEEN client key id,
-	•	event_type: “query.submitted” (or equivalent stable string),
-	•	event_time: server receive time.
-
-	5.	Result model
-
-5.1. ResultRow
-
-ResultRow is a logical row returned by the query engine. There is no fixed global schema; fields derive from projection and aggregate.
-
-Constraints:
-	1.	Each row MUST be representable as a JSON object.
-	2.	For selection queries:
-	•	it SHOULD include projected base fields (such as subject_id, event_time).
-	3.	For aggregate queries:
-	•	it SHOULD include group keys and metric values.
-	4.	If projection includes “receipt_id”:
-	•	each row MUST include a string “receipt_id” that refers to a VEEN receipt for the source event or a canonical derived identifier (implementation MUST document mapping).
-
-Example (selection):
-
-{
-“subject_id”: “user:123”,
-“event_time”: “2025-11-18T12:34:56Z”,
-“origin”: “api-gateway-1”,
-“path”: “/login”,
-“status”: 401,
-“receipt_id”: “rcpt-abc…”
-}
-
-Example (aggregate):
-
-{
-“subject_id”: “user:123”,
-“origin”: “api-gateway-1”,
-“count”: 23,
-“first_seen”: “2025-11-18T00:10:00Z”,
-“last_seen”: “2025-11-18T23:50:00Z”
-}
-
-5.2. ResultDigest
-
-ResultDigest has this minimal structure:
-
-{
-“query_id”: “q-…”,
-“result_id”: “r-…”,
-“version”: 1,
-“row_count”: 123,
-“evidence_policy”: {
-“mode”: “spot”,
-“sample_rate”: 0.1
-},
-“rows_hash”: “hex”,
-“evidence_hash”: “hex”,
-“executed_at”: “timestamp”,
-“hub_id”: “hub-…”,
-“profile_id”: “profile-…”   // optional
-}
-
-Fields:
-	•	query_id: MUST match the QueryDescriptor.
-	•	result_id: unique; binds the fetchable result to this digest.
-	•	version: MUST be 1.
-	•	row_count: number of rows after aggregation.
-	•	evidence_policy: normalized copy of evidence.
-	•	rows_hash: SHA-256 (or stronger) of canonical JSON encoding of the rows array.
-	•	evidence_hash: SHA-256 (or stronger) of canonical JSON encoding of evidence summary (see 6).
-	•	executed_at: timestamp when the result set was fully materialized.
-	•	hub_id: hub identity at execution time.
-	•	profile_id: optional; identifies hub configuration profile.
-
-5.3. Canonical rows_hash
-
-To compute rows_hash:
-	1.	Construct an array R of ResultRow objects in the order they will be returned to the client.
-	2.	Encode R as canonical JSON (section 3.1).
-	3.	Compute SHA-256 over the resulting bytes.
-	4.	Encode as lowercase hex string.
-
-rows_hash = hex(sha256(canonical_json(R)))
-
-5.4. Canonical evidence_hash
-
-The exact shape of evidence summary is implementation-defined but MUST be deterministic.
-
-Minimal requirement:
-	1.	For mode “none”:
-	•	evidence_summary := { “mode”: “none” }
-	2.	For mode “spot” or “full”:
-	•	evidence_summary MUST include at least:
-	•	query_id
-	•	result_id
-	•	mode
-	•	sample_rate (for mode “spot”)
-	•	a list of verified entries; each entry SHOULD contain:
-	•	receipt_id
-	•	mmr_root or equivalent
-	•	hub_id
-
-Example:
-
-{
-“query_id”: “q-…”,
-“result_id”: “r-…”,
-“mode”: “spot”,
-“sample_rate”: 0.1,
-“verified”: [
-{
-“receipt_id”: “rcpt-1”,
-“mmr_root”: “hex”,
-“hub_id”: “hub-…”
-},
-{
-“receipt_id”: “rcpt-2”,
-“mmr_root”: “hex”,
-“hub_id”: “hub-…”
-}
-]
-}
-
-evidence_hash is then:
-
-evidence_hash = hex(sha256(canonical_json(evidence_summary)))
-
-5.5. Recording ResultDigest
-
-ResultDigest MUST be embedded in a VEEN message:
-	•	stream: record/query/results
-	•	body: canonical JSON of the digest
-	•	event_type: “query.result”
-	•	subject_id: principal or service responsible for execution
-	•	principal_id: execution engine identity
-
-	6.	Evidence modes
-
-6.1. Mode “none”
-	•	Engine does not resolve receipts.
-	•	Engine does not verify MMR or signatures.
-	•	rows_hash MUST still be computed.
-	•	evidence_summary is minimal; evidence_hash is deterministic.
-
-Use cases:
-	•	dashboards,
-	•	low-criticality analytics.
-
-6.2. Mode “spot”
-	•	Engine must:
-	1.	Materialize all ResultRow entries.
-	2.	Select a deterministic subset using sample_rate.
-	3.	For each sampled row, resolve receipt_id and verify:
-	•	signature,
-	•	MMR inclusion against a known root.
-	4.	Construct evidence_summary with all sampled verifications.
-	•	If any sampled verification fails:
-	•	the query MUST fail (no successful result is returned).
-
-6.3. Mode “full”
-	•	Engine must:
-	1.	For every ResultRow, resolve and verify receipts.
-	2.	Fail the query if any verification fails.
-	3.	Construct evidence_summary that allows recomputation or replay of verification.
-	•	Mode “full” is intended for:
-	•	forensic investigations,
-	•	regulatory-grade reporting.
-
-	7.	HTTP API
-
-7.1. Authentication
-
-All endpoints MUST be protected by:
-	•	an authentication layer (e.g. bearer tokens, mTLS), and
-	•	a mapping from authenticated principal to VEEN client identity.
-
-Access control rules:
-	•	Only authorized principals MAY submit queries.
-	•	Access to scopes (streams) MUST be filtered by policy.
-	•	Access to results MAY be restricted by:
-	•	who submitted the query,
-	•	tenant partition,
-	•	query classification.
-
-7.2. POST /api/query/submit
-
-Request:
-	•	Method: POST
-	•	Path: /api/query/submit
-	•	Headers:
-	•	Content-Type: application/json
-	•	Authorization: implementation-defined
-	•	Body: JSON, partial or full QueryDescriptor (server can fill query_id and version).
-
-Server behavior:
-	1.	Authenticate and authorize.
-	2.	Normalize and validate descriptor.
-	3.	Emit VEEN event to record/query/requests.
-	4.	Schedule execution.
-	5.	Allocate result_id.
-
-Response (accepted):
-
-HTTP 202
-
-{
-“query_id”: “q-…”,
-“result_id”: “r-…”,
-“status”: “pending”
-}
-
-For small queries, server MAY synchronously execute and respond:
-
-HTTP 200
-
-{
-“result_digest”: { … },
-“rows”: [ … ]
-}
-
-7.3. GET /api/query/status/{result_id}
-
-Optional.
-	•	Method: GET
-	•	Path: /api/query/status/{result_id}
-
-Response:
-
-HTTP 200
-
-{
-“query_id”: “q-…”,
-“result_id”: “r-…”,
-“status”: “pending” | “running” | “completed” | “failed”,
-“error_code”: “string or null”,
-“message”: “string or null”
-}
-
-7.4. GET /api/query/result/{result_id}
-
-Request:
-	•	Method: GET
-	•	Path: /api/query/result/{result_id}
-
-Query parameters (optional):
-	•	offset: integer, default 0
-	•	limit: integer, default 1000, upper bound implementation-defined
-
-Response (completed, paginated):
-
-HTTP 200
-
-{
-“result_digest”: { … },         // full digest
-“rows”: [ ResultRow, … ],
-“page”: {
-“offset”: 0,
-“limit”: 1000,
-“total”: 1234,                  // optional; may be omitted for streaming backends
-“has_more”: true | false
-}
-}
-
-Offset and limit refer to row indices in the logical result set used when computing rows_hash. The server MUST ensure that:
-	•	pagination does not change row ordering, and
-	•	rows_hash remains the hash of the full ordered result set, not of a single page.
-
-7.5. GET /api/query/descriptor/{query_id}
-
-Optional but recommended for audit.
-	•	Method: GET
-	•	Path: /api/query/descriptor/{query_id}
-
-Response:
-
-{
-“descriptor”: { QueryDescriptor },
-“record_event”: {
-“stream”: “record/query/requests”,
-“seq”: integer,
-“hub_id”: “hub-…”,
-“receipt_id”: “rcpt-…”
-}
-}
-
-7.6. Error model
-
-Error responses MUST be JSON:
-
-{
-“error_code”: “string”,
-“message”: “human readable”
-}
-
-Recommended error_code values:
-	•	invalid_json
-	•	invalid_query_descriptor
-	•	unauthorized
-	•	forbidden_scope
-	•	query_not_found
-	•	result_not_ready
-	•	execution_failed
-	•	internal_error
-
-Mapping to HTTP status:
-	•	400: invalid_json, invalid_query_descriptor
-	•	401: unauthorized
-	•	403: forbidden_scope
-	•	404: query_not_found
-	•	409: duplicate_query_id
-	•	425 or 404 or 409 (implementation-defined): result_not_ready
-	•	500: execution_failed, internal_error
-
-	8.	Execution semantics
-
-8.1. State machine (logical)
-
-For each result_id:
-	•	PENDING: descriptor accepted, not yet executed.
-	•	RUNNING: query engine executing.
-	•	COMPLETED: result_digest written to record/query/results and result rows materialized.
-	•	FAILED: execution failed; no ResultDigest committed.
-
-Transition rules:
-	•	PENDING → RUNNING → COMPLETED
-	•	PENDING → RUNNING → FAILED
-	•	PENDING → FAILED (fast failure during planning or validation)
-
-Once COMPLETED or FAILED, the state MUST be immutable.
-
-8.2. Coupling with VEEN
-
-A result is considered COMMITTED when:
-	1.	ResultDigest event is successfully appended to record/query/results, and
-	2.	The hub acknowledges the message and provides a receipt.
-
-The API MAY return the result to the client after the local append but SHOULD expose the receipt or its hash via ResultDigest for later verification.
-	9.	Cross-zone usage with Air-gap Bridge
-
-9.1. Query in Z1, replay in Z2
-
-Pattern:
-	1.	In zone Z1:
-	•	submit query, obtain QueryDescriptor and ResultDigest.
-	•	optionally export underlying recorder events via Recorder + Bridge profile.
-	2.	Export:
-	•	export:
-	•	QueryDescriptor event,
-	•	ResultDigest event,
-	•	the recorder events required by the query (or a superset).
-	3.	In zone Z2:
-	•	import recorder events.
-	•	import QueryDescriptor and ResultDigest as recorder events.
-	•	optionally re-run the query engine locally using the imported QueryDescriptor.
-	•	compute local ResultDigest’.
-
-If:
-	•	QueryDescriptor’ equals QueryDescriptor, and
-	•	ResultDigest’ matches ResultDigest on:
-	•	query_id
-	•	row_count
-	•	rows_hash
-	•	evidence_hash (for same evidence settings),
-
-then Z2 can assert that:
-	•	it observes a recorder history that matches Z1 for the queried scope, up to retention.
-
-9.2. One-way bridge constraints
-	•	Queries MAY be submitted separately in each zone.
-	•	Query descriptors and digests MAY flow one-way with ordinary exported streams.
-	•	No query-related control channel MUST be used to bypass one-way constraints.
-
-	10.	Versioning and compatibility
-
-10.1. Schema versions
-
-This document fixes:
-	•	QueryDescriptor.version = 1
-	•	ResultDigest.version = 1
-
-If a client supplies another version, the server MUST:
-	•	either reject (HTTP 400, error_code = “unsupported_version”), or
-	•	explicitly document a migration strategy.
-
-10.2. HTTP API versioning
-
-The bare paths in this document define v0.0.1 behavior. Implementations MAY expose:
-	•	/api/v1/query/…
-
-In that case they MUST document which descriptor/result versions the v1 API accepts and produces.
-
-10.3. Backward-compatible extensions
-
-The following are considered backward-compatible:
-	•	adding new filter keys that can be safely ignored by older servers,
-	•	adding new aggregate metrics that are rejected only if requested,
-	•	adding fields to ResultRow and ResultDigest that clients may ignore.
-
-Breaking changes MUST increment the schema version and, if exposed, the HTTP path version.
-
-## spec-1.txt
 
 Verifiable End-to-End Network (VEEN) v0.0.1 - Core plus Operational and Upper-Layer Profiles (wire format unchanged)
 	0.	Scope
@@ -2561,7 +948,8 @@ An implementation that implements only Core MUST still obey all invariants I1..I
 
 This document consolidates the VEEN v0.0.1 core with a fixed wire format and specifies operational edges (admission, rate limiting, rotation, recovery) plus portable overlays for RPC, CRDTs, external anchoring, observability, compliance, and hardening. A compliant “Core + OP0” hub and client can be deployed for end-to-end encrypted, verifiable messaging and audit logging immediately; overlays can be enabled incrementally without re-encoding messages or changing bytes on the wire.
 
-## spec-2.txt
+### spec-2.txt
+
 
 VEEN v0.0.1+ — Federated and Hardened Addendum
 Wire-compatible overlays on VEEN v0.0.1 Core (sections 5–8 unchanged)
@@ -3023,7 +1411,8 @@ VEEN v0.0.1+ preserves all security properties of VEEN v0.0.1 (section 14 of the
 
 The wire format remains unchanged; deployments can incrementally adopt these profiles without re-encoding messages or altering existing on-disk logs.
 
-## spec-3.txt
+### spec-3.txt
+
 
 Title
 Extended Operation Profiles for VEEN v0.0.1 Core
@@ -3600,7 +1989,8 @@ A reference implementation SHOULD:
 	•	Provide client side helpers to construct these payloads, link them to capabilities, and submit them through the existing CLI and APIs.
 
 
-## spec-4.txt
+### spec-4.txt
+
 
 VEEN v0.0.1++ — Kubernetes-Native Profile (Tightened)
 	0.	Purpose
@@ -4054,7 +2444,8 @@ The following invariants MUST hold:
 	•	Operators are free to use Helm, Kustomize, or plain manifests as long as the resulting resources obey this spec.
 	•	Higher-level constructs such as CRDs (VEENTenant, VEENUniverse) can wrap this profile but MUST not weaken its invariants.
 
-## spec-5.txt
+### spec-5.txt
+
 
 Discovery Overlay and Connect Application Specification v0.0.1
 Plain ASCII, English only. Pure overlay on VEEN v0.0.1; no wire changes.
@@ -4453,7 +2844,522 @@ Discovery Overlay and Connect Application v0.0.1:
 
 With this overlay in place, hubs and overlays become discoverable resources on the same fabric, and clients can programmatically “ask the network” which applications are available and how to connect to them, without any new core wire objects or error codes.
 
-## wallet-spec.txt
+## Overlay specifications
+
+### id-spec.txt
+
+
+VEEN Identity Layer (ID) v0.0.1
+Principals, Realms, Context IDs, Orgs, and Bridging
+(Overlay on VEEN v0.0.1, no wire-format changes)
+	0.	Scope
+
+This document defines the VEEN Identity Layer (ID) v0.0.1. ID is an overlay on VEEN v0.0.1 that provides:
+	•	cryptographic principals and devices,
+	•	realm-scoped pseudonymous account identifiers (context IDs),
+	•	organizations, groups, and roles,
+	•	handle and external-ID mapping,
+	•	capability-based delegation and revocation,
+	•	cross-hub and cross-realm identity bridging.
+
+ID introduces only payload schemas and processing rules. It does not change VEEN core wire objects (MSG, RECEIPT, CHECKPOINT, cap_token) and does not alter VEEN invariants.
+
+All identity semantics are carried as encrypted VEEN payloads and folded deterministically. Hubs remain blind to identity contents.
+	1.	Notation and common rules
+
+Ht(tag,x) = H(ascii(tag) || 0x00 || x) as in VEEN core.
+
+Keys:
+	•	principal_pk: Ed25519 public key (32 bytes) for a root identity (human or service).
+	•	device_pk: Ed25519 public key (32 bytes) for a device.
+	•	dh_pk: X25519 public key (32 bytes) for a device.
+
+All payload bodies defined in this document are deterministic CBOR maps:
+	•	exact key set and key order as listed per schema,
+	•	minimal-length unsigned integers,
+	•	definite-length byte strings and arrays,
+	•	no floats,
+	•	no CBOR tags,
+	•	unknown keys MUST be rejected.
+
+Events are folded per stream in a deterministic order:
+	•	primarily by VEEN stream_seq,
+	•	optionally refined by an explicit timestamp field (ts/updated_at) when defined,
+	•	with a stable, implementation-defined tie-breaker if required (e.g. leaf_hash).
+
+	2.	Identity model
+
+ID separates the following layers:
+	•	Principal: long-lived cryptographic root identity (principal_pk).
+	•	Realm: identity scope for an application, tenant, or federation (realm_id).
+	•	Context identity: realm-scoped pseudonymous account identifier (ctx_id).
+	•	Devices: device_pk attached to a principal, used as authenticators.
+	•	Organizations: org_id representing multi-account entities.
+	•	Groups and roles: sets and labels over ctx_id for access control.
+	•	Handles: human-readable identifiers mapped to ctx_id or org_id.
+	•	External IDs: references to legacy IdPs or systems.
+
+Applications SHOULD primarily interact with ctx_id and realm_id. Principals are used as cryptographic roots and are not necessarily exposed to applications.
+	3.	Identifiers
+
+3.1 Realm identifiers
+
+A realm is a scope for context identities.
+
+realm_id = Ht(“id/realm”, ascii(realm_name))
+
+realm_name is an implementation-chosen UTF-8 string (e.g. “example-app”, “tenant-123”). Realm identifiers are 32-byte opaque values.
+
+3.2 Principals
+
+Each principal_pk defines a root identity. No derived identifier is required beyond principal_pk itself, but a stable reference can be defined if needed:
+
+principal_id = Ht(“id/principal”, principal_pk)
+
+principal_id is not required for protocol correctness and is informative.
+
+3.3 Context identifiers (ctx_id)
+
+For a principal_pk in a given realm_id:
+
+ctx_id = Ht(“id/ctx”, principal_pk || realm_id)
+
+Properties:
+	•	ctx_id is 32 bytes.
+	•	The same principal_pk yields different ctx_id for different realm_id.
+	•	Within a realm_id, ctx_id is stable for the lifetime of principal_pk.
+	•	No global user identifier is imposed; correlation across realms is optional and explicit.
+
+Applications SHOULD treat ctx_id as the primary account identifier inside a realm.
+
+3.4 Device identifiers
+
+Each device keypair (device_sk, device_pk) and DH key (dh_sk, dh_pk) defines:
+
+device_id = Ht(“id/device”, device_pk)
+
+device_id is used only within identity payloads. On-wire VEEN MSG.client_id remains device_pk.
+
+3.5 Organizations
+
+An organization root key org_pk (Ed25519) defines:
+
+org_id = Ht(“id/org”, org_pk)
+
+org_id is stable for the lifetime of org_pk. For realm-scoped organizations, an additional scoped id MAY be used:
+
+scoped_org_id = Ht(“id/org/realm”, org_id || realm_id)
+
+When scoped_org_id is used, group and role bindings inside that realm MUST reference scoped_org_id, not bare org_id.
+
+3.6 Groups
+
+Groups are identified under an organization (scoped or not):
+
+group_id = Ht(“id/group”, org_id || ascii(group_local_name))
+
+group_local_name is a UTF-8 string chosen by the application and MUST be stable for the logical group’s lifetime.
+	4.	Streams
+
+4.1 Recommended identity streams
+
+The following VEEN stream identifiers are RECOMMENDED:
+
+stream_id_principal   = Ht(“id/stream/principal”, principal_pk)
+stream_id_ctx         = Ht(“id/stream/ctx”, ctx_id || realm_id)
+stream_id_org         = Ht(“id/stream/org”, org_id)
+stream_id_handle_ns   = Ht(“id/stream/handle”, realm_id)
+
+Implementations MAY merge multiple logical streams into one VEEN stream or split them further, as long as folding rules remain deterministic.
+
+4.2 Labels
+
+For each stream_id, labels are derived using VEEN’s label function from a routing_key and stream_id. Multiple labels MAY be used per stream_id (e.g. for sharding or epoching) if fold order is well defined.
+	5.	Schemas
+
+Schema identifiers (H is the VEEN-wide hash):
+
+schema_principal      = H(“id.principal.v1”)
+schema_device         = H(“id.device.v1”)
+schema_ctx_profile    = H(“id.ctx.profile.v1”)
+schema_org_profile    = H(“id.org.profile.v1”)
+schema_group          = H(“id.group.v1”)
+schema_role_binding   = H(“id.role.v1”)
+schema_handle_map     = H(“id.handlemap.v1”)
+schema_external_link  = H(“id.external.v1”)
+schema_revocation     = H(“id.revoke.v1”)
+
+Each schema is identified by setting payload_hdr.schema to the corresponding hash value. All payload_hdr and body data are AEAD-protected inside the VEEN ciphertext.
+	6.	Principals and devices
+
+6.1 Principal record
+
+Schema: schema_principal
+Stream: stream_id_principal
+
+Body:
+
+{
+principal_pk: bstr(32),
+created_at: uint,        // unix time seconds
+info: map?               // optional, application-defined
+}
+
+Rules:
+	•	principal_pk MUST match the public key used to derive stream_id_principal.
+	•	Multiple principal records MAY exist; later records MAY override info but MUST NOT change principal_pk.
+
+6.2 Device record
+
+Schema: schema_device
+Stream: stream_id_principal
+
+Body:
+
+{
+principal_pk: bstr(32),
+device_id: bstr(32),      // Ht(“id/device”, device_pk)
+device_pk: bstr(32),      // Ed25519
+dh_pk: bstr(32),          // X25519
+label: text?,             // e.g. “phone”, “laptop”
+created_at: uint,
+expires_at: uint?,        // unix time seconds
+flags: { disabled: bool? }?
+}
+
+Rules:
+	•	principal_pk MUST equal the principal_pk of stream_id_principal.
+	•	device_id MUST equal Ht(“id/device”, device_pk).
+	•	Device is ACTIVE if:
+	•	flags.disabled is absent or false, and
+	•	expires_at is absent or now <= expires_at.
+	•	Folding:
+	•	For each device_id, events are ordered as in section 1.
+	•	The last event determines flags and expiry.
+
+ACTIVE devices are permitted authenticators for ctx_id derived from the same principal_pk, subject to delegation via cap_token.
+	7.	Context accounts (per-realm identities)
+
+7.1 Context profile
+
+Schema: schema_ctx_profile
+Stream: stream_id_ctx
+
+Body:
+
+{
+ctx_id: bstr(32),
+realm_id: bstr(32),
+display_name: text?,
+avatar_coid: bstr(32)?,   // content object ID for avatar
+prefs: map?,
+updated_at: uint          // unix time seconds
+}
+
+Rules:
+	•	ctx_id MUST equal Ht(“id/ctx”, principal_pk || realm_id) for some principal_pk; the principal linkage may be implicit or explicit (via delegation).
+	•	realm_id MUST match the stream’s realm_id.
+	•	CRDT semantics:
+	•	For each (ctx_id, realm_id), the context profile is an LWW-register.
+	•	The winner is the record with maximum (updated_at, stream_seq).
+	•	Conflicts with equal (updated_at, stream_seq) MUST be treated as equivalent or rejected as duplicates.
+
+Applications SHOULD read ctx_profile via stream_id_ctx and MUST NOT assume uniqueness of display_name.
+	8.	Organizations, groups, and roles
+
+8.1 Organization profile
+
+Schema: schema_org_profile
+Stream: stream_id_org
+
+Body:
+
+{
+org_id: bstr(32),
+display_name: text?,
+metadata: map?,
+created_at: uint,
+updated_at: uint
+}
+
+Rules:
+	•	org_id MUST match the org_id used to derive stream_id_org.
+	•	Organization profile is an LWW-register per org_id using (updated_at, stream_seq).
+
+8.2 Group membership
+
+Schema: schema_group
+Stream: stream_id_org or a realm-scoped variant
+
+Body:
+
+{
+org_id: bstr(32),
+realm_id: bstr(32)?,
+group_id: bstr(32),
+name: text,
+members_add: [ bstr(32) ]?,      // ctx_id list
+members_remove: [ bstr(32) ]?,   // ctx_id list
+updated_at: uint
+}
+
+CRDT semantics:
+	•	Group membership is an OR-set per (org_id, group_id).
+	•	For each ctx_id:
+	•	membership is true if there exists at least one add event listing ctx_id that is not fully tombstoned by later remove events listing the same ctx_id.
+	•	Group name:
+	•	name is LWW per (org_id, group_id) using (updated_at, stream_seq).
+
+8.3 Role binding
+
+Schema: schema_role_binding
+Stream: stream_id_org or a realm-scoped variant
+
+Body:
+
+{
+org_id: bstr(32),
+realm_id: bstr(32)?,
+role: text,                   // e.g. “admin”, “editor”
+targets_ctx: [ bstr(32) ]?,   // ctx_id list
+targets_group: [ bstr(32) ]?, // group_id list
+ts: uint
+}
+
+Semantics:
+	•	Roles are additive by default:
+	•	For each ctx_id, assigned roles are:
+	•	roles mentioned in events where ctx_id is in targets_ctx, and
+	•	roles applied to group_id where ctx_id is a member.
+	•	Explicit role revocation MAY be modeled by:
+	•	a role naming convention (e.g. “no-admin”), or
+	•	a separate revocation schema (implementation-specific).
+	•	ID v0.0.1 does not define negative roles or hierarchical roles; these are left to applications.
+
+	9.	Delegation and authentication
+
+9.1 Delegation via cap_token
+
+Delegation uses VEEN cap_token unchanged.
+
+Issuer: principal_pk (for account-level delegation) or org_pk (for org-level delegation).
+Subject: device_pk or a service key.
+
+cap_token:
+
+{
+ver: 1,
+issuer_pk: bstr(32),
+subject_pk: bstr(32),
+allow: {
+stream_ids: [ bstr(32) … ],
+ttl: uint,
+rate: { per_sec: uint, burst: uint }?
+},
+sig_chain: [ 64-byte signatures … ]
+}
+
+Rules:
+	•	For principal-based delegation:
+	•	issuer_pk MUST equal principal_pk.
+	•	subject_pk MUST equal device_pk of an ACTIVE device.
+	•	allow.stream_ids SHOULD include required identity and application streams (including stream_id_ctx for relevant realms).
+	•	For org-based delegation:
+	•	issuer_pk MUST equal org_pk.
+	•	subject_pk MAY be principal_pk, device_pk, or a service key.
+	•	ttl and rate MUST be enforced by admission logic according to OP0.3-style policies.
+
+9.2 Authentication path for ctx_id
+
+To authenticate a client as a ctx_id in a realm:
+	1.	Client submits MSG with:
+	•	client_id = device_pk,
+	•	MSG.sig signed by device_sk,
+	•	optional auth_ref referencing a cap_token.
+	2.	Application obtains cap_token via auth_ref and verifies:
+	•	sig_chain matches issuer_pk root (principal_pk or org_pk),
+	•	subject_pk equals device_pk,
+	•	allow.stream_ids includes the target application/identity streams,
+	•	ttl and optional rate are satisfied.
+	3.	If issuer_pk is principal_pk:
+	•	Application computes ctx_id_expected = Ht(“id/ctx”, principal_pk || realm_id).
+	•	Application binds this session to ctx_id_expected.
+	4.	Additionally, application SHOULD check:
+	•	device_pk is ACTIVE in schema_device for principal_pk,
+	•	any required org/group/role bindings are present.
+
+The application does not need to store passwords, session IDs, or bearer tokens; possession of device_sk and a valid cap_token chain is sufficient.
+	10.	Handles and external IDs
+
+10.1 Handle mapping
+
+Schema: schema_handle_map
+Stream: stream_id_handle_ns for a given realm_id
+
+Body:
+
+{
+realm_id: bstr(32),
+handle: text,                    // “@user”, “user@example.com”, etc.
+target_type: text,               // “ctx” or “org”
+target_id: bstr(32),             // ctx_id or org_id
+ts: uint
+}
+
+Semantics:
+	•	The handle namespace is per realm_id.
+	•	For each (realm_id, handle), mapping is an LWW-register:
+	•	winner is record with maximum (ts, stream_seq).
+	•	Implementations MUST define:
+	•	which handles are valid (syntax),
+	•	whether and how handles can be reassigned,
+	•	how to handle conflicts or squatting.
+
+10.2 External ID link
+
+Schema: schema_external_link
+Stream: stream_id_ctx (recommended) or stream_id_org
+
+Body:
+
+{
+realm_id: bstr(32),
+ctx_id: bstr(32)?,
+org_id: bstr(32)?,
+provider: text,                  // “google”, “github”, “saml:corp”, etc.
+external_sub: text,              // subject from external IdP or system
+attributes: map?,                // optional mirrored claims
+ts: uint
+}
+
+Semantics:
+	•	At least one of ctx_id or org_id MUST be present.
+	•	For each (provider, external_sub) there SHOULD be at most one active linkage across trusted streams.
+	•	On external login:
+	•	a gateway validates the external token,
+	•	locates or creates ctx_id in the target realm,
+	•	emits or updates an external_link binding external_sub to ctx_id.
+
+ID v0.0.1 does not define global uniqueness or trust policies for providers; deployments MUST define which providers are trusted and how conflicts are resolved.
+	11.	Revocation and rotation
+
+11.1 Revocation record
+
+Schema: schema_revocation
+Stream: stream_id_principal or stream_id_org
+
+Body:
+
+{
+principal_pk: bstr(32)?,
+org_id: bstr(32)?,
+device_id: bstr(32)?,
+revoked_auth_ref: bstr(32)?,
+realm_id: bstr(32)?,
+ctx_id: bstr(32)?,
+reason: text?,
+ts: uint
+}
+
+Rules:
+	•	At least one of device_id, revoked_auth_ref, ctx_id, org_id MUST be present.
+	•	Revocation is advisory and MUST be enforced by:
+	•	hubs (for admission) and/or
+	•	applications (for authorization decisions).
+
+Recommended enforcement:
+	•	If revoked_auth_ref matches auth_ref, hubs SHOULD deny /submit for that auth_ref.
+	•	If device_id is revoked, applications MUST treat the corresponding device as INACTIVE even if schema_device flags are not updated.
+	•	If ctx_id is revoked in a realm, applications SHOULD treat that ctx_id as disabled for that realm.
+
+11.2 Device rotation
+
+To rotate a device:
+	•	Generate new device_pk2 / dh_pk2.
+	•	Create a schema_device event for device_pk2 (ACTIVE).
+	•	Create a schema_revocation event for old device_id and/or old revoked_auth_ref.
+	•	Optionally disable old device via a schema_device record with flags.disabled = true.
+
+11.3 Principal and organization key rotation
+
+Principal and org key rotation are advanced operations and are not fully standardized in ID v0.0.1. A deployment MAY define:
+	•	a dedicated key-rotation schema, and
+	•	rules mapping old principal_pk/org_pk to new ones.
+
+Until such schema exists, principal_pk and org_pk SHOULD be treated as long-lived roots.
+	12.	Bridging and federation
+
+12.1 Cross-hub identity mirroring
+
+Bridging uses the VEEN bridging overlay.
+
+A bridge process:
+	•	subscribes to identity streams on hub A (principal, ctx, org, handle, external_link, revocation) using stream(with_proof=1),
+	•	for each MSG:
+	•	preserves payload_hdr.schema and payload body byte-for-byte,
+	•	sets parent_id of the mirrored MSG to the original msg_id,
+	•	publishes a new MSG to hub B on the corresponding identity stream.
+
+Semantics:
+	•	Logical identity state is the union of events from all trusted hubs.
+	•	Events are deduplicated using a stable identifier:
+	•	for example, (payload hash, parent_id) or original msg_id.
+	•	The fold order MUST be deterministic across hubs.
+
+12.2 Realm-level federation
+
+Realms support multiple federation patterns:
+	•	Single realm for all applications in a deployment.
+	•	Per-tenant realm for multi-tenant SaaS.
+	•	Per-product realm for independent products sharing principals at a higher layer.
+
+Root-level federation (e.g. a “meta realm”) that links multiple realms via external_link is permitted but not specified in detail by ID v0.0.1.
+	13.	Privacy
+
+ID v0.0.1 aims to minimise implicit correlation:
+	•	ctx_id differs per realm by construction.
+	•	Principals are not required to be exposed to applications.
+	•	Identity payloads are encrypted; hubs do not see principal_pk, ctx_id, org_id, or handles in plaintext.
+	•	Cross-realm correlation is opt-in via external_link or application-specific logic.
+
+Deployments SHOULD:
+	•	avoid using principal_pk as a global account identifier in plaintext,
+	•	scope handles per realm_id,
+	•	use external_link only for explicit federation or legacy integration.
+
+	14.	Compliance levels
+
+An implementation MAY claim:
+	•	“ID v0.0.1 Core” if it implements:
+	•	realm_id and ctx_id derivation,
+	•	schema_ctx_profile,
+	•	schema_device,
+	•	delegation and authentication as in section 9.
+	•	“ID v0.0.1 Orgs” if it additionally implements:
+	•	schema_org_profile,
+	•	schema_group,
+	•	schema_role_binding.
+	•	“ID v0.0.1 Handles” if it additionally implements:
+	•	schema_handle_map,
+	•	resolve-by-handle logic.
+	•	“ID v0.0.1 External” if it additionally implements:
+	•	schema_external_link and a gateway for at least one external provider.
+	•	“ID v0.0.1 Bridge” if it additionally implements:
+	•	cross-hub identity mirroring as in section 12.1.
+
+	15.	Summary
+
+ID v0.0.1 defines a minimal, coherent identity layer for VEEN:
+	•	cryptographic principals and devices as roots,
+	•	realm-scoped pseudonymous context IDs (ctx_id) as primary account identifiers,
+	•	organizations, groups, and roles as CRDT overlays,
+	•	handle and external-ID mapping as additional overlays,
+	•	delegation via cap_token and event-driven revocation,
+	•	bridging across hubs and realms without changing VEEN wire formats.
+
+
+### wallet-spec.txt
+
 
 VEEN Wallet Layer (WAL) v0.0.1 (tightened)
 Account-Based Transfer Overlay with Bridging
@@ -5080,10 +3986,1106 @@ WAL v0.0.1 defines a compact, deterministic, account-based wallet overlay for VE
 	•	auditability, non-repudiation, and portability are inherited from VEEN
 
 
-## Consolidated operational and guidance documents
+### products-spec-1.txt
 
 
-## CORE-GOALS.txt
+Server Drive Recorder and Air-gap Bridge Product Specification
+Version v0.0.2 (Products)
+	0.	Scope
+
+This document defines two product-grade profiles built on a VEEN-compatible deployment:
+	1.	VEEN Server Drive Recorder (SDR0)
+Continuous, tamper-evident recording and replay of selected events inside a trust domain.
+	2.	VEEN Air-gap Bridge (AGB0)
+Controlled, auditable, and optionally one-way transfer of events and proofs between two trust domains.
+
+The goal of v0.0.2 is to turn the previous conceptual profiles into concrete products:
+	•	with explicit SKUs,
+	•	with concrete CLI and deployment expectations,
+	•	with testable invariants,
+	•	with minimal but sufficient threat model and operations model.
+
+This specification assumes:
+	•	VEEN core (hub, streams, receipts, checkpoints, MMR log) is available,
+	•	0-series overlays (KEX0, AUTH1, ANCHOR0, DR0, OBS0) are present where referenced,
+	•	VEEN CLI v0.0.1+ is available and self-tests are green.
+
+	1.	Product line and SKUs
+
+1.1. SKUs
+
+SKU SDR0:
+	•	Name: VEEN Server Drive Recorder
+	•	Purpose: domain-internal forensic and operational evidence log
+	•	Dependencies: VEEN hub, VEEN CLI, ANCHOR0 optional but recommended
+
+SKU AGB0:
+	•	Name: VEEN Air-gap Bridge
+	•	Purpose: inter-domain evidence-carrying event transfer, optionally strictly one-way
+	•	Dependencies: VEEN hub (both zones), VEEN CLI, ANCHOR0 recommended, DR0 optional
+
+SKU SDR0+AGB0:
+	•	Name: VEEN Recorder + Bridge bundle
+	•	Purpose: combined deployment of SDR0 in both zones plus AGB0 between them
+
+1.2. Minimal VEEN feature set required
+
+All SKUs require at least:
+	•	Ordered encrypted streams
+	•	Message receipts with:
+	•	stream id
+	•	sequence number
+	•	MMR root
+	•	signatures (hub and sender)
+	•	Checkpoint support:
+	•	log root
+	•	per-stream last sequence
+	•	hub identity
+	•	timestamp
+	•	Capability tokens:
+	•	stream-level access
+	•	rate and TTL limits
+	•	Revocation support (AUTH1):
+	•	revocation records for client ids and cap tokens
+
+	2.	Common terminology and types
+
+2.1. Core terms
+
+hub: VEEN-compatible message hub.
+stream: named ordered sequence of messages in a hub.
+event: application-level payload plus metadata emitted as one message to a stream.
+receipt: verifiable record of a committed event.
+checkpoint: compact snapshot of log state and stream positions.
+trust domain: set of systems and operators sharing security policy and boundary.
+zone: specific deployment region within or adjacent to a trust domain.
+bridge: process that transfers events and proofs between hubs.
+
+2.2. Stream namespaces (product-level)
+
+SDR0 streams:
+	•	Namespace: record/*
+	•	record/app/*
+	•	record/security/*
+	•	record/infrastructure/*
+
+AGB0 streams:
+	•	Export: export/*
+	•	Import: import/*
+	•	Bridge audit: bridge/online/log, bridge/offline/log
+
+2.3. Identity and capability roles
+
+Shared patterns:
+	•	recorder_producer:
+	•	one identity per emitting service
+	•	append-only to specific record/* streams
+	•	recorder_admin:
+	•	manage label_class, retention, checkpoint triggers
+	•	read access across record/*
+	•	bridge_online:
+	•	read-only on export/* (Z1)
+	•	optional read-only on specific record/* where export is derived
+	•	bridge_offline:
+	•	write-only on import/* (Z2)
+
+No identity may simultaneously hold read access in one zone and write access in the opposite direction for the same logical bridge.
+	3.	VEEN Server Drive Recorder (SDR0)
+
+3.1. Product goal
+
+Provide a deterministic and verifiable logging fabric that answers:
+	•	“What happened, in which order, and who caused it?”
+	•	“Up to which point is the log provably consistent?”
+	•	“Which subset of events belongs to a given actor or time window?”
+
+without introducing new cryptography.
+
+3.2. Functional requirements
+
+3.2.1. Event shape
+
+Each recorder event MUST expose the following fields (payload or metadata):
+	1.	subject_id       (stable actor id)
+	2.	principal_id     (client public key id)
+	3.	event_type       (string, application-defined)
+	4.	event_time       (application-observed timestamp)
+	5.	hub_commit_seq   (implicit from stream / receipt)
+	6.	hub_commit_time  (hub-observed timestamp)
+	7.	origin           (service/component identifier)
+	8.	payload          (opaque structured content)
+
+The hub MUST:
+	•	sign committed messages,
+	•	include them in an append-only log,
+	•	provide inclusion proofs.
+
+3.2.2. Stream configuration
+
+For SDR0 compliance:
+	•	All in-scope events MUST be written to record/* streams.
+	•	Each application event type MUST map to exactly one recorder stream.
+	•	record/* streams MUST have:
+	•	retention_hint = long_term
+	•	admission policy forbidding oversized payloads beyond configured bound
+	•	renames and splits MUST be logged as explicit migration events in a dedicated management stream (e.g. record/infrastructure/changes).
+
+3.2.3. Capability and isolation
+	•	recorder_producer identities:
+	•	capabilities limited to:
+	•	append to specific record/* streams,
+	•	no delete, no stream admin operations.
+	•	recorder_admin identities:
+	•	may manage label_class and retention policies,
+	•	may read across record/* streams,
+	•	MUST be distinct from any producer identity.
+
+3.2.4. Checkpointing
+
+Deployment MUST define:
+	•	checkpoint frequency:
+	•	by time (e.g. every 5 minutes) and/or
+	•	by volume (e.g. every 10k events).
+	•	checkpoint content MUST include:
+	•	log_root (MMR root or equivalent)
+	•	per-stream last sequence for all record/*
+	•	hub_public key
+	•	profile id identifying the SDR0 configuration
+	•	creation timestamp
+
+3.2.5. Replay API
+
+Minimal replay interface:
+	•	Replay by range:
+	•	input: stream id, from_seq, to_seq (inclusive range [from_seq, to_seq], 1-based, from_seq <= to_seq)
+	•	output: ordered events plus receipts
+	•	Replay by time window:
+	•	input: stream set, start_time, end_time
+	•	output: events with hub_commit_time in [start_time, end_time]
+
+Replay consumers MUST, at least for critical flows:
+	•	verify hub identity against configured root-of-trust,
+	•	verify selected inclusion proofs against log_root.
+
+3.3. Non-functional requirements
+
+3.3.1. Operational
+	•	Checkpoint generation MUST be scriptable via CLI.
+	•	Replay MUST be automatable (non-interactive CLI mode).
+	•	Operators MUST have a documented runbook for:
+	•	generating an ad-hoc checkpoint,
+	•	validating the last checkpoint after incident,
+	•	deriving a safe replay window.
+
+3.3.2. Performance
+	•	Recorder logging path MUST not require additional interactive network round-trips beyond normal VEEN submit path.
+	•	Checkpoints MAY be generated asynchronously from the event ingestion path, provided consistency is preserved.
+
+3.4. Invariants (SDR0)
+
+Informal invariants:
+
+I1. Order:
+For any stream S and events e_i, e_j with i < j, any replay by sequence range on S MUST return e_i before e_j.
+
+I2. Stability up to checkpoint:
+Given checkpoint C with log_root R_C and per-stream last_seq_C(S), any event e in S with seq <= last_seq_C(S) is either:
+	•	verifiable against R_C, or
+	•	causes verification failure; silent omission is forbidden.
+
+I3. Actor consistency:
+For any principal_id P, the set of events recorded with principal_id = P corresponds to all uses of that VEEN client identity on recorder streams under the configured policies. Implementation MUST NOT multiplex multiple unrelated principals behind one VEEN client if that breaks auditability.
+
+3.5. VEEN CLI mapping (SDR0)
+
+A minimal SDR0 product MUST expose at least:
+	•	Recorder event emission:
+	•	via existing veen send with fixed schemas for record/*
+	•	Recorder stream management:
+	•	veen label-class set/list/show for record/*
+	•	Checkpoints:
+	•	veen hub checkpoint (or equivalent)
+	•	veen hub anchor for external anchoring (recommended with ANCHOR0)
+	•	Replay:
+	•	veen stream … –with-proofs for record/* streams
+	•	Self-test:
+	•	veen selftest core
+	•	SDR0-specific selftest scenario MAY be added as selftest recorder
+
+AGCI (Acceptance-grade CI) MUST ensure:
+	•	veen-core tests green,
+	•	veen-hub tests green,
+	•	goals_core_pipeline green,
+	•	goals_audit_anchor green when ANCHOR0 is enabled.
+
+	4.	VEEN Air-gap Bridge (AGB0)
+
+4.1. Product goal
+
+Provide a controlled and auditable path to move events (and their cryptographic evidence) from zone Z1 to zone Z2, preserving:
+	•	directionality constraints,
+	•	tamper-evident properties,
+	•	traceable operational actions.
+
+4.2. Topology and roles
+
+Zones:
+	•	Z1 (online zone):
+	•	hub_online
+	•	export/* streams
+	•	optional record/* streams feeding export/*
+	•	bridge/online/log audit stream
+	•	Z2 (offline or higher-trust zone):
+	•	hub_offline
+	•	import/* streams
+	•	bridge/offline/log audit stream
+
+Bridge:
+	•	AGB0 bridge process:
+	•	runs in its own environment,
+	•	has:
+	•	read-only capabilities in Z1 (export/*),
+	•	write-only capabilities in Z2 (import/*),
+	•	has no shared private keys between hubs.
+
+4.3. Directionality
+
+AGB0 product MUST enforce:
+	•	At capability level:
+	•	bridge_online identities:
+	•	read-only on export/*,
+	•	MUST NOT have write access in Z1.
+	•	bridge_offline identities:
+	•	write-only on import/*,
+	•	MUST NOT have read access in Z2 beyond import control scope.
+	•	At network/physical level:
+	•	Strict one-way option:
+	•	transfer via removable media or one-way link,
+	•	no route from Z2 back to Z1 under same operator control.
+
+4.4. Export bundle format
+
+Bundle B has:
+	•	header:
+	•	bundle_id (hash of bundle contents)
+	•	source_hub_id
+	•	source_profile_id (SDR0 or other)
+	•	export_stream_id
+	•	export_seq_from, export_seq_to
+	•	export_time_from, export_time_to
+	•	export_checkpoint:
+	•	root
+	•	per-stream last_seq
+	•	timestamp
+	•	hub_public
+	•	events:
+	•	ordered list of events in [export_seq_from, export_seq_to]
+	•	for each:
+	•	payload
+	•	metadata (including subject_id, principal_id, event_type, times, origin)
+	•	receipt or a reference to a bundled proof index
+	•	proof:
+	•	evidence that all events are consistent with export_checkpoint:
+	•	minimal subset of MMR peaks, membership proofs, or aggregated structure
+
+Bundle immutability:
+	•	Any change to payload, metadata, or proof MUST change bundle_id.
+	•	Import MUST fail if bundle_id or internal signatures do not verify.
+
+4.5. Import procedure
+
+For each bundle B:
+	1.	Receive B via physical or network means.
+	2.	Validate:
+	•	source_hub_id against trusted list,
+	•	export_checkpoint signature,
+	•	bundle_proof against export_checkpoint,
+	•	internal receipts.
+	3.	Apply stream mapping:
+	•	export/zoneX/foo -> import/zoneX/foo
+	4.	For each event:
+	•	create new event in import stream with:
+	•	original payload and metadata,
+	•	origin_receipt (or reference),
+	•	import_time,
+	•	bridge_id.
+	5.	Commit events to hub_offline.
+	6.	Optionally generate and anchor an import checkpoint.
+
+Import MUST NOT:
+	•	reuse source sequence numbers as hub_offline commit sequence,
+	•	silently drop events on verification failure,
+	•	modify payload content.
+
+On any failure:
+	•	record an audit entry in bridge/offline/log including:
+	•	bundle_id,
+	•	reason,
+	•	position in bundle.
+
+4.6. Bridge audit streams
+
+bridge/online/log:
+	•	records bundle creation:
+	•	bundle_id, hash
+	•	export_stream_id and seq range
+	•	event count
+	•	export_checkpoint id
+	•	operator/automation id
+
+bridge/offline/log:
+	•	records imports:
+	•	bundle_id
+	•	target import streams and seq ranges
+	•	event count
+	•	verification_result (success/failure, error code)
+	•	operator/automation id
+
+4.7. Reconciliation and consistency
+
+Given a chosen export checkpoint C1 in Z1:
+	•	In Z1:
+	•	compute exported ranges per export/* stream up to C1 from bundle headers.
+	•	In Z2:
+	•	compute imported ranges per import/* stream,
+	•	track origin_receipt set.
+
+AGB0 MUST offer a reconciliation tool or script that can:
+	•	detect missing bundles,
+	•	detect duplicate imports,
+	•	detect partial imports,
+	•	report them in a machine-readable format.
+
+4.8. Invariants (AGB0)
+
+Informal invariants:
+
+J1. One-to-one origin mapping:
+For any imported event in Z2, there exists exactly one origin_receipt in Z1, and reconciliation MUST be able to map between them.
+
+J2. No silent loss in normal operation:
+If bundle B is marked as successfully imported, then all events in B MUST have corresponding imported events, unless an explicit and logged exclusion policy is configured.
+
+J3. Directionality:
+For a strictly one-way Z1→Z2 bridge, there exists no identity and no network path that allows events originating in Z2 to directly influence any stream in hub_online under the same bridge operator’s control.
+
+4.9. VEEN CLI mapping (AGB0)
+
+AGB0 implementation SHOULD be expressed mainly as:
+	•	Bundle exporter:
+	•	veen bridge export or equivalent:
+	•	pulls from export/* streams,
+	•	builds bundle CBOR/JSON artifact,
+	•	writes audit event to bridge/online/log.
+	•	Bundle importer:
+	•	veen bridge import or equivalent:
+	•	verifies bundle,
+	•	writes events to import/*,
+	•	writes audit event to bridge/offline/log.
+	•	Hubs and anchors:
+	•	veen hub start/stop/status
+	•	veen hub anchor /anchor endpoint for anchoring checkpoints.
+	•	Self-test:
+	•	goals_dr_cutover MUST be green when DR0 overlay is used.
+	•	goals_k8s_disposable_mesh SHOULD be green for k8s deployments.
+	•	AGB0-specific selftest MAY be added that:
+	•	starts temporary hubs for Z1/Z2,
+	•	exports synthetic events,
+	•	imports them,
+	•	runs reconciliation.
+
+	5.	Combined product: SDR0+AGB0
+
+5.1. Pattern
+
+Recommended pattern:
+	1.	Run SDR0 in both Z1 and Z2:
+	•	record/* streams with long_term retention.
+	2.	Select subset of record/* as export candidates:
+	•	e.g. record/security/* and record/infrastructure/changes.
+	3.	Configure AGB0 to:
+	•	export from export/* (derived from record/* or mapped 1–1),
+	•	import to import/* in Z2,
+	•	log all bridge operations.
+	4.	Use SDR0 replay in Z2 for analysis:
+	•	import/* plus local record/*.
+	5.	Optionally anchor:
+	•	SDR0 checkpoints in both zones via ANCHOR0,
+	•	AGB0 bundle ids and reconciliation results.
+
+5.2. Shared invariants
+
+K1. End-to-end trace:
+
+For any critical event that originated in Z1 and is imported to Z2:
+	•	there MUST exist:
+	•	a chain:
+	•	SDR0 event in record/* in Z1,
+	•	inclusion in export bundle,
+	•	audit record in bridge/online/log,
+	•	audit record in bridge/offline/log,
+	•	imported event in import/* in Z2,
+	•	optional SDR0 event in record/* in Z2 that references the import.
+
+K2. Bounded uncertainty window:
+
+Given checkpoints C1 in Z1 and C2 in Z2 and a reconciliation run, the system MUST be able to:
+	•	identify a closed region of time/sequence where log state is provably consistent across bridge operations,
+	•	identify any gaps beyond that region.
+
+	6.	Threat model and non-goals
+
+6.1. In-scope threats
+	•	Attempted log tampering at VEEN API level:
+	•	removing or reordering events,
+	•	injecting forged events not signed by valid keys.
+	•	Attempted bundle tampering:
+	•	modification of payload, receipts, or proofs after export.
+	•	Misconfiguration of capabilities:
+	•	accidentally granting write where only read is intended (AGB0),
+	•	bypassing append-only policy for recorder streams.
+	•	Bridge operation errors:
+	•	partial imports,
+	•	duplicated imports.
+
+6.2. Out-of-scope threats
+	•	OS-level compromise of hub hosts or bridge hosts:
+	•	arbitrary root access on machines is treated as out-of-scope.
+	•	Physical access to storage leading to complete data replacement without VEEN validation paths being used.
+	•	Side-channel attacks on cryptographic primitives (reuse of VEEN’s crypto assumptions).
+
+6.3. Expected mitigations
+	•	Anchoring (ANCHOR0) to external services or ledgers is RECOMMENDED for:
+	•	SDR0 checkpoints,
+	•	AGB0 bundle ids,
+	•	reconciliation reports.
+	•	Strict identity and key management MUST be enforced by deployment processes and is not provided by the spec.
+
+	7.	Implementation and test requirements for v0.0.2
+
+To claim v0.0.2 product compliance:
+	•	All existing VEEN test suites MUST be green:
+	•	veen-core, veen-hub, veen-cli, veen-bridge, veen-selftest,
+	•	goals_core_pipeline,
+	•	goals_audit_anchor,
+	•	goals_dr_cutover,
+	•	goals_k8s_disposable_mesh (for k8s environments).
+	•	At least one SDR0 integration selftest MUST exist that:
+	•	emits events to record/*,
+	•	generates and verifies checkpoints,
+	•	replays with proofs.
+	•	At least one AGB0 integration selftest MUST exist that:
+	•	creates hubs for Z1/Z2,
+	•	exports bundles,
+	•	imports them,
+	•	runs reconciliation,
+	•	asserts invariants J1–J3.
+
+This v0.0.2 spec is intentionally minimal at the product surface: UI, billing, and higher-level workflows may be added freely as long as the invariants and capabilities defined above remain satisfied.
+
+### query-api-spec.txt
+
+
+Query API Specification v0.0.1 (Tightened)
+	0.	Scope
+
+This document tightens the Query API on top of a VEEN deployment that already implements:
+	•	Server Drive Recorder profile
+	•	Air-gap Bridge profile
+
+The Query API:
+	1.	Treats queries and results as first-class recorder events.
+	2.	Provides deterministic, verifiable digests for returned result sets.
+	3.	Allows reconstruction and replay of queries across zones.
+
+No new cryptography is introduced. The API is a structured way to:
+	•	express queries,
+	•	record them as events,
+	•	produce and verify results.
+
+	1.	Terminology
+
+hub: VEEN-compatible message hub.
+stream: named ordered stream of VEEN messages.
+event: application-level payload plus metadata in a VEEN message.
+receipt: cryptographically verifiable record of a committed VEEN message.
+checkpoint: compact snapshot: log root + stream positions + metadata.
+trust domain: set of systems under a shared security policy.
+zone: concrete deployment region (e.g. online zone, offline zone).
+query: structured request for a derived view of recorder events.
+QueryDescriptor: canonical JSON representation of a query.
+ResultRow: single row of a query result.
+ResultDigest: compact summary and hash of a result set.
+evidence: cryptographic material to verify that result rows match underlying events.
+principal: VEEN client identity (key) that submits a query.
+	2.	Namespaces and resources
+
+2.1. Streams
+
+The Query API uses the following recorder streams:
+	1.	Query request stream
+	•	Name: record/query/requests
+	•	Direction: append-only
+	•	Payload: normalized QueryDescriptor
+	2.	Query result stream
+	•	Name: record/query/results
+	•	Direction: append-only
+	•	Payload: ResultDigest
+	3.	Optional query audit streams
+	•	Name: record/query/audit/*
+	•	Direction: append-only
+	•	Payload: implementation-specific execution logs
+
+All streams inherit the guarantees of the underlying Recorder profile: signed messages, inclusion in an append-only log, and MMR-based proofs.
+
+2.2. Identifiers
+
+The following identifiers are treated as opaque ASCII strings:
+
+query_id: unique per query submission.
+result_id: unique per query execution.
+receipt_id: reference to a VEEN receipt for a source event.
+hub_id: identifier of a VEEN hub instance.
+profile_id: identifier of a hub profile or deployment configuration.
+
+Constraints:
+	•	query_id and result_id MUST be unique in the hub.
+	•	Implementations MAY use UUIDv4 or cryptographic hashes; the format MUST be stable and documented.
+
+	3.	Data types and encoding
+
+3.1. JSON encoding
+
+All API payloads and stored QueryDescriptor and ResultDigest objects use JSON with:
+	1.	UTF-8 encoding.
+	2.	No binary blobs; binary data must be hex or base64.
+	3.	Deterministic canonicalization for hashing:
+	•	object keys sorted lexicographically (byte order),
+	•	no insignificant whitespace,
+	•	numeric values encoded in minimal decimal form (no leading zeros, no unnecessary trailing zeros),
+	•	strings encoded as UTF-8 with standard JSON escaping,
+	•	arrays preserve order.
+
+When this document refers to “canonical JSON” it means this encoding.
+
+3.2. Timestamps
+
+All timestamps are ISO-8601 UTC strings:
+	•	Format: YYYY-MM-DDTHH:MM:SSZ
+	•	Example: 2025-11-19T03:20:00Z
+
+Sub-second precision MAY be added as fractional seconds, but MUST be consistent across implementation (e.g. always millisecond 3 decimal digits).
+	4.	QueryDescriptor model
+
+4.1. Shape
+
+A QueryDescriptor is a JSON object:
+
+{
+“query_id”: “string”,
+“version”: 1,
+“scope”: [ “string”, … ],
+“filter”: { … },
+“projection”: [ “string”, … ],
+“aggregate”: { … },   // optional
+“evidence”: { … },
+“meta”: { … }         // optional
+}
+
+4.2. Fields (required core)
+	1.	query_id (string)
+	•	Globally unique per submitted query.
+	•	If not supplied by the client, the server MUST generate it and include it in the normalized descriptor.
+	2.	version (integer)
+	•	MUST be 1 for this specification.
+	3.	scope (array of string)
+	•	Non-empty array of stream names.
+	•	Each entry SHOULD be a recorder stream (e.g. “record/app/http”).
+	•	Implementations MUST reject unknown or unauthorized streams.
+	4.	filter (object)
+	•	Minimal required fields:
+{
+“subject_id”: “string or null”,           // optional
+“event_type”: [“string”, …] or null,    // optional
+“time”: {
+“from”: “timestamp or null”,
+“to”: “timestamp or null”
+}
+}
+Semantics:
+	•	subject_id: include only events with matching subject_id if present.
+	•	event_type: include only events whose event_type is in the list.
+	•	time.from / time.to: filter by hub_commit_time or event_time (implementation MUST document which).
+If a field is omitted or null, it does not constrain the result.
+	5.	projection (array of string)
+	•	Non-empty.
+	•	Each entry names a logical field or path. Minimal required fields:
+	•	“subject_id”
+	•	“principal_id”
+	•	“event_time”
+	•	“origin”
+	•	“event_type”
+	•	“payload.*” (implementation MAY support dotted paths)
+	•	“receipt_id” (if available from storage)
+If projection is [”*”], implementation MAY return a default field set.
+	6.	evidence (object)
+	•	Evidence policy:
+{
+“mode”: “none” | “spot” | “full”,
+“sample_rate”: number  // required for “spot”
+}
+Constraints:
+	•	mode “none”: sample_rate MUST be omitted or null.
+	•	mode “spot”: sample_rate MUST be in (0, 1].
+	•	mode “full”: sample_rate MUST be omitted or null.
+
+4.3. Fields (optional extensions)
+	1.	aggregate (object)
+	•	Optional; if absent, the query is a row-level selection.
+	•	Minimal structure:
+{
+“group_by”: [“field”, …],      // optional; empty or omitted = no grouping
+“metrics”: [
+“count”,
+“min(event_time)”,
+“max(event_time)”
+]
+}
+	•	count MUST be supported; other metrics are implementation-defined.
+	2.	meta (object)
+	•	Free-form metadata. Recommended keys:
+{
+“requested_by”: “principal-id or human id”,
+“requested_at”: “timestamp”,
+“reason”: “string”
+}
+
+4.4. Normalization
+
+On submission:
+	1.	The server parses the client-supplied descriptor.
+	2.	It fills defaults:
+	•	set version = 1 if missing,
+	•	generate query_id if missing,
+	•	normalize filter, projection, evidence, meta to canonical JSON.
+	3.	It validates:
+	•	required fields are present,
+	•	types are correct,
+	•	references (streams, metrics, fields) are supported.
+
+If validation fails, the API MUST return HTTP 400 with an error payload (see section 7.4).
+
+The normalized QueryDescriptor is the one stored in record/query/requests.
+
+4.5. Recording as VEEN event
+
+The normalized QueryDescriptor MUST be embedded in a VEEN message:
+	•	stream: record/query/requests
+	•	body: canonical JSON of the descriptor
+	•	recorder layer MUST populate:
+	•	subject_id: the actor on whose behalf the query is run,
+	•	principal_id: the VEEN client key id,
+	•	event_type: “query.submitted” (or equivalent stable string),
+	•	event_time: server receive time.
+
+	5.	Result model
+
+5.1. ResultRow
+
+ResultRow is a logical row returned by the query engine. There is no fixed global schema; fields derive from projection and aggregate.
+
+Constraints:
+	1.	Each row MUST be representable as a JSON object.
+	2.	For selection queries:
+	•	it SHOULD include projected base fields (such as subject_id, event_time).
+	3.	For aggregate queries:
+	•	it SHOULD include group keys and metric values.
+	4.	If projection includes “receipt_id”:
+	•	each row MUST include a string “receipt_id” that refers to a VEEN receipt for the source event or a canonical derived identifier (implementation MUST document mapping).
+
+Example (selection):
+
+{
+“subject_id”: “user:123”,
+“event_time”: “2025-11-18T12:34:56Z”,
+“origin”: “api-gateway-1”,
+“path”: “/login”,
+“status”: 401,
+“receipt_id”: “rcpt-abc…”
+}
+
+Example (aggregate):
+
+{
+“subject_id”: “user:123”,
+“origin”: “api-gateway-1”,
+“count”: 23,
+“first_seen”: “2025-11-18T00:10:00Z”,
+“last_seen”: “2025-11-18T23:50:00Z”
+}
+
+5.2. ResultDigest
+
+ResultDigest has this minimal structure:
+
+{
+“query_id”: “q-…”,
+“result_id”: “r-…”,
+“version”: 1,
+“row_count”: 123,
+“evidence_policy”: {
+“mode”: “spot”,
+“sample_rate”: 0.1
+},
+“rows_hash”: “hex”,
+“evidence_hash”: “hex”,
+“executed_at”: “timestamp”,
+“hub_id”: “hub-…”,
+“profile_id”: “profile-…”   // optional
+}
+
+Fields:
+	•	query_id: MUST match the QueryDescriptor.
+	•	result_id: unique; binds the fetchable result to this digest.
+	•	version: MUST be 1.
+	•	row_count: number of rows after aggregation.
+	•	evidence_policy: normalized copy of evidence.
+	•	rows_hash: SHA-256 (or stronger) of canonical JSON encoding of the rows array.
+	•	evidence_hash: SHA-256 (or stronger) of canonical JSON encoding of evidence summary (see 6).
+	•	executed_at: timestamp when the result set was fully materialized.
+	•	hub_id: hub identity at execution time.
+	•	profile_id: optional; identifies hub configuration profile.
+
+5.3. Canonical rows_hash
+
+To compute rows_hash:
+	1.	Construct an array R of ResultRow objects in the order they will be returned to the client.
+	2.	Encode R as canonical JSON (section 3.1).
+	3.	Compute SHA-256 over the resulting bytes.
+	4.	Encode as lowercase hex string.
+
+rows_hash = hex(sha256(canonical_json(R)))
+
+5.4. Canonical evidence_hash
+
+The exact shape of evidence summary is implementation-defined but MUST be deterministic.
+
+Minimal requirement:
+	1.	For mode “none”:
+	•	evidence_summary := { “mode”: “none” }
+	2.	For mode “spot” or “full”:
+	•	evidence_summary MUST include at least:
+	•	query_id
+	•	result_id
+	•	mode
+	•	sample_rate (for mode “spot”)
+	•	a list of verified entries; each entry SHOULD contain:
+	•	receipt_id
+	•	mmr_root or equivalent
+	•	hub_id
+
+Example:
+
+{
+“query_id”: “q-…”,
+“result_id”: “r-…”,
+“mode”: “spot”,
+“sample_rate”: 0.1,
+“verified”: [
+{
+“receipt_id”: “rcpt-1”,
+“mmr_root”: “hex”,
+“hub_id”: “hub-…”
+},
+{
+“receipt_id”: “rcpt-2”,
+“mmr_root”: “hex”,
+“hub_id”: “hub-…”
+}
+]
+}
+
+evidence_hash is then:
+
+evidence_hash = hex(sha256(canonical_json(evidence_summary)))
+
+5.5. Recording ResultDigest
+
+ResultDigest MUST be embedded in a VEEN message:
+	•	stream: record/query/results
+	•	body: canonical JSON of the digest
+	•	event_type: “query.result”
+	•	subject_id: principal or service responsible for execution
+	•	principal_id: execution engine identity
+
+	6.	Evidence modes
+
+6.1. Mode “none”
+	•	Engine does not resolve receipts.
+	•	Engine does not verify MMR or signatures.
+	•	rows_hash MUST still be computed.
+	•	evidence_summary is minimal; evidence_hash is deterministic.
+
+Use cases:
+	•	dashboards,
+	•	low-criticality analytics.
+
+6.2. Mode “spot”
+	•	Engine must:
+	1.	Materialize all ResultRow entries.
+	2.	Select a deterministic subset using sample_rate.
+	3.	For each sampled row, resolve receipt_id and verify:
+	•	signature,
+	•	MMR inclusion against a known root.
+	4.	Construct evidence_summary with all sampled verifications.
+	•	If any sampled verification fails:
+	•	the query MUST fail (no successful result is returned).
+
+6.3. Mode “full”
+	•	Engine must:
+	1.	For every ResultRow, resolve and verify receipts.
+	2.	Fail the query if any verification fails.
+	3.	Construct evidence_summary that allows recomputation or replay of verification.
+	•	Mode “full” is intended for:
+	•	forensic investigations,
+	•	regulatory-grade reporting.
+
+	7.	HTTP API
+
+7.1. Authentication
+
+All endpoints MUST be protected by:
+	•	an authentication layer (e.g. bearer tokens, mTLS), and
+	•	a mapping from authenticated principal to VEEN client identity.
+
+Access control rules:
+	•	Only authorized principals MAY submit queries.
+	•	Access to scopes (streams) MUST be filtered by policy.
+	•	Access to results MAY be restricted by:
+	•	who submitted the query,
+	•	tenant partition,
+	•	query classification.
+
+7.2. POST /api/query/submit
+
+Request:
+	•	Method: POST
+	•	Path: /api/query/submit
+	•	Headers:
+	•	Content-Type: application/json
+	•	Authorization: implementation-defined
+	•	Body: JSON, partial or full QueryDescriptor (server can fill query_id and version).
+
+Server behavior:
+	1.	Authenticate and authorize.
+	2.	Normalize and validate descriptor.
+	3.	Emit VEEN event to record/query/requests.
+	4.	Schedule execution.
+	5.	Allocate result_id.
+
+Response (accepted):
+
+HTTP 202
+
+{
+“query_id”: “q-…”,
+“result_id”: “r-…”,
+“status”: “pending”
+}
+
+For small queries, server MAY synchronously execute and respond:
+
+HTTP 200
+
+{
+“result_digest”: { … },
+“rows”: [ … ]
+}
+
+7.3. GET /api/query/status/{result_id}
+
+Optional.
+	•	Method: GET
+	•	Path: /api/query/status/{result_id}
+
+Response:
+
+HTTP 200
+
+{
+“query_id”: “q-…”,
+“result_id”: “r-…”,
+“status”: “pending” | “running” | “completed” | “failed”,
+“error_code”: “string or null”,
+“message”: “string or null”
+}
+
+7.4. GET /api/query/result/{result_id}
+
+Request:
+	•	Method: GET
+	•	Path: /api/query/result/{result_id}
+
+Query parameters (optional):
+	•	offset: integer, default 0
+	•	limit: integer, default 1000, upper bound implementation-defined
+
+Response (completed, paginated):
+
+HTTP 200
+
+{
+“result_digest”: { … },         // full digest
+“rows”: [ ResultRow, … ],
+“page”: {
+“offset”: 0,
+“limit”: 1000,
+“total”: 1234,                  // optional; may be omitted for streaming backends
+“has_more”: true | false
+}
+}
+
+Offset and limit refer to row indices in the logical result set used when computing rows_hash. The server MUST ensure that:
+	•	pagination does not change row ordering, and
+	•	rows_hash remains the hash of the full ordered result set, not of a single page.
+
+7.5. GET /api/query/descriptor/{query_id}
+
+Optional but recommended for audit.
+	•	Method: GET
+	•	Path: /api/query/descriptor/{query_id}
+
+Response:
+
+{
+“descriptor”: { QueryDescriptor },
+“record_event”: {
+“stream”: “record/query/requests”,
+“seq”: integer,
+“hub_id”: “hub-…”,
+“receipt_id”: “rcpt-…”
+}
+}
+
+7.6. Error model
+
+Error responses MUST be JSON:
+
+{
+“error_code”: “string”,
+“message”: “human readable”
+}
+
+Recommended error_code values:
+	•	invalid_json
+	•	invalid_query_descriptor
+	•	unauthorized
+	•	forbidden_scope
+	•	query_not_found
+	•	result_not_ready
+	•	execution_failed
+	•	internal_error
+
+Mapping to HTTP status:
+	•	400: invalid_json, invalid_query_descriptor
+	•	401: unauthorized
+	•	403: forbidden_scope
+	•	404: query_not_found
+	•	409: duplicate_query_id
+	•	425 or 404 or 409 (implementation-defined): result_not_ready
+	•	500: execution_failed, internal_error
+
+	8.	Execution semantics
+
+8.1. State machine (logical)
+
+For each result_id:
+	•	PENDING: descriptor accepted, not yet executed.
+	•	RUNNING: query engine executing.
+	•	COMPLETED: result_digest written to record/query/results and result rows materialized.
+	•	FAILED: execution failed; no ResultDigest committed.
+
+Transition rules:
+	•	PENDING → RUNNING → COMPLETED
+	•	PENDING → RUNNING → FAILED
+	•	PENDING → FAILED (fast failure during planning or validation)
+
+Once COMPLETED or FAILED, the state MUST be immutable.
+
+8.2. Coupling with VEEN
+
+A result is considered COMMITTED when:
+	1.	ResultDigest event is successfully appended to record/query/results, and
+	2.	The hub acknowledges the message and provides a receipt.
+
+The API MAY return the result to the client after the local append but SHOULD expose the receipt or its hash via ResultDigest for later verification.
+	9.	Cross-zone usage with Air-gap Bridge
+
+9.1. Query in Z1, replay in Z2
+
+Pattern:
+	1.	In zone Z1:
+	•	submit query, obtain QueryDescriptor and ResultDigest.
+	•	optionally export underlying recorder events via Recorder + Bridge profile.
+	2.	Export:
+	•	export:
+	•	QueryDescriptor event,
+	•	ResultDigest event,
+	•	the recorder events required by the query (or a superset).
+	3.	In zone Z2:
+	•	import recorder events.
+	•	import QueryDescriptor and ResultDigest as recorder events.
+	•	optionally re-run the query engine locally using the imported QueryDescriptor.
+	•	compute local ResultDigest’.
+
+If:
+	•	QueryDescriptor’ equals QueryDescriptor, and
+	•	ResultDigest’ matches ResultDigest on:
+	•	query_id
+	•	row_count
+	•	rows_hash
+	•	evidence_hash (for same evidence settings),
+
+then Z2 can assert that:
+	•	it observes a recorder history that matches Z1 for the queried scope, up to retention.
+
+9.2. One-way bridge constraints
+	•	Queries MAY be submitted separately in each zone.
+	•	Query descriptors and digests MAY flow one-way with ordinary exported streams.
+	•	No query-related control channel MUST be used to bypass one-way constraints.
+
+	10.	Versioning and compatibility
+
+10.1. Schema versions
+
+This document fixes:
+	•	QueryDescriptor.version = 1
+	•	ResultDigest.version = 1
+
+If a client supplies another version, the server MUST:
+	•	either reject (HTTP 400, error_code = “unsupported_version”), or
+	•	explicitly document a migration strategy.
+
+10.2. HTTP API versioning
+
+The bare paths in this document define v0.0.1 behavior. Implementations MAY expose:
+	•	/api/v1/query/…
+
+In that case they MUST document which descriptor/result versions the v1 API accepts and produces.
+
+10.3. Backward-compatible extensions
+
+The following are considered backward-compatible:
+	•	adding new filter keys that can be safely ignored by older servers,
+	•	adding new aggregate metrics that are rejected only if requested,
+	•	adding fields to ResultRow and ResultDigest that clients may ignore.
+
+Breaking changes MUST increment the schema version and, if exposed, the HTTP path version.
+
+## Operational guidance and tooling
+
+### CORE-GOALS.txt
+
 
 ⸻
 
@@ -5536,7 +5538,8 @@ At that point you can say, in a very literal sense:
 “From WSL, I can operate a full VEEN v0.0.1+ fabric – core + overlays – and verify every property the spec claims, via integration tests.”
 
 
-## CLI-GOALS-1.txt
+### CLI-GOALS-1.txt
+
 
 VEEN CLI v0.0.1 Operational Goal Specification (Tightened)
 Plain ASCII, English only. No overlays beyond v0.0.1 (OP0, KEX0, RESYNC0, RPC0, CRDT0, ANCHOR0, OBS0, COMP0, SH0, DR0, TS0).
@@ -6279,7 +6282,8 @@ The CLI is considered v0.0.1-complete when:
 	5.	veen selftest all exits with status 0 in a clean environment.
 
 
-## CLI-GOALS-2.txt
+### CLI-GOALS-2.txt
+
 
 VEEN CLI v0.0.1+ Operational Goal Specification (Tightened)
 Plain ASCII, English only. Additive to VEEN CLI v0.0.1. No wire changes.
@@ -7054,7 +7058,8 @@ The VEEN CLI is v0.0.1+-complete if and only if:
 	•	Its authority, classification, schemas, and lifecycle policies can be recovered and inspected using only VEEN logs and CLI tooling, without any external state.
 
 
-## CLI-GOALS-3.txt
+### CLI-GOALS-3.txt
+
 
 VEEN CLI v0.0.1++ Operational Goal Specification (Tightened)
 Plain ASCII, English only. Additive to VEEN CLI v0.0.1 and v0.0.1+. No wire changes.
@@ -7917,7 +7922,8 @@ The CLI is v0.0.1++-complete if:
 	•	and exit 0 when all invariants hold.
 
 
-## OS-GOALS.txt
+### OS-GOALS.txt
+
 
 VEEN v0.0.1 OS-GOALS
 Host Operating System Operational Goal Specification (Tightened)
@@ -8359,7 +8365,392 @@ G14.6 Stability and hardening
 When all G14.x conditions hold on Ubuntu 22.04 and 24.04 (native and WSL2) with only the documented prerequisites, VEEN v0.0.1 is OS-GOALS complete.
 
 
-## Design-Philosophy.txt
+### USAGE.md
+
+
+# VEEN Usage Compendium
+
+This is the “first hour” guide for the VEEN CLI and its companion binaries (`veen`, `veen-hub`, `veen-selftest`, `veen-bridge`). Follow the sections in order the first time you use VEEN, then dip back in as a reference for common tasks.
+
+**Who is this for?**
+- **First-time users:** start at “Before you begin”, then follow the Local developer quickstart exactly once end-to-end.
+- **Returning operators:** skip straight to the command blocks you need; each block is self-contained.
+
+**Reading tips**
+- Commands written with `target/release/` assume you built locally. Drop the prefix when using packaged binaries or when already inside Docker/Kubernetes.
+- Replace placeholders like `<PROFILE_ID>` with your own values. Flags in backticks are literal.
+- Use temporary paths such as `/tmp/veen-hub` for experiments; for long-lived hubs see “Manual installation” for persistent directories.
+- Output precedence: explicit output flags (for example `--json` on a subcommand) win over global defaults, and `--json` overrides `--quiet`. When `--quiet` is set without JSON output enabled, successful command output is suppressed (errors still print).
+- If something fails, re-run with `--verbose` to see detailed logs. Most first-run issues relate to filesystem permissions on the chosen data directory.
+
+**Fast navigation**
+- [1. Before you begin](#1-before-you-begin)
+- [2. Build and sanity-check](#2-build-and-sanity-check)
+- [3. Local developer quickstart](#3-local-developer-quickstart)
+- [4. Additional flows](#4-additional-flows)
+- [5. Running with containers](#5-running-with-containers)
+- [6. Environment descriptors (`veen env`)](#6-environment-descriptors-veen-env)
+- [7. Kubernetes workflows (`veen kube`)](#7-kubernetes-workflows-veen-kube)
+- [8. Verification and tests](#8-verification-and-tests)
+- [9. Common helper tools](#9-common-helper-tools)
+- [10. Further reading](#10-further-reading)
+
+#### 1. Before you begin
+
+
+### Supported platforms and packages
+- Target OS: Ubuntu 22.04/24.04 (including WSL2). macOS works if you swap `apt` commands for Homebrew equivalents.
+- Required packages: `build-essential pkg-config libssl-dev curl ca-certificates`
+- Recommended extras: `jq` for inspecting JSON outputs and `just` for developer shortcuts
+
+Install everything in one go on Ubuntu:
+
+```shell
+sudo apt update
+sudo apt install -y build-essential pkg-config libssl-dev curl ca-certificates
+sudo apt install -y jq just # optional, but useful for debugging
+```
+
+### Rust toolchain
+Use the pinned stable toolchain declared in `rust-toolchain.toml` so your build matches CI and the Docker image:
+
+```shell
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+cargo --version # verify Rust is available
+```
+
+If your shell cannot find `cargo`, ensure `~/.cargo/bin` is present on your `PATH` (rerun `source "$HOME/.cargo/env"`).
+
+#### 2. Build and sanity-check
+
+
+### Build the workspace
+
+```shell
+cargo build --release
+```
+
+`cargo` will fetch dependencies on first run. Supply `CARGO_NET_OFFLINE=true` for an air-gapped build **only** when you already have a populated Cargo cache. If the build fails with linker errors, ensure `libssl-dev` is installed and re-run the command.
+
+#### Quick sanity check
+- List the installed binaries and confirm they respond:
+  ```shell
+  ls target/release/veen*
+  target/release/veen --help | head -n 5
+  target/release/veen version
+  ```
+- Expected result: a version string like `veen x.y.z (git <hash>)` and four binaries present. Missing files usually mean the build aborted; re-run `cargo build --release` and read the first error in the log.
+
+You should now have four binaries under `target/release/`:
+- `veen` – CLI used across all workflows
+- `veen-hub` – hub runtime binary (invoked via `veen hub`)
+- `veen-selftest` – self-test harness
+- `veen-bridge` – log replication helper
+
+### Manual installation
+
+```shell
+sudo install -m 0755 target/release/veen /usr/local/bin/veen
+sudo install -m 0755 target/release/veen-hub /usr/local/bin/veen-hub
+sudo install -m 0755 target/release/veen-selftest /usr/local/bin/veen-selftest
+sudo install -m 0755 target/release/veen-bridge /usr/local/bin/veen-bridge
+```
+
+When packaging for production hosts, prefer copying the four binaries into `/usr/local/bin` as a single step using your configuration manager (Ansible, Chef, etc.). The binaries are dynamically linked to glibc and OpenSSL, so ensure the target hosts provide those libraries.
+
+Recommended directories:
+
+```shell
+sudo install -d -m 0750 /var/lib/veen
+sudo install -d -m 0755 /etc/veen
+sudo install -d -m 0750 /var/log/veen
+```
+
+`/var/lib/veen` should be writable by the service account that runs the hub. `/etc/veen` can hold static configuration such as `hub-config.toml` and TLS material if you supply `--tls-cert`/`--tls-key`. Logs default to stderr; set `RUST_LOG` or `VEEN_LOG_LEVEL` to adjust verbosity.
+
+#### 3. Local developer quickstart
+
+
+Complete these steps in order the first time you run VEEN. Create a disposable workspace (e.g. `/tmp/veen-hub` and `/tmp/veen-client`) so you can delete everything afterwards.
+
+1. **Start a hub in the foreground**
+   ```shell
+   target/release/veen hub start \
+     --listen 127.0.0.1:37411 \
+     --data-dir /tmp/veen-hub \
+     --foreground
+   ```
+   Stop with `Ctrl+C`. `--data-dir` accepts a local path or a `file://` URI. When not running in the foreground, the hub detaches and writes its PID under `<data-dir>/hub.pid` for `hub stop` to consume. On first start you should see the listen address, profile identifier, and log path printed to the terminal. If you see “address already in use”, change `--listen` to a free port.
+
+2. **Generate a client identity**
+   ```shell
+   target/release/veen keygen --out /tmp/veen-client
+   ```
+
+   The command creates `identity_card.pub` (public key material), `keystore.enc`
+   (private key material), and `state.json` (client ack/rotation state). Keep
+   `keystore.enc` outside version control and back it up securely.
+
+3. **Send a message**
+   ```shell
+   target/release/veen send \
+     --hub /tmp/veen-hub \
+     --client /tmp/veen-client \
+     --stream core/main \
+     --body '{"text":"hello-veens"}'
+   ```
+   Expected result: the terminal prints the committed sequence number and the hub writes a JSON bundle under the data directory. Add `--cap <PATH>` to attach a capability token or `--attach <FILE>` to bundle binary payloads; each flag may be repeated. Errors such as `unable to open hub` usually mean the path after `--hub` is wrong or the hub from step 1 has stopped.
+
+4. **Stream messages**
+   ```shell
+   target/release/veen stream \
+     --hub /tmp/veen-hub \
+     --client /tmp/veen-client \
+     --stream core/main \
+     --from 0
+   ```
+   Displays message bodies, attachment metadata, and received sequence numbers. ACK state is maintained client-side.
+
+   Add `--with-proof` to request cryptographic proofs for each record or `--follow` to keep streaming new messages.
+
+5. **Inspect hub status and keys**
+   ```shell
+   target/release/veen hub status --hub /tmp/veen-hub
+   target/release/veen hub key --hub /tmp/veen-hub
+   ```
+   `hub status` reports the listen address, current state root, and whether PoW is enabled. `hub key` prints the hub's signing key and profile identifier.
+
+6. **Stop a background hub**
+   ```shell
+   target/release/veen hub stop --data-dir /tmp/veen-hub
+   ```
+   This sends a shutdown signal to the backgrounded hub and waits for a clean exit. `hub stop` is only available on Unix-like hosts; on Windows, terminate the background process manually.
+
+7. **Clean up**
+
+   Remove temporary state when you are done exploring:
+   ```shell
+   rm -rf /tmp/veen-hub /tmp/veen-client
+   ```
+   Re-run the steps above any time you want a fresh sandbox. When in doubt, delete the temporary directories and repeat steps 1–4 to return to a known-good state.
+
+#### 4. Additional flows
+
+
+### Viewing schema descriptors
+- Inspect a registered schema:
+  ```shell
+  target/release/veen schema show \
+    --hub http://127.0.0.1:37411 \
+    --schema-id <HEX32> \
+    --json
+  ```
+  Shows the identifier, name, version, and usage. Use `--json` for machine-readable output.
+
+### Proof-of-Work (PoW)
+If a hub demands PoW, supply the parameters on `veen send` or `veen rpc call`:
+- `--pow-difficulty <BITS>`: Solve and attach a cookie of the given difficulty. When no challenge is supplied a random one is generated locally.
+- `--pow-challenge <HEX>`: Reuse a hub-issued challenge or provide your own.
+- `--pow-nonce <NONCE>`: Send a pre-computed cookie alongside the matching difficulty and challenge.
+
+Enable PoW requirements on the hub with `veen hub start --pow-difficulty`.
+
+Include `--pow-max-time <SECONDS>` to cap the time spent solving. All PoW parameters are echoed back in verbose logs to aid debugging.
+
+### Snapshot verification
+Verify that a stream state matches a checkpoint:
+```shell
+veen snapshot verify \
+  --hub https://hub.example \
+  --stream my/ledger \
+  --state-class wallet.ledger \
+  --state-id deadbeef... \
+  --upto-stream-seq 42
+```
+Prints the state hash and MMR root, highlighting the first mismatch when present. Use `--json` for structured output.
+
+For local debug you can point `--hub` at a filesystem path (e.g. `/tmp/veen-hub`) instead of HTTP(S). Combine with `--expected-root <HEX>` to assert a specific Merkle root during CI.
+
+#### 5. Running with containers
+
+
+Docker packaging persists hub data in a named volume.
+
+Prerequisites:
+- Docker Engine 24+ and Docker Compose Plugin v2.2+ installed on the host.
+- Ports `37411` (default) or your chosen `HUB_PORT` must be free.
+- The current working directory should be the repo root (so Compose can build or locate the binary).
+
+1. **Build and start**
+   ```shell
+   docker compose up --build -d
+   ```
+   Listens on `0.0.0.0:37411` with `restart: unless-stopped`.
+
+   Override the exposed port with `HUB_PORT=<PORT> docker compose up -d` if you need to avoid clashes. Compose injects the hub binary built from the local workspace by default; set `HUB_IMAGE` to pull a prebuilt image instead.
+
+2. **Health and logs**
+   ```shell
+   docker compose logs -f hub
+   docker compose ps
+   ```
+   A container healthcheck runs `veen hub health` internally.
+
+   Use `docker compose exec hub veen hub status --hub /var/lib/veen` to confirm the in-container data directory and profile ID.
+
+3. **Use the CLI inside the container**
+   Keep client material on the shared volume:
+   ```shell
+   docker compose run --rm hub veen keygen --out /var/lib/veen/clients/alice
+   docker compose exec hub veen send \
+     --hub /var/lib/veen \
+     --client /var/lib/veen/clients/alice \
+     --stream core/main \
+     --body '{"text":"hello-veens"}'
+   docker compose exec hub veen stream \
+     --hub /var/lib/veen \
+     --client /var/lib/veen/clients/alice \
+     --stream core/main \
+     --from 0
+   ```
+   Stop with `docker compose down` (add `--volumes` to remove the persisted log).
+
+### Overriding environment variables
+Set `VEEN_LISTEN`, `VEEN_LOG_LEVEL`, `VEEN_PROFILE_ID`, `VEEN_CONFIG_PATH`, etc. in `docker-compose.yml` or via `docker compose run -e` to control listen addresses or config paths.
+
+For TLS, mount cert/key pairs into the container and reference them with `VEEN_TLS_CERT`/`VEEN_TLS_KEY`. Logging verbosity can be increased with `VEEN_LOG_LEVEL=debug` to mirror the `--verbose` flag of the CLI.
+
+#### 6. Environment descriptors (`veen env`)
+
+
+Environment files (`*.env.json`) capture cluster context, namespace, and hub metadata for reuse across commands.
+
+1. **Initialise**
+   ```shell
+   veen env init \
+     --root ~/.config/veen \
+     --name demo \
+     --cluster-context kind-demo \
+     --namespace veen-tenant-demo \
+     --description "demo tenant"
+   ```
+   `--root` must be an existing directory; VEEN will create the `.env.json` file within it. The description is optional but helps distinguish similar clusters.
+
+2. **Register hubs and tenants**
+   ```shell
+   veen env add-hub \
+     --env ~/.config/veen/demo.env.json \
+     --hub-name primary \
+     --service-url https://hub.demo.internal:8443 \
+     --profile-id <PROFILE_ID>
+   veen env add-tenant \
+     --env ~/.config/veen/demo.env.json \
+     --tenant-id demo \
+     --stream-prefix core \
+     --label-class wallet
+   ```
+   Use `veen env add-cap` to register capabilities or `veen env add-client` when distributing pre-generated client identities to operators.
+
+3. **Inspect**
+   ```shell
+   veen env show --env ~/.config/veen/demo.env.json
+   veen env show --env ~/.config/veen/demo.env.json --json
+   ```
+   `--json` output includes embedded hub profile IDs, service URLs, and tenant stream prefixes for consumption by automation.
+
+Subsequent CLI calls can use `--env ~/.config/veen/demo.env.json --hub-name primary` to resolve service URLs and profile IDs automatically. When both `--env` and explicit flags are supplied, the explicit flags win.
+
+#### 7. Kubernetes workflows (`veen kube`)
+
+
+Follows `doc/CLI-GOALS-3.txt` to render and apply Namespace/ServiceAccount/RBAC/ConfigMap/Secret/Deployment/Service resources. All subcommands support `--json`.
+
+- **Render manifests**
+  ```shell
+  target/release/veen kube render \
+    --cluster-context kind-veens \
+    --namespace veen-tenants \
+    --name alpha \
+    --image veen-hub:latest \
+    --data-pvc veen-alpha-data \
+    --config hub-config.toml \
+    --env-file hub.env \
+    --pod-annotations pod-annotations.json > hub.yaml
+  ```
+
+- **Apply**
+  ```shell
+  target/release/veen kube apply --cluster-context kind-veens --file hub.yaml --wait-seconds 180
+  ```
+
+- **Logs and status**
+  - `veen kube logs --cluster-context ... --namespace ... --name alpha --follow`
+  - `veen kube status --cluster-context ... --namespace ... --name alpha --json`
+
+- **Delete**
+  ```shell
+  veen kube delete --cluster-context kind-veens --namespace veen-tenants --name alpha --purge-pvcs
+  ```
+
+### Disposable Jobs for client workflows
+Run `veen send` / `veen stream` inside short-lived Jobs that mount Secrets containing clients/capabilities.
+
+- Send example:
+  ```shell
+  veen kube job send \
+    --cluster-context prod-admin \
+    --namespace veen-tenants \
+    --hub-service veen-hub-alpha.veen-tenants.svc.cluster.local:8080 \
+    --client-secret tenant-a-client \
+    --cap-secret tenant-a-cap \
+    --stream core/main \
+    --body '{"k":"v"}' \
+    --state-pvc veen-tenant-a-client-pvc
+  ```
+
+- Stream with proofs:
+  ```shell
+  veen kube job stream \
+    --cluster-context prod-admin \
+    --namespace veen-tenants \
+    --hub-service veen-hub-alpha.veen-tenants.svc.cluster.local:8080 \
+    --client-secret tenant-a-client \
+    --stream core/main \
+    --from 0 \
+    --with-proof \
+    --image registry.example.com/ops/veen-cli:v1
+  ```
+
+Jobs mount Secrets to `/var/lib/veen-client` (and `/var/lib/veen-cap`), stream pod logs in real time, and optionally persist ACK state via `--state-pvc`.
+
+#### 8. Verification and tests
+
+
+- Run all unit tests: `cargo test --workspace`
+- Self-test harness: `target/release/veen selftest core` / `props` / `fuzz` / `all`
+- Overlay suites: `target/release/veen selftest federated` / `kex1` / `hardened` / `meta`
+
+Temporary directories under `/tmp` are removed automatically on success or failure.
+
+#### 9. Common helper tools
+
+
+- `Justfile` commands: `just ci` (fmt + clippy + test), `just fmt`, `just cli -- --help`
+- Performance: `just perf -- "--requests 512 --concurrency 64"` (add `--mode http` for HTTP latency)
+
+#### 10. Further reading
+
+
+- Protocol/overlay specs (SSOT): `doc/spec.md`
+- CLI/OS goals: `doc/CLI-GOALS-1.txt`–`CLI-GOALS-3.txt`, `doc/OS-GOALS.txt`
+- Design rationale: `doc/Design-Philosophy.txt`
+
+
+## Rationale and philosophy
+
+### Design-Philosophy.txt
+
 
 VEEN Design Philosophy v0.0.1 (Ephemeral Fabric Tightened)
 Plain ASCII, English only
@@ -8817,378 +9208,8 @@ The design axis that must not drift is:
 As long as these properties hold, networks can be treated as ephemeral as pods: disposable in deployment, verifiable in audit, reproducible under replay, and interpretable under new overlays.
 
 
-## USAGE.md
+### Whyuse.txt
 
-# VEEN Usage Compendium
-
-This is the “first hour” guide for the VEEN CLI and its companion binaries (`veen`, `veen-hub`, `veen-selftest`, `veen-bridge`). Follow the sections in order the first time you use VEEN, then dip back in as a reference for common tasks.
-
-**Who is this for?**
-- **First-time users:** start at “Before you begin”, then follow the Local developer quickstart exactly once end-to-end.
-- **Returning operators:** skip straight to the command blocks you need; each block is self-contained.
-
-**Reading tips**
-- Commands written with `target/release/` assume you built locally. Drop the prefix when using packaged binaries or when already inside Docker/Kubernetes.
-- Replace placeholders like `<PROFILE_ID>` with your own values. Flags in backticks are literal.
-- Use temporary paths such as `/tmp/veen-hub` for experiments; for long-lived hubs see “Manual installation” for persistent directories.
-- Output precedence: explicit output flags (for example `--json` on a subcommand) win over global defaults, and `--json` overrides `--quiet`. When `--quiet` is set without JSON output enabled, successful command output is suppressed (errors still print).
-- If something fails, re-run with `--verbose` to see detailed logs. Most first-run issues relate to filesystem permissions on the chosen data directory.
-
-**Fast navigation**
-- [1. Before you begin](#1-before-you-begin)
-- [2. Build and sanity-check](#2-build-and-sanity-check)
-- [3. Local developer quickstart](#3-local-developer-quickstart)
-- [4. Additional flows](#4-additional-flows)
-- [5. Running with containers](#5-running-with-containers)
-- [6. Environment descriptors (`veen env`)](#6-environment-descriptors-veen-env)
-- [7. Kubernetes workflows (`veen kube`)](#7-kubernetes-workflows-veen-kube)
-- [8. Verification and tests](#8-verification-and-tests)
-- [9. Common helper tools](#9-common-helper-tools)
-- [10. Further reading](#10-further-reading)
-
-## 1. Before you begin
-
-### Supported platforms and packages
-- Target OS: Ubuntu 22.04/24.04 (including WSL2). macOS works if you swap `apt` commands for Homebrew equivalents.
-- Required packages: `build-essential pkg-config libssl-dev curl ca-certificates`
-- Recommended extras: `jq` for inspecting JSON outputs and `just` for developer shortcuts
-
-Install everything in one go on Ubuntu:
-
-```shell
-sudo apt update
-sudo apt install -y build-essential pkg-config libssl-dev curl ca-certificates
-sudo apt install -y jq just # optional, but useful for debugging
-```
-
-### Rust toolchain
-Use the pinned stable toolchain declared in `rust-toolchain.toml` so your build matches CI and the Docker image:
-
-```shell
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-cargo --version # verify Rust is available
-```
-
-If your shell cannot find `cargo`, ensure `~/.cargo/bin` is present on your `PATH` (rerun `source "$HOME/.cargo/env"`).
-
-## 2. Build and sanity-check
-
-### Build the workspace
-
-```shell
-cargo build --release
-```
-
-`cargo` will fetch dependencies on first run. Supply `CARGO_NET_OFFLINE=true` for an air-gapped build **only** when you already have a populated Cargo cache. If the build fails with linker errors, ensure `libssl-dev` is installed and re-run the command.
-
-#### Quick sanity check
-- List the installed binaries and confirm they respond:
-  ```shell
-  ls target/release/veen*
-  target/release/veen --help | head -n 5
-  target/release/veen version
-  ```
-- Expected result: a version string like `veen x.y.z (git <hash>)` and four binaries present. Missing files usually mean the build aborted; re-run `cargo build --release` and read the first error in the log.
-
-You should now have four binaries under `target/release/`:
-- `veen` – CLI used across all workflows
-- `veen-hub` – hub runtime binary (invoked via `veen hub`)
-- `veen-selftest` – self-test harness
-- `veen-bridge` – log replication helper
-
-### Manual installation
-
-```shell
-sudo install -m 0755 target/release/veen /usr/local/bin/veen
-sudo install -m 0755 target/release/veen-hub /usr/local/bin/veen-hub
-sudo install -m 0755 target/release/veen-selftest /usr/local/bin/veen-selftest
-sudo install -m 0755 target/release/veen-bridge /usr/local/bin/veen-bridge
-```
-
-When packaging for production hosts, prefer copying the four binaries into `/usr/local/bin` as a single step using your configuration manager (Ansible, Chef, etc.). The binaries are dynamically linked to glibc and OpenSSL, so ensure the target hosts provide those libraries.
-
-Recommended directories:
-
-```shell
-sudo install -d -m 0750 /var/lib/veen
-sudo install -d -m 0755 /etc/veen
-sudo install -d -m 0750 /var/log/veen
-```
-
-`/var/lib/veen` should be writable by the service account that runs the hub. `/etc/veen` can hold static configuration such as `hub-config.toml` and TLS material if you supply `--tls-cert`/`--tls-key`. Logs default to stderr; set `RUST_LOG` or `VEEN_LOG_LEVEL` to adjust verbosity.
-
-## 3. Local developer quickstart
-
-Complete these steps in order the first time you run VEEN. Create a disposable workspace (e.g. `/tmp/veen-hub` and `/tmp/veen-client`) so you can delete everything afterwards.
-
-1. **Start a hub in the foreground**
-   ```shell
-   target/release/veen hub start \
-     --listen 127.0.0.1:37411 \
-     --data-dir /tmp/veen-hub \
-     --foreground
-   ```
-   Stop with `Ctrl+C`. `--data-dir` accepts a local path or a `file://` URI. When not running in the foreground, the hub detaches and writes its PID under `<data-dir>/hub.pid` for `hub stop` to consume. On first start you should see the listen address, profile identifier, and log path printed to the terminal. If you see “address already in use”, change `--listen` to a free port.
-
-2. **Generate a client identity**
-   ```shell
-   target/release/veen keygen --out /tmp/veen-client
-   ```
-
-   The command creates `identity_card.pub` (public key material), `keystore.enc`
-   (private key material), and `state.json` (client ack/rotation state). Keep
-   `keystore.enc` outside version control and back it up securely.
-
-3. **Send a message**
-   ```shell
-   target/release/veen send \
-     --hub /tmp/veen-hub \
-     --client /tmp/veen-client \
-     --stream core/main \
-     --body '{"text":"hello-veens"}'
-   ```
-   Expected result: the terminal prints the committed sequence number and the hub writes a JSON bundle under the data directory. Add `--cap <PATH>` to attach a capability token or `--attach <FILE>` to bundle binary payloads; each flag may be repeated. Errors such as `unable to open hub` usually mean the path after `--hub` is wrong or the hub from step 1 has stopped.
-
-4. **Stream messages**
-   ```shell
-   target/release/veen stream \
-     --hub /tmp/veen-hub \
-     --client /tmp/veen-client \
-     --stream core/main \
-     --from 0
-   ```
-   Displays message bodies, attachment metadata, and received sequence numbers. ACK state is maintained client-side.
-
-   Add `--with-proof` to request cryptographic proofs for each record or `--follow` to keep streaming new messages.
-
-5. **Inspect hub status and keys**
-   ```shell
-   target/release/veen hub status --hub /tmp/veen-hub
-   target/release/veen hub key --hub /tmp/veen-hub
-   ```
-   `hub status` reports the listen address, current state root, and whether PoW is enabled. `hub key` prints the hub's signing key and profile identifier.
-
-6. **Stop a background hub**
-   ```shell
-   target/release/veen hub stop --data-dir /tmp/veen-hub
-   ```
-   This sends a shutdown signal to the backgrounded hub and waits for a clean exit. `hub stop` is only available on Unix-like hosts; on Windows, terminate the background process manually.
-
-7. **Clean up**
-
-   Remove temporary state when you are done exploring:
-   ```shell
-   rm -rf /tmp/veen-hub /tmp/veen-client
-   ```
-   Re-run the steps above any time you want a fresh sandbox. When in doubt, delete the temporary directories and repeat steps 1–4 to return to a known-good state.
-
-## 4. Additional flows
-
-### Viewing schema descriptors
-- Inspect a registered schema:
-  ```shell
-  target/release/veen schema show \
-    --hub http://127.0.0.1:37411 \
-    --schema-id <HEX32> \
-    --json
-  ```
-  Shows the identifier, name, version, and usage. Use `--json` for machine-readable output.
-
-### Proof-of-Work (PoW)
-If a hub demands PoW, supply the parameters on `veen send` or `veen rpc call`:
-- `--pow-difficulty <BITS>`: Solve and attach a cookie of the given difficulty. When no challenge is supplied a random one is generated locally.
-- `--pow-challenge <HEX>`: Reuse a hub-issued challenge or provide your own.
-- `--pow-nonce <NONCE>`: Send a pre-computed cookie alongside the matching difficulty and challenge.
-
-Enable PoW requirements on the hub with `veen hub start --pow-difficulty`.
-
-Include `--pow-max-time <SECONDS>` to cap the time spent solving. All PoW parameters are echoed back in verbose logs to aid debugging.
-
-### Snapshot verification
-Verify that a stream state matches a checkpoint:
-```shell
-veen snapshot verify \
-  --hub https://hub.example \
-  --stream my/ledger \
-  --state-class wallet.ledger \
-  --state-id deadbeef... \
-  --upto-stream-seq 42
-```
-Prints the state hash and MMR root, highlighting the first mismatch when present. Use `--json` for structured output.
-
-For local debug you can point `--hub` at a filesystem path (e.g. `/tmp/veen-hub`) instead of HTTP(S). Combine with `--expected-root <HEX>` to assert a specific Merkle root during CI.
-
-## 5. Running with containers
-
-Docker packaging persists hub data in a named volume.
-
-Prerequisites:
-- Docker Engine 24+ and Docker Compose Plugin v2.2+ installed on the host.
-- Ports `37411` (default) or your chosen `HUB_PORT` must be free.
-- The current working directory should be the repo root (so Compose can build or locate the binary).
-
-1. **Build and start**
-   ```shell
-   docker compose up --build -d
-   ```
-   Listens on `0.0.0.0:37411` with `restart: unless-stopped`.
-
-   Override the exposed port with `HUB_PORT=<PORT> docker compose up -d` if you need to avoid clashes. Compose injects the hub binary built from the local workspace by default; set `HUB_IMAGE` to pull a prebuilt image instead.
-
-2. **Health and logs**
-   ```shell
-   docker compose logs -f hub
-   docker compose ps
-   ```
-   A container healthcheck runs `veen hub health` internally.
-
-   Use `docker compose exec hub veen hub status --hub /var/lib/veen` to confirm the in-container data directory and profile ID.
-
-3. **Use the CLI inside the container**
-   Keep client material on the shared volume:
-   ```shell
-   docker compose run --rm hub veen keygen --out /var/lib/veen/clients/alice
-   docker compose exec hub veen send \
-     --hub /var/lib/veen \
-     --client /var/lib/veen/clients/alice \
-     --stream core/main \
-     --body '{"text":"hello-veens"}'
-   docker compose exec hub veen stream \
-     --hub /var/lib/veen \
-     --client /var/lib/veen/clients/alice \
-     --stream core/main \
-     --from 0
-   ```
-   Stop with `docker compose down` (add `--volumes` to remove the persisted log).
-
-### Overriding environment variables
-Set `VEEN_LISTEN`, `VEEN_LOG_LEVEL`, `VEEN_PROFILE_ID`, `VEEN_CONFIG_PATH`, etc. in `docker-compose.yml` or via `docker compose run -e` to control listen addresses or config paths.
-
-For TLS, mount cert/key pairs into the container and reference them with `VEEN_TLS_CERT`/`VEEN_TLS_KEY`. Logging verbosity can be increased with `VEEN_LOG_LEVEL=debug` to mirror the `--verbose` flag of the CLI.
-
-## 6. Environment descriptors (`veen env`)
-
-Environment files (`*.env.json`) capture cluster context, namespace, and hub metadata for reuse across commands.
-
-1. **Initialise**
-   ```shell
-   veen env init \
-     --root ~/.config/veen \
-     --name demo \
-     --cluster-context kind-demo \
-     --namespace veen-tenant-demo \
-     --description "demo tenant"
-   ```
-   `--root` must be an existing directory; VEEN will create the `.env.json` file within it. The description is optional but helps distinguish similar clusters.
-
-2. **Register hubs and tenants**
-   ```shell
-   veen env add-hub \
-     --env ~/.config/veen/demo.env.json \
-     --hub-name primary \
-     --service-url https://hub.demo.internal:8443 \
-     --profile-id <PROFILE_ID>
-   veen env add-tenant \
-     --env ~/.config/veen/demo.env.json \
-     --tenant-id demo \
-     --stream-prefix core \
-     --label-class wallet
-   ```
-   Use `veen env add-cap` to register capabilities or `veen env add-client` when distributing pre-generated client identities to operators.
-
-3. **Inspect**
-   ```shell
-   veen env show --env ~/.config/veen/demo.env.json
-   veen env show --env ~/.config/veen/demo.env.json --json
-   ```
-   `--json` output includes embedded hub profile IDs, service URLs, and tenant stream prefixes for consumption by automation.
-
-Subsequent CLI calls can use `--env ~/.config/veen/demo.env.json --hub-name primary` to resolve service URLs and profile IDs automatically. When both `--env` and explicit flags are supplied, the explicit flags win.
-
-## 7. Kubernetes workflows (`veen kube`)
-
-Follows `doc/CLI-GOALS-3.txt` to render and apply Namespace/ServiceAccount/RBAC/ConfigMap/Secret/Deployment/Service resources. All subcommands support `--json`.
-
-- **Render manifests**
-  ```shell
-  target/release/veen kube render \
-    --cluster-context kind-veens \
-    --namespace veen-tenants \
-    --name alpha \
-    --image veen-hub:latest \
-    --data-pvc veen-alpha-data \
-    --config hub-config.toml \
-    --env-file hub.env \
-    --pod-annotations pod-annotations.json > hub.yaml
-  ```
-
-- **Apply**
-  ```shell
-  target/release/veen kube apply --cluster-context kind-veens --file hub.yaml --wait-seconds 180
-  ```
-
-- **Logs and status**
-  - `veen kube logs --cluster-context ... --namespace ... --name alpha --follow`
-  - `veen kube status --cluster-context ... --namespace ... --name alpha --json`
-
-- **Delete**
-  ```shell
-  veen kube delete --cluster-context kind-veens --namespace veen-tenants --name alpha --purge-pvcs
-  ```
-
-### Disposable Jobs for client workflows
-Run `veen send` / `veen stream` inside short-lived Jobs that mount Secrets containing clients/capabilities.
-
-- Send example:
-  ```shell
-  veen kube job send \
-    --cluster-context prod-admin \
-    --namespace veen-tenants \
-    --hub-service veen-hub-alpha.veen-tenants.svc.cluster.local:8080 \
-    --client-secret tenant-a-client \
-    --cap-secret tenant-a-cap \
-    --stream core/main \
-    --body '{"k":"v"}' \
-    --state-pvc veen-tenant-a-client-pvc
-  ```
-
-- Stream with proofs:
-  ```shell
-  veen kube job stream \
-    --cluster-context prod-admin \
-    --namespace veen-tenants \
-    --hub-service veen-hub-alpha.veen-tenants.svc.cluster.local:8080 \
-    --client-secret tenant-a-client \
-    --stream core/main \
-    --from 0 \
-    --with-proof \
-    --image registry.example.com/ops/veen-cli:v1
-  ```
-
-Jobs mount Secrets to `/var/lib/veen-client` (and `/var/lib/veen-cap`), stream pod logs in real time, and optionally persist ACK state via `--state-pvc`.
-
-## 8. Verification and tests
-
-- Run all unit tests: `cargo test --workspace`
-- Self-test harness: `target/release/veen selftest core` / `props` / `fuzz` / `all`
-- Overlay suites: `target/release/veen selftest federated` / `kex1` / `hardened` / `meta`
-
-Temporary directories under `/tmp` are removed automatically on success or failure.
-
-## 9. Common helper tools
-
-- `Justfile` commands: `just ci` (fmt + clippy + test), `just fmt`, `just cli -- --help`
-- Performance: `just perf -- "--requests 512 --concurrency 64"` (add `--mode http` for HTTP latency)
-
-## 10. Further reading
-
-- Protocol/overlay specs (SSOT): `doc/spec.md`
-- CLI/OS goals: `doc/CLI-GOALS-1.txt`–`CLI-GOALS-3.txt`, `doc/OS-GOALS.txt`
-- Design rationale: `doc/Design-Philosophy.txt`
-
-
-## Whyuse.txt
 
 Why use VEEN v0.0.1
 Plain ASCII, English only
@@ -9404,3 +9425,27 @@ You should use VEEN when you want your network fabric to behave like:
 	•	an integration spine where higher-level semantics are overlays, not hard-coded wiring.
 
 In practical terms: VEEN lets you turn your network into something you can clone, fork, replay, and interpret, while keeping hubs disposable and overlays programmable. That combination is rare, and it directly translates into lower risk, clearer audits, safer evolution, and simpler disaster recovery.
+
+## Source index (consolidated)
+
+
+### Documents merged into this SSOT (original files removed)
+- Design-Philosophy.txt
+- Whyuse.txt
+- USAGE.md
+- CORE-GOALS.txt
+- CLI-GOALS-1.txt
+- CLI-GOALS-2.txt
+- CLI-GOALS-3.txt
+- OS-GOALS.txt
+
+### Legacy sources already embedded below
+- id-spec.txt
+- products-spec-1.txt
+- query-api-spec.txt
+- spec-1.txt
+- spec-2.txt
+- spec-3.txt
+- spec-4.txt
+- spec-5.txt
+- wallet-spec.txt
