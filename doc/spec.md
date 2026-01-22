@@ -9,6 +9,7 @@ The v0.0.1 core is **fixed and immutable**. All optional features are expressed 
 ## 0. Design intent (normative)
 
 VEEN is an **ephemeral, verifiable, reproducible network fabric**.
+It targets the **intermediate space between CRUD, KV, and Queue**, while being **end-to-end encrypted** and **disposable** by design.
 
 **Core principles (MUST):**
 - **Ephemeral fabric:** Networks are disposable; hubs are replaceable processes. Logs and receipts are the durable truth.
@@ -17,6 +18,8 @@ VEEN is an **ephemeral, verifiable, reproducible network fabric**.
 - **Determinism:** Admission decisions and folds are deterministic given the same log state and configured limits.
 - **Portability:** The same data directory and keys define the fabric, independent of OS, runtime, or topology.
 - **Minimal core:** Hubs order and prove; they do not interpret payload semantics.
+- **Typed boundaries:** Types are carried in payload headers and enforced by overlays, never by hubs.
+- **Engineering-first rigor:** The spec defines precise constraints, deterministic error handling, and measurable complexity bounds.
 
 **Primary outcomes (MUST be supported):**
 - **Clone:** Copy a data directory and pinned keys to reproduce the same fabric.
@@ -47,6 +50,9 @@ VEEN is an **ephemeral, verifiable, reproducible network fabric**.
 - **ProfileID:** Hash of profile parameters (`Ht("veen/profile", CBOR(profile))`).
 - **CapToken:** Capability token for authorization and admission limits.
 - **MsgID / leaf_hash:** `Ht("veen/leaf", label || profile_id || ct_hash || client_id || u64be(client_seq))`.
+- **Overlay:** A pure, deterministic fold from logs to typed state, defined by `schema`.
+- **Summary:** A compact associative digest of an overlay state used for merge or replay.
+- **Epoch:** A routing epoch used to rotate labels without altering StreamID.
 
 ---
 
@@ -69,7 +75,14 @@ VEEN is an **ephemeral, verifiable, reproducible network fabric**.
 
 **ProfileID** MUST be computed as `Ht("veen/profile", CBOR(profile))` and carried in every MSG.
 
-### 3.3 Performance contract (normative)
+### 3.3 Notation and canonical hashes
+- `H(x)` = SHA-256 over byte string `x`.
+- `Ht(tag, x)` = `H(tag || 0x00 || x)` with `tag` as UTF-8 bytes and a single `0x00` separator.
+- `u64be(n)`/`u32be(n)` = unsigned big-endian encodings.
+- `Trunc_24(x)` = first 24 bytes of `x`.
+- CBOR maps are encoded in key order (ascending by integer key).
+
+### 3.4 Performance contract (normative)
 Every external API/CLI operation MUST be **O(1)** or **O(polylog n)**. Any linear scan or sequential replay on a hot path is non-compliant.
 
 Required structures:
@@ -80,7 +93,15 @@ Required structures:
 
 No internal linearity may be observable by external callers.
 
-### 3.4 Architecture boundaries
+### 3.5 Deterministic limits and sizing
+All size and time limits are **explicit, configuration-bound, and deterministic**. Implementations MUST define:
+- Max message size, header size, body size, attachment count, and attachment size.
+- Max log chunk size and checkpoint interval.
+- Max rate and burst per CapToken.
+- Max clock skew for epoch validity.
+All limits MUST be enforced with deterministic error codes and MUST NOT depend on runtime state outside indexed metadata.
+
+### 3.6 Architecture boundaries
 - **Core protocol:** wire objects, ordering, proofs. Depends only on crypto, CBOR, append-only storage.
 - **Storage/index:** append-only log, MMR, indices. No overlay semantics.
 - **Overlays:** pure folds over logs. No access to hub internals.
@@ -137,6 +158,11 @@ Fixed field order:
 7. `hub_sig` (bstr64)
 8. `witness_sigs` ([bstr64], optional)
 
+CHECKPOINTs MUST:
+- Encode the log prefix up to `upto_seq` for `label_curr`.
+- Allow deterministic reconstruction of MMR peaks and index cursors.
+- Be reproducible from the same log prefix and configuration.
+
 ### 4.5 Payload header (encrypted)
 CBOR(payload_hdr) fields:
 1. `schema` (bstr32)
@@ -155,6 +181,14 @@ The hub never sees payload_hdr in plaintext.
 
 ---
 
+## 4.7 Typed payloads and schema rigor (normative)
+- `schema` identifies a typed overlay definition, not a hub-level type.
+- Overlays MUST provide a **total decoding function** from `(payload_hdr, body)` to a well-defined typed event or a deterministic error.
+- Schema evolution MUST be handled by versioning in `schema` or within the encrypted body; hubs remain agnostic.
+- Typed invariants (e.g., “must include primary key”) are enforced at overlay fold time, not at admission.
+
+---
+
 ## 5. MMR and proofs
 
 ### 5.1 MMR update (per label)
@@ -164,6 +198,11 @@ The hub never sees payload_hdr in plaintext.
 ### 5.2 Inclusion proof
 `mmr_proof` is a deterministic CBOR object containing the path and peaks.
 Verification MUST reproduce the `mmr_root` recorded in a RECEIPT or CHECKPOINT.
+
+### 5.3 Proof compactness (normative)
+- Proofs MUST be minimal with no redundant siblings.
+- Peaks are ordered by increasing height.
+- Any proof with unknown keys or invalid ordering is rejected.
 
 ---
 
@@ -190,6 +229,7 @@ Rules:
 - `MSG.auth_ref` MUST equal `payload_hdr.cap_ref` if `cap_ref` is present.
 - Hubs MUST verify all signatures in `sig_chain` and enforce TTL and rate limits.
 - If a deployment cannot map `label -> stream_id`, it MUST document that hub-side stream scoping is disabled; clients MUST enforce scoping after decrypt.
+- CapToken revocation MUST be modeled as an overlay stream; hubs enforce revocation by querying the indexed revocation summary only (no scans).
 
 ---
 
@@ -208,6 +248,7 @@ For any accepted (MSG, RECEIPT) pair:
 - **I10:** Deterministic CBOR rules are enforced.
 - **I11:** Size limits (max msg/header/body/attachments) are enforced deterministically.
 - **I12:** Epoch validity for labels (clock skew bounds) is enforced if epoching is enabled.
+- **I13:** Admission order and error codes are deterministic given the same log prefix and configuration.
 
 Any violation MUST be rejected with a deterministic error code.
 
@@ -271,6 +312,7 @@ Overlays are **pure folds over logs**. They MUST:
 - **Explicit ordering:** if timestamps exist, order by `(timestamp, stream_seq, tie-breaker)`.
 - **Deduplication:** define stable keys for replay/mirror deduplication.
 - **No hidden state:** any derived state can be rebuilt from logs/checkpoints.
+- **Typed totality:** decoding is total with explicit error states; no implicit coercions.
 
 ### 11.2 Canonical overlay classes (non-exhaustive)
 - **Identity (ID):** subjects/devices/contexts/orgs/groups/handles as log-derived state.
@@ -281,6 +323,19 @@ Overlays are **pure folds over logs**. They MUST:
 
 Overlays are optional but MUST NOT change core wire objects or invariants.
 
+### 11.3 Overlay summaries and polylog merges (normative)
+- Each overlay MUST define a **summary monoid** `(S, ⊕, e)` where:
+  - `⊕` is associative and deterministic.
+  - `e` is the identity summary.
+- `fold(range)` MUST be computed via cached summaries in O(polylog n).
+- Summary validity MUST be tied to a `(schema, label, upto_seq, mmr_root)` tuple.
+
+### 11.4 CRUD/KV/Queue alignment (normative)
+- **CRUD:** Enhanced by typed events; reads are derived views over ordered logs.
+- **KV:** Keys map to overlay state with deterministic conflict rules (e.g., LWW).
+- **Queue:** Stream order is authoritative; at-least-once delivery is ensured by receipts.
+These behaviors are realized purely by overlays; hubs remain unchanged.
+
 ---
 
 ## 12. Operational requirements
@@ -289,6 +344,8 @@ Overlays are optional but MUST NOT change core wire objects or invariants.
 - **Data portability:** hub data directory is a portable, auditable directory.
 - **Observability:** admission latency, proof time, and fsync time are core metrics.
 - **Disposability:** hubs can be destroyed and rebuilt from logs at any time.
+- **Repairability:** corrupted indices MUST be rebuildable from logs/checkpoints only.
+- **Key rotation:** supported via epoch-based labels without breaking verification.
 
 ---
 
