@@ -137,35 +137,30 @@ impl PerfHarness {
     }
 
     async fn drive(&self, cfg: &PerfConfig) -> Result<PerfSummary> {
-        let verify = Arc::new(Mutex::new(LatencyRecorder::with_bounds(
-            1,
-            MAX_LATENCY_MS,
-            3,
-        )?));
-        let commit = Arc::new(Mutex::new(LatencyRecorder::with_bounds(
-            1,
-            MAX_LATENCY_MS,
-            3,
-        )?));
-        let end_to_end = Arc::new(Mutex::new(LatencyRecorder::with_bounds(
-            1,
-            MAX_LATENCY_MS,
-            3,
-        )?));
+        let verify = Arc::new(Mutex::new(new_latency_recorder()?));
+        let commit = Arc::new(Mutex::new(new_latency_recorder()?));
+        let end_to_end = Arc::new(Mutex::new(new_latency_recorder()?));
 
         let semaphore = Arc::new(Semaphore::new(cfg.concurrency));
         let mut tasks = Vec::with_capacity(cfg.requests);
         let start = Instant::now();
 
         for request_idx in 0..cfg.requests {
-            let verify_hist = Arc::clone(&verify);
-            let commit_hist = Arc::clone(&commit);
-            let end_hist = Arc::clone(&end_to_end);
             let permit = Arc::clone(&semaphore).acquire_owned().await?;
             let driver = PerfDriver::new(self, request_idx as u64)?;
             tasks.push(tokio::spawn(async move {
                 let _permit = permit;
-                driver.run_single(verify_hist, commit_hist, end_hist).await
+                let mut verify_local = new_latency_recorder()?;
+                let mut commit_local = new_latency_recorder()?;
+                let mut end_local = new_latency_recorder()?;
+                driver
+                    .run_single(&mut verify_local, &mut commit_local, &mut end_local)
+                    .await?;
+                Ok::<_, anyhow::Error>(TaskLatencies {
+                    verify: verify_local,
+                    commit: commit_local,
+                    end: end_local,
+                })
             }));
         }
 
@@ -173,7 +168,16 @@ impl PerfHarness {
         let mut submit_err_total = std::collections::BTreeMap::new();
         for task in tasks {
             match task.await? {
-                Ok(()) => submit_ok_total += 1,
+                Ok(task_latencies) => {
+                    merge_task_latencies(
+                        Arc::clone(&verify),
+                        Arc::clone(&commit),
+                        Arc::clone(&end_to_end),
+                        task_latencies,
+                    )
+                    .await?;
+                    submit_ok_total += 1;
+                }
                 Err(err) => {
                     *submit_err_total.entry(err.to_string()).or_default() += 1;
                 }
@@ -216,6 +220,34 @@ impl PerfHarness {
             metrics,
         })
     }
+}
+
+struct TaskLatencies {
+    verify: LatencyRecorder,
+    commit: LatencyRecorder,
+    end: LatencyRecorder,
+}
+
+async fn merge_task_latencies(
+    verify: Arc<Mutex<LatencyRecorder>>,
+    commit: Arc<Mutex<LatencyRecorder>>,
+    end: Arc<Mutex<LatencyRecorder>>,
+    task_latencies: TaskLatencies,
+) -> Result<()> {
+    verify
+        .lock()
+        .await
+        .merge_from(&task_latencies.verify)?;
+    commit
+        .lock()
+        .await
+        .merge_from(&task_latencies.commit)?;
+    end.lock().await.merge_from(&task_latencies.end)?;
+    Ok(())
+}
+
+fn new_latency_recorder() -> Result<LatencyRecorder> {
+    LatencyRecorder::with_bounds(1, MAX_LATENCY_MS, 3)
 }
 
 fn build_runtime_config(listen: SocketAddr, data_dir: PathBuf) -> Result<HubRuntimeConfig> {
@@ -267,9 +299,9 @@ impl PerfDriver {
 
     async fn run_single(
         &self,
-        verify_hist: Arc<Mutex<LatencyRecorder>>,
-        commit_hist: Arc<Mutex<LatencyRecorder>>,
-        end_hist: Arc<Mutex<LatencyRecorder>>,
+        verify_hist: &mut LatencyRecorder,
+        commit_hist: &mut LatencyRecorder,
+        end_hist: &mut LatencyRecorder,
     ) -> Result<()> {
         let submit_start = Instant::now();
         let response = self.submit().await?;
@@ -281,9 +313,9 @@ impl PerfDriver {
         let commit_ms = millis(verify_done, finished);
         let end_ms = millis(submit_start, finished);
 
-        verify_hist.lock().await.record_ms(verify_ms)?;
-        commit_hist.lock().await.record_ms(commit_ms)?;
-        end_hist.lock().await.record_ms(end_ms)?;
+        verify_hist.record_ms(verify_ms)?;
+        commit_hist.record_ms(commit_ms)?;
+        end_hist.record_ms(end_ms)?;
 
         Ok(())
     }
