@@ -10,6 +10,8 @@ use thiserror::Error;
 
 use crate::{hash::h, label::Label, profile::ProfileId, LengthError};
 
+use super::derivation::{hash_tagged, TAG_ATT_NONCE, TAG_LEAF, TAG_MMR_NODE, TAG_MMR_ROOT};
+
 macro_rules! fixed_bytes_type {
     ($(#[$meta:meta])* $vis:vis struct $name:ident($len:expr); expecting: $expecting:expr;) => {
         $(#[$meta])*
@@ -126,6 +128,13 @@ pub const SIGNATURE_LEN: usize = 64;
 /// Length in bytes of AEAD nonces derived from the specification hashes.
 pub const AEAD_NONCE_LEN: usize = 24;
 
+#[must_use]
+pub(crate) fn truncate_nonce(digest: [u8; 32]) -> [u8; AEAD_NONCE_LEN] {
+    let mut nonce = [0u8; AEAD_NONCE_LEN];
+    nonce.copy_from_slice(&digest[..AEAD_NONCE_LEN]);
+    nonce
+}
+
 fixed_bytes_type!(
     /// Raw Ed25519 public key carried as `client_id` on the wire.
     pub struct ClientId(HASH_LEN);
@@ -174,7 +183,7 @@ impl LeafHash {
         data.extend_from_slice(ct_hash.as_ref());
         data.extend_from_slice(client_id.as_ref());
         data.extend_from_slice(&client_seq.to_be_bytes());
-        Self(crate::hash::ht("veen/leaf", &data))
+        Self(hash_tagged(TAG_LEAF, &data))
     }
 
     /// Computes the attachment nonce `Trunc_24(Ht("veen/att-nonce", msg_id || u64be(i)))`.
@@ -183,11 +192,7 @@ impl LeafHash {
         let mut data = Vec::with_capacity(self.as_ref().len() + std::mem::size_of::<u64>());
         data.extend_from_slice(self.as_ref());
         data.extend_from_slice(&index.to_be_bytes());
-        let digest = crate::hash::ht("veen/att-nonce", &data);
-
-        let mut nonce = [0u8; AEAD_NONCE_LEN];
-        nonce.copy_from_slice(&digest[..AEAD_NONCE_LEN]);
-        nonce
+        truncate_nonce(hash_tagged(TAG_ATT_NONCE, &data))
     }
 }
 
@@ -203,7 +208,7 @@ impl MmrNode {
         let mut data = [0u8; HASH_LEN * 2];
         data[..HASH_LEN].copy_from_slice(left.as_ref());
         data[HASH_LEN..].copy_from_slice(right.as_ref());
-        Self(crate::hash::ht("veen/mmr-node", &data))
+        Self(hash_tagged(TAG_MMR_NODE, &data))
     }
 }
 
@@ -236,7 +241,7 @@ impl MmrRoot {
         for peak in peaks {
             data.extend_from_slice(peak.as_ref());
         }
-        Some(Self(crate::hash::ht("veen/mmr-root", &data)))
+        Some(Self(hash_tagged(TAG_MMR_ROOT, &data)))
     }
 }
 
@@ -297,8 +302,8 @@ mod tests {
     use sha2::Digest;
 
     use super::{
-        AuthRef, ClientId, CtHash, LeafHash, MmrNode, MmrRoot, Signature64, AEAD_NONCE_LEN,
-        HASH_LEN, SIGNATURE_LEN,
+        hash_tagged, truncate_nonce, AuthRef, ClientId, CtHash, LeafHash, MmrNode, MmrRoot,
+        Signature64, HASH_LEN, SIGNATURE_LEN, TAG_ATT_NONCE, TAG_MMR_ROOT,
     };
 
     #[test]
@@ -376,7 +381,7 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(peak1.as_ref());
         data.extend_from_slice(peak2.as_ref());
-        let expected = crate::hash::ht("veen/mmr-root", &data);
+        let expected = hash_tagged(TAG_MMR_ROOT, &data);
         assert_eq!(root.as_bytes(), &expected);
     }
 
@@ -425,10 +430,7 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(leaf.as_ref());
         data.extend_from_slice(&index.to_be_bytes());
-        let digest = crate::hash::ht("veen/att-nonce", &data);
-
-        let mut expected = [0u8; AEAD_NONCE_LEN];
-        expected.copy_from_slice(&digest[..AEAD_NONCE_LEN]);
+        let expected = truncate_nonce(hash_tagged(TAG_ATT_NONCE, &data));
         assert_eq!(nonce, expected);
     }
 }

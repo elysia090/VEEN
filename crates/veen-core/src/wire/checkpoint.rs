@@ -9,7 +9,10 @@ use crate::{
     },
 };
 
-use super::signing::{serialize_signable, tagged_hash};
+use super::{
+    derivation::TAG_SIG,
+    signing::{serialize_signable, tagged_hash},
+};
 
 /// Wire format version for `CHECKPOINT` objects.
 pub const CHECKPOINT_VERSION: u64 = 1;
@@ -81,7 +84,7 @@ impl Checkpoint {
 
     /// Computes the canonical `Ht("veen/sig", …)` digest for checkpoint signatures.
     pub fn signing_tagged_hash(&self) -> Result<[u8; 32], CborError> {
-        tagged_hash("veen/sig", &CheckpointSignable::from(self))
+        tagged_hash(TAG_SIG, &CheckpointSignable::from(self))
     }
 
     /// Verifies `hub_sig` using the provided hub Ed25519 public key bytes.
@@ -101,7 +104,7 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::*;
-    use crate::hash::ht;
+    use crate::wire::derivation::{hash_tagged, TAG_SIG};
 
     #[test]
     fn checkpoint_version_matches_spec() {
@@ -134,7 +137,7 @@ mod tests {
         let view = CheckpointSignable::from(&checkpoint);
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&view, &mut buf).unwrap();
-        let expected = ht("veen/sig", &buf);
+        let expected = hash_tagged(TAG_SIG, &buf);
 
         let computed = checkpoint.signing_tagged_hash().unwrap();
         assert_eq!(computed.as_slice(), expected);
