@@ -21,6 +21,82 @@ pub struct StreamIndexHead {
     pub last_leaf_hash: String,
 }
 
+pub struct StreamIndexReader {
+    reader: BufReader<File>,
+    buffer: Vec<u8>,
+    line_number: usize,
+    path: PathBuf,
+}
+
+impl StreamIndexReader {
+    pub async fn open(path: &Path) -> Result<Option<Self>> {
+        if !fs::try_exists(path)
+            .await
+            .with_context(|| format!("checking stream index {}", path.display()))?
+        {
+            return Ok(None);
+        }
+
+        let file = File::open(path)
+            .await
+            .with_context(|| format!("opening stream index {}", path.display()))?;
+        Ok(Some(Self {
+            reader: BufReader::new(file),
+            buffer: Vec::new(),
+            line_number: 0,
+            path: path.to_path_buf(),
+        }))
+    }
+
+    pub async fn next_entry(&mut self) -> Result<Option<StreamIndexEntry>> {
+        loop {
+            self.buffer.clear();
+            let bytes_read = self
+                .reader
+                .read_until(b'\n', &mut self.buffer)
+                .await
+                .with_context(|| format!("reading stream index {}", self.path.display()))?;
+            if bytes_read == 0 {
+                return Ok(None);
+            }
+            if !self.buffer.ends_with(b"\n") {
+                return Ok(None);
+            }
+            self.line_number += 1;
+            self.buffer.pop();
+            if self.buffer.last() == Some(&b'\r') {
+                self.buffer.pop();
+            }
+            if self.buffer.is_empty() {
+                continue;
+            }
+
+            match serde_json::from_slice::<StreamIndexEntry>(&self.buffer) {
+                Ok(entry) => return Ok(Some(entry)),
+                Err(error) => self.warn_invalid_line(error),
+            }
+        }
+    }
+
+    fn warn_invalid_line(&self, error: serde_json::Error) {
+        if let Err(utf8_error) = std::str::from_utf8(&self.buffer) {
+            warn!(
+                "Skipping stream index line {} in {} due to invalid UTF-8: {}",
+                self.line_number,
+                self.path.display(),
+                utf8_error
+            );
+        } else {
+            warn!(
+                "Skipping stream index line {} in {} due to invalid JSON: {}",
+                self.line_number,
+                self.path.display(),
+                error
+            );
+        }
+    }
+}
+
 pub async fn append_stream_index(
     storage: &HubStorage,
     stream: &str,
@@ -53,62 +129,37 @@ pub async fn append_stream_index(
 }
 
 pub async fn load_stream_index(path: &Path) -> Result<Vec<StreamIndexEntry>> {
-    if !fs::try_exists(path)
-        .await
-        .with_context(|| format!("checking stream index {}", path.display()))?
-    {
+    let Some(mut reader) = StreamIndexReader::open(path).await? else {
+        return Ok(Vec::new());
+    };
+
+    let mut entries = Vec::new();
+    while let Some(entry) = reader.next_entry().await? {
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
+pub async fn load_stream_index_range(
+    path: &Path,
+    from: u64,
+    to: u64,
+) -> Result<Vec<StreamIndexEntry>> {
+    if from > to {
         return Ok(Vec::new());
     }
 
+    let Some(mut reader) = StreamIndexReader::open(path).await? else {
+        return Ok(Vec::new());
+    };
+
     let mut entries = Vec::new();
-    let file = File::open(path)
-        .await
-        .with_context(|| format!("opening stream index {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut buffer = Vec::new();
-    let mut line_number = 0usize;
-    loop {
-        buffer.clear();
-        let bytes_read = reader
-            .read_until(b'\n', &mut buffer)
-            .await
-            .with_context(|| format!("reading stream index {}", path.display()))?;
-        if bytes_read == 0 {
-            break;
-        }
-        if !buffer.ends_with(b"\n") {
-            break;
-        }
-        line_number += 1;
-        buffer.pop();
-        if buffer.last() == Some(&b'\r') {
-            buffer.pop();
-        }
-        if buffer.is_empty() {
+    while let Some(entry) = reader.next_entry().await? {
+        if entry.seq < from || entry.seq > to {
             continue;
         }
-        match serde_json::from_slice::<StreamIndexEntry>(&buffer) {
-            Ok(entry) => entries.push(entry),
-            Err(error) => {
-                if let Err(utf8_error) = std::str::from_utf8(&buffer) {
-                    warn!(
-                        "Skipping stream index line {} in {} due to invalid UTF-8: {}",
-                        line_number,
-                        path.display(),
-                        utf8_error
-                    );
-                } else {
-                    warn!(
-                        "Skipping stream index line {} in {} due to invalid JSON: {}",
-                        line_number,
-                        path.display(),
-                        error
-                    );
-                }
-            }
-        }
+        entries.push(entry);
     }
-
     Ok(entries)
 }
 
