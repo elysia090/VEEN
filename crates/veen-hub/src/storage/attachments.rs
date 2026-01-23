@@ -58,25 +58,23 @@ pub async fn rewrite_all_refcounts(
     counts: &HashMap<String, u64>,
 ) -> Result<()> {
     let refs_dir = storage.attachment_refs_dir();
+    if fs::try_exists(&refs_dir)
+        .await
+        .with_context(|| format!("checking attachment ref index {}", refs_dir.display()))?
+    {
+        fs::remove_dir_all(&refs_dir).await.with_context(|| {
+            format!(
+                "removing attachment ref index directory {}",
+                refs_dir.display()
+            )
+        })?;
+    }
     fs::create_dir_all(&refs_dir).await.with_context(|| {
         format!(
             "ensuring attachment ref index directory {}",
             refs_dir.display()
         )
     })?;
-
-    let mut entries = fs::read_dir(&refs_dir)
-        .await
-        .with_context(|| format!("listing attachment ref index {}", refs_dir.display()))?;
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .context("reading attachment ref index entry")?
-    {
-        fs::remove_file(entry.path())
-            .await
-            .with_context(|| format!("clearing attachment ref entry {}", entry.path().display()))?;
-    }
 
     for (digest, count) in counts {
         if *count == 0 {

@@ -153,10 +153,16 @@ pub async fn load_stream_index_range(
         return Ok(Vec::new());
     };
 
-    let mut entries = Vec::new();
+    let expected = (to - from).saturating_add(1);
+    let mut entries = Vec::with_capacity(expected as usize);
     while let Some(entry) = reader.next_entry().await? {
-        if entry.seq < from || entry.seq > to {
+        if entry.seq < from {
             continue;
+        }
+        if entry.seq > to {
+            // Stream indexes are append-only in sequence order, so we can stop early once
+            // we pass the requested upper bound.
+            break;
         }
         entries.push(entry);
     }

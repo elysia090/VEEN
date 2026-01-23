@@ -2633,27 +2633,49 @@ fn collect_recent_dedup_entries(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let mut entries: Vec<(u64, u64, DedupKey)> = Vec::new();
+
+    #[derive(Eq, PartialEq)]
+    struct DedupCandidate {
+        ts: u64,
+        seq: u64,
+        key: DedupKey,
+    }
+
+    impl Ord for DedupCandidate {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            (self.ts, self.seq).cmp(&(other.ts, other.seq))
+        }
+    }
+
+    impl PartialOrd for DedupCandidate {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    let mut heap = std::collections::BinaryHeap::with_capacity(limit.saturating_add(1));
 
     for runtime in streams.values() {
         let len = runtime.state.messages.len();
         let start = len.saturating_sub(limit);
         for message in runtime.state.messages.iter().skip(start) {
             let leaf = leaf_hash_for(message)?;
-            entries.push((
-                message.sent_at,
-                message.seq,
-                DedupKey::new(message.stream.clone(), leaf),
-            ));
+            let candidate = DedupCandidate {
+                ts: message.sent_at,
+                seq: message.seq,
+                key: DedupKey::new(message.stream.clone(), leaf),
+            };
+            heap.push(std::cmp::Reverse(candidate));
+            if heap.len() > limit {
+                heap.pop();
+            }
         }
     }
 
-    entries.sort_by_key(|(ts, seq, _)| (*ts, *seq));
-    if entries.len() > limit {
-        entries.drain(0..entries.len().saturating_sub(limit));
-    }
-
-    Ok(entries.into_iter().map(|(_, _, key)| key).collect())
+    let mut entries: Vec<DedupCandidate> =
+        heap.into_iter().map(|entry| entry.0).collect();
+    entries.sort_by_key(|entry| (entry.ts, entry.seq));
+    Ok(entries.into_iter().map(|entry| entry.key).collect())
 }
 
 async fn load_recent_dedup_cache(
