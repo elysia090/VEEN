@@ -8,7 +8,7 @@ use crate::{
     label::Label,
     profile::ProfileId,
     wire::{
-        cbor::{seq_next_required, seq_no_trailing},
+        cbor::{seq_next_required, seq_no_trailing, serialize_fixed_seq},
         derivation::{hash_tagged, TAG_NONCE, TAG_SIG},
         types::{
             truncate_nonce, AuthRef, ClientId, CtHash, LeafHash, Signature64, SignatureVerifyError,
@@ -18,7 +18,7 @@ use crate::{
     },
 };
 
-use super::signing::{serialize_signable, tagged_hash};
+use super::signing::WireSignable;
 
 /// Wire format version for `MSG` objects.
 pub const MSG_VERSION: u64 = 1;
@@ -50,7 +50,7 @@ pub enum MsgVerifyError {
 }
 
 #[derive(Debug)]
-struct MsgSignable<'a> {
+pub(crate) struct MsgSignable<'a> {
     ver: u64,
     profile_id: &'a ProfileId,
     label: &'a Label,
@@ -83,17 +83,18 @@ impl Serialize for MsgSignable<'_> {
     where
         S: Serializer,
     {
-        let mut seq = serializer.serialize_seq(Some(9))?;
-        seq.serialize_element(&self.ver)?;
-        seq.serialize_element(&self.profile_id)?;
-        seq.serialize_element(&self.label)?;
-        seq.serialize_element(&self.client_id)?;
-        seq.serialize_element(&self.client_seq)?;
-        seq.serialize_element(&self.prev_ack)?;
-        seq.serialize_element(&self.auth_ref)?;
-        seq.serialize_element(&self.ct_hash)?;
-        seq.serialize_element(self.ciphertext)?;
-        seq.end()
+        serialize_fixed_seq(serializer, 9, |seq| {
+            seq.serialize_element(&self.ver)?;
+            seq.serialize_element(&self.profile_id)?;
+            seq.serialize_element(&self.label)?;
+            seq.serialize_element(&self.client_id)?;
+            seq.serialize_element(&self.client_seq)?;
+            seq.serialize_element(&self.prev_ack)?;
+            seq.serialize_element(&self.auth_ref)?;
+            seq.serialize_element(&self.ct_hash)?;
+            seq.serialize_element(self.ciphertext)?;
+            Ok(())
+        })
     }
 }
 
@@ -102,18 +103,19 @@ impl Serialize for Msg {
     where
         S: Serializer,
     {
-        let mut seq = serializer.serialize_seq(Some(10))?;
-        seq.serialize_element(&self.ver)?;
-        seq.serialize_element(&self.profile_id)?;
-        seq.serialize_element(&self.label)?;
-        seq.serialize_element(&self.client_id)?;
-        seq.serialize_element(&self.client_seq)?;
-        seq.serialize_element(&self.prev_ack)?;
-        seq.serialize_element(&self.auth_ref.as_ref())?;
-        seq.serialize_element(&self.ct_hash)?;
-        seq.serialize_element(&Bytes::new(&self.ciphertext))?;
-        seq.serialize_element(&self.sig)?;
-        seq.end()
+        serialize_fixed_seq(serializer, 10, |seq| {
+            seq.serialize_element(&self.ver)?;
+            seq.serialize_element(&self.profile_id)?;
+            seq.serialize_element(&self.label)?;
+            seq.serialize_element(&self.client_id)?;
+            seq.serialize_element(&self.client_seq)?;
+            seq.serialize_element(&self.prev_ack)?;
+            seq.serialize_element(&self.auth_ref.as_ref())?;
+            seq.serialize_element(&self.ct_hash)?;
+            seq.serialize_element(&Bytes::new(&self.ciphertext))?;
+            seq.serialize_element(&self.sig)?;
+            Ok(())
+        })
     }
 }
 
@@ -164,6 +166,14 @@ impl<'de> Deserialize<'de> for Msg {
         D: Deserializer<'de>,
     {
         deserializer.deserialize_seq(MsgVisitor)
+    }
+}
+
+impl WireSignable for Msg {
+    type Signable<'a> = MsgSignable<'a>;
+
+    fn signable(&self) -> Self::Signable<'_> {
+        MsgSignable::from(self)
     }
 }
 
@@ -234,13 +244,13 @@ impl Msg {
     /// Serializes the message without the signature field using the canonical
     /// deterministic CBOR ordering required by spec-1.
     pub fn signing_bytes(&self) -> Result<Vec<u8>, CborError> {
-        serialize_signable(&MsgSignable::from(self))
+        WireSignable::signing_bytes(self)
     }
 
     /// Computes the domain separated hash `Ht("veen/sig", …)` used for
     /// Ed25519 signatures over `MSG` objects.
     pub fn signing_tagged_hash(&self) -> Result<[u8; 32], CborError> {
-        tagged_hash(TAG_SIG, &MsgSignable::from(self))
+        WireSignable::signing_tagged_hash(self, TAG_SIG)
     }
 
     /// Verifies `MSG.sig` using the embedded `client_id` and signing digest.
