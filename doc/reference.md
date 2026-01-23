@@ -8,6 +8,17 @@ context.
 - **Do not** treat this document as normative or update it to define spec behavior.
 - If any text here conflicts with [`doc/spec.md`](spec.md), the SSOT **always** takes precedence.
 
+**SSOT alignment quick links (for readers who spot conflicts)**
+- Deterministic CBOR + optional field encoding → [`doc/spec.md` §3.1, §4.1, §4.4](spec.md).
+- Performance contract and output costs → [`doc/spec.md` §3.4](spec.md).
+- Hub time base, TTL, and admission-only fields → [`doc/spec.md` §3.2, §4.5, §6](spec.md).
+- Revocation enforcement scope in v0.0.1 → [`doc/spec.md` §6, §7, §8.1](spec.md).
+- MMR peak ordering and root computation → [`doc/spec.md` §5.1–§5.3](spec.md).
+
+**Reading guide**
+- The words MUST/SHOULD/MAY in this file are historical quotes; they do **not** carry normative force.
+- Treat this document as background and context only. Implementation decisions belong in `doc/spec.md`.
+
 ## Document structure (legacy)
 
 This legacy document is reorganized into clear layers so that historical protocol rules, overlay schemas, and

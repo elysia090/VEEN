@@ -61,8 +61,9 @@ It targets the **intermediate space between CRUD, KV, and Queue**, while being *
 ### 3.1 Deterministic CBOR
 - Fixed field order as defined here.
 - Minimal-length integers.
-- Definite-length arrays and byte strings only.
+- Definite-length arrays, maps, and byte strings only.
 - No tags, no floats.
+- CBOR simple value `null` is allowed **only** as the sentinel for an explicitly optional field.
 - Unknown keys are rejected for all CBOR maps defined in this spec.
 - Wire objects are encoded as **CBOR arrays** unless explicitly defined as maps.
 - Any CBOR map in this spec uses **unsigned integer keys** with ascending key order.
@@ -99,7 +100,7 @@ Allowed values for v0.0.1:
 - `hpke_suite`: `"X25519-HKDF-SHA256-CHACHA20POLY1305"`
 - `mmr_hash`: `"sha256"`
 
-`epoch_sec` is an unsigned integer. Define `epoch = floor(unix_time_sec / epoch_sec)` if `epoch_sec > 0`, otherwise `epoch = 0`.
+`epoch_sec` is an unsigned integer. Define `epoch = floor(unix_time_sec / epoch_sec)` if `epoch_sec > 0`, otherwise `epoch = 0`. For admission and label validity, the hub MUST use its assigned `hub_ts` as `unix_time_sec`.
 
 `pad_block` is an unsigned integer encoded in the profile; there is no implicit default.
 
@@ -111,7 +112,8 @@ Allowed values for v0.0.1:
 - CBOR maps are encoded in key order (ascending by integer key).
 
 ### 3.4 Performance contract (normative)
-Every external API/CLI operation MUST be **O(1)** or **O(polylog n)**. Any linear scan or sequential replay on a hot path is non-compliant.
+Every external API/CLI operation MUST be **O(1)** or **O(polylog n)** in **positioning, lookup, and verification**. Any linear scan or sequential replay on a hot path is non-compliant.
+Returned output is necessarily **O(k)** in the number of records or bytes emitted and is excluded from the positioning/lookup bound.
 
 Required structures:
 - Per-label head index
@@ -144,7 +146,7 @@ Implementations MUST employ the following algorithmic and storage strategies to 
 - Keep a **manifest tree** keyed by `(label, epoch, seq_range)` to verify completeness without reading segments.
 
 **Determinism + bounds:**
-- All caches MUST be **size-bounded and deterministic**; eviction is LRU with fixed caps, and miss behavior is still within polylog bounds.
+- All caches MUST be **size-bounded and deterministic** with a canonical access order; the eviction policy MUST NOT alter externally observable results or complexity bounds. LRU with fixed caps is acceptable under a deterministic access order.
 - Any probabilistic structure (e.g., Bloom filters) MUST be **supplemental only** and never the sole correctness path.
 
 ### 3.5 Deterministic limits and sizing
@@ -177,6 +179,8 @@ CBOR array with fixed field order:
 8. `ct_hash` (bstr32)
 9. `ciphertext` (bstr)
 10. `sig` (bstr64) = `Sig(client_id, Ht("veen/sig", CBOR(MSG without sig)))`
+
+`auth_ref` is optional but appears mid-array; when absent it MUST be encoded as `null`.
 
 ### 4.2 Ciphertext construction (normative)
 1. `enc, ctx = HPKE.SealSetup(pkR)` (enc is 32 bytes).
@@ -219,9 +223,11 @@ CBOR array with fixed field order:
 7. `hub_sig` (bstr64)
 8. `witness_sigs` ([bstr64], optional)
 
+`witness_sigs` is a trailing optional field. If absent, the CBOR array MUST be length 7 (trailing trim). `null` is not permitted for `witness_sigs`.
+
 CHECKPOINTs MUST:
 - Encode the log prefix up to `upto_seq` for `label_curr`.
-- Allow deterministic reconstruction of MMR peaks and index cursors.
+- Allow deterministic reconstruction of MMR peaks and index cursors using the data directory’s peak snapshots and chunk summaries (CHECKPOINTs do not carry peaks).
 - Be reproducible from the same log prefix and configuration.
 
 ### 4.5 Payload header (encrypted)
@@ -234,6 +240,7 @@ CBOR(payload_hdr) map with integer keys:
 
 The hub never sees payload_hdr in plaintext.
 Unknown keys are rejected. `schema` is required.
+`expires_at` is overlay-only and MUST NOT affect hub admission.
 
 ### 4.6 Attachments
 - Attachment `i` uses `k_att = HPKE.Export(ctx, "veen/att-k" || u64be(i), 32)`.
@@ -256,6 +263,7 @@ Unknown keys are rejected. `schema` is required.
 ### 5.1 MMR update (per label)
 - Append `leaf_hash` in stream order, update peaks.
 - `mmr_root` is either the single peak or `Ht("veen/mmr-root", concat(peaks))`.
+- `peaks` is an array of 32-byte hashes ordered by increasing height (left-to-right within the same height). `concat(peaks)` is the raw 32-byte concatenation in that order.
 
 ### 5.2 Inclusion proof
 `mmr_proof` is a deterministic CBOR object containing the path and peaks.
@@ -303,9 +311,10 @@ Rules:
 - `allow.stream_ids` MUST be non-empty.
 - `auth_ref = Ht("veen/cap", CBOR(cap_token))`.
 - `MSG.auth_ref` MUST equal `payload_hdr.cap_ref` if `cap_ref` is present (enforced by clients/overlays; hubs do not inspect encrypted payloads).
-- Hubs MUST verify all signatures in `sig_chain` and enforce TTL and rate limits.
+- `sig_chain` is ordered; each link is an Ed25519 signature over `Ht("veen/cap-link", CBOR(cap_token without sig_chain) || prev_sig)` where `prev_sig` is 64 zero bytes for the first link and the prior signature for subsequent links.
+- Hubs MUST verify all signatures in `sig_chain` and enforce TTL and rate limits. TTL evaluation uses `hub_ts` at admission time; the hub MUST bind a stable `issued_at` to each `auth_ref` on first successful admission (or `/authorize`) and enforce `hub_ts <= issued_at + ttl` for the lifetime of the admission record.
 - If a deployment cannot map `label -> stream_id`, it MUST document that hub-side stream scoping is disabled; clients MUST enforce scoping after decrypt.
-- CapToken revocation MUST be modeled as an overlay stream; hubs enforce revocation by querying the indexed revocation summary only (no scans).
+- CapToken revocation MUST be modeled as an overlay stream and is enforced by clients/overlays in v0.0.1 (hubs do not enforce revocation).
 - Unknown keys are rejected in `cap_token`, `allow`, and `rate`.
 
 ---
@@ -319,7 +328,7 @@ For any accepted (MSG, RECEIPT) pair:
 - **I4:** `profile_id` is supported.
 - **I5:** If `att_root` exists, it matches the ordered attachment Merkle root.
 - **I6:** `prev_ack <=` last observed stream_seq for the label at admission.
-- **I7:** Capability constraints (TTL, rate, revocation) are satisfied.
+- **I7:** Capability constraints (TTL, rate) are satisfied.
 - **I8:** `(label, client_id, client_seq)` is unique across accepted MSG.
 - **I9:** For each `(label, client_id)`, `client_seq` increases by exactly 1.
 - **I10:** Deterministic CBOR rules are enforced.
@@ -336,7 +345,7 @@ Any violation MUST be rejected with a deterministic error code.
 ### 8.1 Admission pipeline (strict order)
 1. **Prefilter:** size caps, optional stateless rejection (rate/PoW).
 2. **Structural checks:** CBOR determinism, field sizes, ver/profile_id.
-3. **Auth checks:** `MSG.sig`, CapToken validation, TTL/rate/revocation.
+3. **Auth checks:** `MSG.sig`, CapToken validation, TTL/rate.
 4. **Commit:** append to MMR, issue RECEIPT, persist log entries.
 
 ### 8.2 Errors
@@ -361,7 +370,7 @@ Return deterministic error codes:
 
 ## 10. Data plane API (minimal and strict)
 
-The data plane is intentionally minimal and deterministic. All endpoints MUST satisfy the O(1)/polylog requirement.
+The data plane is intentionally minimal and deterministic. All endpoints MUST satisfy the positioning/lookup O(1)/polylog requirement, with output cost proportional to returned data.
 
 ### 10.1 Required operations
 - **submit**: accept MSG, return RECEIPT or deterministic error.
