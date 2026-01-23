@@ -22,6 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::fs::OpenOptions;
 use tokio::sync::{Mutex, RwLock, RwLockWriteGuard};
+use tracing::Instrument;
 
 use veen_core::hub::HubId;
 use veen_core::meta::SchemaRegistry;
@@ -395,103 +396,158 @@ impl HubPipeline {
             pow_cookie,
         } = request;
 
-        if let Some(required) = self.admission.pow_difficulty {
-            match pow_cookie {
-                Some(cookie) => {
-                    if cookie.difficulty < required {
-                        return Err(anyhow::Error::new(
-                            CapabilityError::ProofOfWorkInsufficient {
+        let (
+            stream_id,
+            payload_json,
+            prepared_attachments,
+            stored_attachments,
+            submitted_at,
+            submitted_at_ms,
+            client_target,
+            auth_target,
+        ) = {
+            let _validation_span = tracing::info_span!("hub_submit.validation_parsing").entered();
+
+            if let Some(required) = self.admission.pow_difficulty {
+                match pow_cookie {
+                    Some(cookie) => {
+                        if cookie.difficulty < required {
+                            return Err(anyhow::Error::new(
+                                CapabilityError::ProofOfWorkInsufficient {
+                                    required,
+                                    provided: cookie.difficulty,
+                                },
+                            ));
+                        }
+                        let decoded = cookie.into_pow_cookie();
+                        if !decoded.meets_difficulty() {
+                            return Err(anyhow::Error::new(CapabilityError::ProofOfWorkInvalid {
                                 required,
-                                provided: cookie.difficulty,
-                            },
-                        ));
+                            }));
+                        }
                     }
-                    let decoded = cookie.into_pow_cookie();
-                    if !decoded.meets_difficulty() {
-                        return Err(anyhow::Error::new(CapabilityError::ProofOfWorkInvalid {
-                            required,
+                    None => {
+                        return Err(anyhow::Error::new(CapabilityError::ProofOfWorkRequired {
+                            difficulty: required,
                         }));
                     }
                 }
-                None => {
-                    return Err(anyhow::Error::new(CapabilityError::ProofOfWorkRequired {
-                        difficulty: required,
-                    }));
-                }
             }
-        }
 
-        let stream_id = cap_stream_id_from_label(&stream).map_err(|err| {
-            anyhow::Error::new(CapabilityError::StreamInvalid {
-                stream: stream.clone(),
-                source: err,
-            })
-        })?;
+            let stream_id = cap_stream_id_from_label(&stream).map_err(|err| {
+                anyhow::Error::new(CapabilityError::StreamInvalid {
+                    stream: stream.clone(),
+                    source: err,
+                })
+            })?;
 
-        let attachments = attachments.unwrap_or_default();
-        if attachments.len() > MAX_ATTACHMENTS_PER_MSG {
-            return Err(anyhow::Error::new(
-                CapabilityError::AttachmentCountExceeded {
-                    count: attachments.len(),
-                    limit: MAX_ATTACHMENTS_PER_MSG,
-                },
-            ));
-        }
+            let attachments = attachments.unwrap_or_default();
+            if attachments.len() > MAX_ATTACHMENTS_PER_MSG {
+                return Err(anyhow::Error::new(
+                    CapabilityError::AttachmentCountExceeded {
+                        count: attachments.len(),
+                        limit: MAX_ATTACHMENTS_PER_MSG,
+                    },
+                ));
+            }
 
-        let payload_json =
-            serde_json::to_string(&payload).context("serialising submit payload to JSON")?;
-        if payload_json.len() > MAX_BODY_BYTES {
-            return Err(anyhow::Error::new(CapabilityError::MessageBodyTooLarge {
-                body_bytes: payload_json.len(),
-                limit: MAX_BODY_BYTES,
-            }));
-        }
-        let prepared_attachments = prepare_attachments_for_storage(
-            &self.storage,
-            &stream,
-            &attachments,
-            payload_json.len(),
-        )?;
-        let stored_attachments = prepared_attachments.stored;
-        let prepared_attachments = prepared_attachments.prepared;
-        let submitted_at = current_unix_timestamp()?;
-        let submitted_at_ms = current_unix_timestamp_millis()?;
-        let client_id_value = ClientId::from_str(&client_id)
-            .with_context(|| format!("parsing client_id {client_id} as hex-encoded identifier"))?;
-        let client_target = RevocationTarget::from_slice(client_id_value.as_ref())
-            .context("constructing client revocation target")?;
-        let parsed_auth_ref = if let Some(ref auth_hex) = auth_ref {
-            Some(AuthRef::from_str(auth_hex).with_context(|| {
-                format!("parsing auth_ref {auth_hex} as hex-encoded identifier")
-            })?)
-        } else {
-            None
-        };
-        let auth_target = parsed_auth_ref
-            .as_ref()
-            .map(|value| RevocationTarget::from_slice(value.as_ref()))
-            .transpose()
-            .context("constructing auth_ref revocation target")?;
-
-        let mut guard = self.inner.write().await;
-        let mut capability_store_dirty = false;
-
-        let authority = guard
-            .authority_view
-            .label_authority_for_stream(stream_id, submitted_at);
-        if !authority.allows_hub(self.identity.hub_id) {
-            let policy_str = match authority.policy {
-                LabelPolicy::SinglePrimary => "single-primary",
-                LabelPolicy::MultiPrimary => "multi-primary",
-                LabelPolicy::Unspecified => "unspecified",
+            let payload_json =
+                serde_json::to_string(&payload).context("serialising submit payload to JSON")?;
+            if payload_json.len() > MAX_BODY_BYTES {
+                return Err(anyhow::Error::new(CapabilityError::MessageBodyTooLarge {
+                    body_bytes: payload_json.len(),
+                    limit: MAX_BODY_BYTES,
+                }));
+            }
+            let prepared_attachments = prepare_attachments_for_storage(
+                &self.storage,
+                &stream,
+                &attachments,
+                payload_json.len(),
+            )?;
+            let stored_attachments = prepared_attachments.stored;
+            let prepared_attachments = prepared_attachments.prepared;
+            let submitted_at = current_unix_timestamp()?;
+            let submitted_at_ms = current_unix_timestamp_millis()?;
+            let client_id_value = ClientId::from_str(&client_id).with_context(|| {
+                format!("parsing client_id {client_id} as hex-encoded identifier")
+            })?;
+            let client_target = RevocationTarget::from_slice(client_id_value.as_ref())
+                .context("constructing client revocation target")?;
+            let auth_target = if let Some(ref auth_hex) = auth_ref {
+                let parsed = AuthRef::from_str(auth_hex).with_context(|| {
+                    format!("parsing auth_ref {auth_hex} as hex-encoded identifier")
+                })?;
+                Some(
+                    RevocationTarget::from_slice(parsed.as_ref())
+                        .context("constructing auth_ref revocation target")?,
+                )
+            } else {
+                None
             };
 
-            let detail = match authority.policy {
-                LabelPolicy::SinglePrimary => authority
-                    .primary_hub
-                    .map(|primary| format!("; expected primary {}", hex::encode(primary.as_ref())))
-                    .unwrap_or_default(),
-                LabelPolicy::MultiPrimary => {
+            (
+                stream_id,
+                payload_json,
+                prepared_attachments,
+                stored_attachments,
+                submitted_at,
+                submitted_at_ms,
+                client_target,
+                auth_target,
+            )
+        };
+
+        let (mut guard, mut capability_store_dirty, usage_update) = async {
+            {
+                let guard = self.inner.read().await;
+                let authority = guard
+                    .authority_view
+                    .label_authority_for_stream(stream_id, submitted_at);
+                if !authority.allows_hub(self.identity.hub_id) {
+                    let policy_str = match authority.policy {
+                        LabelPolicy::SinglePrimary => "single-primary",
+                        LabelPolicy::MultiPrimary => "multi-primary",
+                        LabelPolicy::Unspecified => "unspecified",
+                    };
+
+                    let detail = match authority.policy {
+                        LabelPolicy::SinglePrimary => authority
+                            .primary_hub
+                            .map(|primary| {
+                                format!("; expected primary {}", hex::encode(primary.as_ref()))
+                            })
+                            .unwrap_or_default(),
+                        LabelPolicy::MultiPrimary => {
+                            let mut allowed = Vec::new();
+                            if let Some(primary) = authority.primary_hub {
+                                allowed.push(hex::encode(primary.as_ref()));
+                            }
+                            allowed.extend(
+                                authority
+                                    .replica_hubs
+                                    .iter()
+                                    .map(|hub| hex::encode(hub.as_ref())),
+                            );
+                            if allowed.is_empty() {
+                                String::new()
+                            } else {
+                                format!("; allowed hubs {}", allowed.join(","))
+                            }
+                        }
+                        LabelPolicy::Unspecified => String::new(),
+                    };
+
+                    return Err(anyhow::Error::new(
+                        CapabilityError::NotAuthorisedForStream {
+                            stream: stream.clone(),
+                            policy: policy_str,
+                            detail,
+                        },
+                    ));
+                }
+
+                if matches!(authority.policy, LabelPolicy::MultiPrimary) {
                     let mut allowed = Vec::new();
                     if let Some(primary) = authority.primary_hub {
                         allowed.push(hex::encode(primary.as_ref()));
@@ -502,122 +558,106 @@ impl HubPipeline {
                             .iter()
                             .map(|hub| hex::encode(hub.as_ref())),
                     );
-                    if allowed.is_empty() {
-                        String::new()
-                    } else {
-                        format!("; allowed hubs {}", allowed.join(","))
+                    tracing::debug!(
+                        stream = %stream,
+                        allowed_hubs = %allowed.join(","),
+                        "accepting multi-primary stream"
+                    );
+                }
+
+                if guard
+                    .revocations
+                    .is_revoked(RevocationKind::ClientId, client_target, submitted_at)
+                {
+                    return Err(anyhow::Error::new(CapabilityError::ClientIdRevoked {
+                        client_id: client_id.clone(),
+                    }));
+                }
+
+                if let (Some(auth_hex), Some(target)) = (auth_ref.as_ref(), auth_target) {
+                    if guard
+                        .revocations
+                        .is_revoked(RevocationKind::AuthRef, target, submitted_at)
+                    {
+                        return Err(anyhow::Error::new(CapabilityError::AuthRefRevoked {
+                            auth_ref: auth_hex.clone(),
+                        }));
                     }
                 }
-                LabelPolicy::Unspecified => String::new(),
-            };
-
-            return Err(anyhow::Error::new(
-                CapabilityError::NotAuthorisedForStream {
-                    stream: stream.clone(),
-                    policy: policy_str,
-                    detail,
-                },
-            ));
-        }
-
-        if matches!(authority.policy, LabelPolicy::MultiPrimary) {
-            let mut allowed = Vec::new();
-            if let Some(primary) = authority.primary_hub {
-                allowed.push(hex::encode(primary.as_ref()));
             }
-            allowed.extend(
-                authority
-                    .replica_hubs
-                    .iter()
-                    .map(|hub| hex::encode(hub.as_ref())),
-            );
-            tracing::debug!(stream = %stream, allowed_hubs = %allowed.join(","), "accepting multi-primary stream");
-        }
 
-        if guard
-            .revocations
-            .is_revoked(RevocationKind::ClientId, client_target, submitted_at)
-        {
-            return Err(anyhow::Error::new(CapabilityError::ClientIdRevoked {
-                client_id: client_id.clone(),
-            }));
-        }
+            let mut guard = self.inner.write().await;
+            let mut capability_store_dirty = false;
 
-        if let (Some(auth_hex), Some(target)) = (auth_ref.as_ref(), auth_target) {
-            if guard
-                .revocations
-                .is_revoked(RevocationKind::AuthRef, target, submitted_at)
-            {
-                return Err(anyhow::Error::new(CapabilityError::AuthRefRevoked {
-                    auth_ref: auth_hex.clone(),
-                }));
-            }
-        }
-
-        let token_revocation = if let Some(auth_hex) = auth_ref.as_ref() {
-            if let Some(record) = guard.capabilities.records.get(auth_hex) {
-                if let Some(hash) = record.token_hash.as_ref() {
-                    Some((hash.clone(), revocation_target_from_hex_str(hash)?))
+            let token_revocation = if let Some(auth_hex) = auth_ref.as_ref() {
+                if let Some(record) = guard.capabilities.records.get(auth_hex) {
+                    if let Some(hash) = record.token_hash.as_ref() {
+                        Some((hash.clone(), revocation_target_from_hex_str(hash)?))
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
 
-        if let Some(cap) = auth_ref.as_ref() {
-            let capability_dirty = match enforce_capability(
+            if let Some(cap) = auth_ref.as_ref() {
+                let capability_dirty = match enforce_capability(
+                    &mut guard.capabilities,
+                    cap,
+                    &client_id,
+                    &stream,
+                    submitted_at,
+                    submitted_at_ms,
+                ) {
+                    Ok(dirty) => dirty,
+                    Err(err) => {
+                        return self.capability_err(guard, err).await;
+                    }
+                };
+                capability_store_dirty |= capability_dirty;
+            } else if self.admission.capability_gating_enabled {
+                return self
+                    .capability_err(
+                        guard,
+                        CapabilityError::Unauthorized {
+                            auth_ref: "missing".to_string(),
+                        },
+                    )
+                    .await;
+            }
+
+            if let Some((token_hash, target)) = token_revocation {
+                if guard
+                    .revocations
+                    .is_revoked(RevocationKind::CapToken, target, submitted_at)
+                {
+                    return self
+                        .capability_err(guard, CapabilityError::CapTokenRevoked { token_hash })
+                        .await;
+                }
+            }
+
+            let (usage_update, usage_dirty) = match check_client_usage(
                 &mut guard.capabilities,
-                cap,
+                &self.admission,
                 &client_id,
                 &stream,
                 submitted_at,
-                submitted_at_ms,
             ) {
-                Ok(dirty) => dirty,
+                Ok(result) => result,
                 Err(err) => {
                     return self.capability_err(guard, err).await;
                 }
             };
-            capability_store_dirty |= capability_dirty;
-        } else if self.admission.capability_gating_enabled {
-            return self
-                .capability_err(
-                    guard,
-                    CapabilityError::Unauthorized {
-                        auth_ref: "missing".to_string(),
-                    },
-                )
-                .await;
-        }
+            capability_store_dirty |= usage_dirty;
 
-        if let Some((token_hash, target)) = token_revocation {
-            if guard
-                .revocations
-                .is_revoked(RevocationKind::CapToken, target, submitted_at)
-            {
-                return self
-                    .capability_err(guard, CapabilityError::CapTokenRevoked { token_hash })
-                    .await;
-            }
+            Ok((guard, capability_store_dirty, usage_update))
         }
-
-        let (usage_update, usage_dirty) = match check_client_usage(
-            &mut guard.capabilities,
-            &self.admission,
-            &client_id,
-            &stream,
-            submitted_at,
-        ) {
-            Ok(result) => result,
-            Err(err) => {
-                return self.capability_err(guard, err).await;
-            }
-        };
-        capability_store_dirty |= usage_dirty;
+        .instrument(tracing::info_span!("hub_submit.capability_checks"))
+        .await?;
         let stream_runtime = guard
             .streams
             .entry(stream.clone())
@@ -645,28 +685,33 @@ impl HubPipeline {
             idem,
         };
 
-        let leaf = leaf_hash_for(&stored_message)?;
-        let leaf_hex = hex::encode(leaf.as_bytes());
-        let mut confirmed_duplicate = false;
-        let dedup_result = {
-            let mut dedup = self.dedup.lock().await;
-            dedup.check_and_insert(&stream, &leaf)
-        };
-        match dedup_result {
-            DedupCheck::RecentDuplicate => {
-                confirmed_duplicate = true;
-            }
-            DedupCheck::BloomHit => {
-                confirmed_duplicate = leaf_hash_exists(stream_runtime, &leaf)?;
+        let (leaf, leaf_hex, confirmed_duplicate) = async {
+            let leaf = leaf_hash_for(&stored_message)?;
+            let leaf_hex = hex::encode(leaf.as_bytes());
+            let mut confirmed_duplicate = false;
+            let dedup_result = {
                 let mut dedup = self.dedup.lock().await;
-                if confirmed_duplicate {
-                    dedup.confirm_duplicate(&stream, &leaf);
-                } else {
-                    dedup.confirm_unique(&stream, &leaf);
+                dedup.check_and_insert(&stream, &leaf)
+            };
+            match dedup_result {
+                DedupCheck::RecentDuplicate => {
+                    confirmed_duplicate = true;
                 }
+                DedupCheck::BloomHit => {
+                    confirmed_duplicate = leaf_hash_exists(stream_runtime, &leaf)?;
+                    let mut dedup = self.dedup.lock().await;
+                    if confirmed_duplicate {
+                        dedup.confirm_duplicate(&stream, &leaf);
+                    } else {
+                        dedup.confirm_unique(&stream, &leaf);
+                    }
+                }
+                DedupCheck::New => {}
             }
-            DedupCheck::New => {}
+            Ok::<_, anyhow::Error>((leaf, leaf_hex, confirmed_duplicate))
         }
+        .instrument(tracing::info_span!("hub_submit.dedup_lookup"))
+        .await?;
         if confirmed_duplicate {
             tracing::warn!(
                 stream = %stream,
@@ -682,7 +727,10 @@ impl HubPipeline {
                 leaf_hash: leaf_hex,
             }));
         }
-        let (computed_seq, mmr_root, proof) = stream_runtime.mmr.append_with_proof(leaf);
+        let (computed_seq, mmr_root, proof) =
+            tracing::info_span!("hub_submit.mmr_append").in_scope(|| {
+                stream_runtime.mmr.append_with_proof(leaf)
+            });
         debug_assert_eq!(computed_seq, seq, "stream mmr seq must match message seq");
         stream_runtime.insert_message_with_leaf(stored_message.clone(), leaf);
         let mmr_root_hex = hex::encode(mmr_root.as_bytes());
@@ -720,27 +768,33 @@ impl HubPipeline {
         };
         drop(guard);
 
-        persist_attachments(
-            &self.storage,
-            &prepared_attachments,
-            &self.attachment_ref_counts,
-        )
+        async {
+            persist_attachments(
+                &self.storage,
+                &prepared_attachments,
+                &self.attachment_ref_counts,
+            )
+            .await?;
+            persist_stream_state(&self.storage, &stream, &stream_index_entry).await?;
+            persist_message_bundle(&self.storage, &stream, seq, &message_with_proof).await?;
+            append_receipt(&self.storage, &message_with_proof).await?;
+
+            if let Some(store) = capability_snapshot {
+                update_capability_store(&self.storage, &store).await?;
+            }
+
+            if let Err(err) = self
+                .persist_recent_dedup_cache()
+                .await
+                .context("persisting recent dedup cache")
+            {
+                tracing::warn!(error = ?err, "failed to persist recent dedup cache");
+            }
+
+            Ok::<_, anyhow::Error>(())
+        }
+        .instrument(tracing::info_span!("hub_submit.persistence"))
         .await?;
-        persist_stream_state(&self.storage, &stream, &stream_index_entry).await?;
-        persist_message_bundle(&self.storage, &stream, seq, &message_with_proof).await?;
-        append_receipt(&self.storage, &message_with_proof).await?;
-
-        if let Some(store) = capability_snapshot {
-            update_capability_store(&self.storage, &store).await?;
-        }
-
-        if let Err(err) = self
-            .persist_recent_dedup_cache()
-            .await
-            .context("persisting recent dedup cache")
-        {
-            tracing::warn!(error = ?err, "failed to persist recent dedup cache");
-        }
 
         self.observability.record_submit_ok();
 
