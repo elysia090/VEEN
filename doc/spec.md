@@ -110,6 +110,7 @@ Allowed values for v0.0.1:
 - `u64be(n)`/`u32be(n)` = unsigned big-endian encodings.
 - `Trunc_24(x)` = first 24 bytes of `x`.
 - CBOR maps are encoded in key order (ascending by integer key).
+- **Lexicographic byte order** compares byte strings by unsigned byte value from left to right; shorter prefixes sort before longer strings when all compared bytes are equal.
 
 ### 3.4 Performance contract (normative)
 Every external API/CLI operation MUST be **O(1)** or **O(polylog n)** in **positioning, lookup, and verification**. Any linear scan or sequential replay on a hot path is non-compliant.
@@ -242,6 +243,7 @@ CBOR(payload_hdr) map with integer keys:
 
 The hub never sees payload_hdr in plaintext.
 Unknown keys are rejected. `schema` is required.
+Optional fields are omitted when absent; `null` is not permitted in `payload_hdr`.
 `expires_at` is overlay-only and MUST NOT affect hub admission.
 
 ### 4.6 Attachments
@@ -271,16 +273,17 @@ Unknown keys are rejected. `schema` is required.
 - `peaks` is an array of 32-byte hashes ordered by increasing height (left-to-right within the same height). `concat(peaks)` is the raw 32-byte concatenation in that order.
 
 ### 5.2 Inclusion proof
-`mmr_proof` is a deterministic CBOR map with the following fixed keys:
+`mmr_proof` is a deterministic CBOR map with the following fixed keys (unsigned integer keys):
 ```
 {
-  ver: uint (MUST be 1),
-  leaf_hash: bstr32,
-  path: [ { dir: 0|1, sib: bstr32 }, ... ],
-  peaks_after: [ bstr32, ... ]
+  1: ver,         // uint (MUST be 1)
+  2: leaf_hash,   // bstr32
+  3: path,        // [ { 1: dir, 2: sib }, ... ]
+  4: peaks_after  // [ bstr32, ... ]
 }
 ```
-Keys are ordered exactly as listed for deterministic CBOR.
+All maps in `mmr_proof` (including elements of `path`) use unsigned integer keys ordered exactly as listed for deterministic CBOR.
+`path` entries are ordered from the leaf toward the peak (ascending height), and `dir` indicates whether `leaf_hash` was on the left (`0`) or right (`1`) at that step.
 Verification MUST reproduce the `mmr_root` recorded in a RECEIPT or CHECKPOINT.
 
 ### 5.3 Proof compactness (normative)
@@ -323,6 +326,8 @@ cap_token CBOR map with integer keys:
 Rules:
 - `ver` MUST be `1`.
 - `allow.stream_ids` MUST be non-empty.
+- `allow.stream_ids` MUST be sorted in ascending lexicographic byte order with no duplicates; hubs MUST reject unsorted or duplicate entries.
+- `allow.rate` is optional; if absent, key `3` MUST be omitted (null is not permitted).
 - `auth_ref = Ht("veen/cap", CBOR(cap_token))`.
 - `MSG.auth_ref` MUST equal `payload_hdr.cap_ref` if `cap_ref` is present (enforced by clients/overlays; hubs do not inspect encrypted payloads).
 - `sig_chain` is ordered; each link is an Ed25519 signature over `Ht("veen/cap-link", CBOR(cap_token without sig_chain) || prev_sig)` where `prev_sig` is 64 zero bytes for the first link and the prior signature for subsequent links.
@@ -361,7 +366,7 @@ Any violation MUST be rejected with a deterministic error code.
 ## 8. Hub behavior (normative)
 
 ### 8.1 Admission pipeline (strict order)
-1. **Prefilter:** size caps, optional stateless rejection (rate/PoW).
+1. **Prefilter:** size caps, optional stateless rejection (e.g., proof-of-work validation). Any optional prefilter MUST be deterministic and MUST NOT depend on mutable hub state beyond the request itself.
 2. **Structural checks:** CBOR determinism, field sizes, ver/profile_id.
 3. **Auth checks:** `MSG.sig`, CapToken validation, TTL/rate.
 4. **Commit:** append to MMR, issue RECEIPT, persist log entries.
