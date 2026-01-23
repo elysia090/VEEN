@@ -173,10 +173,7 @@ impl StreamRuntime {
         Self::proven_slice_from(back, from).to_vec()
     }
 
-    fn proven_slice_from(
-        slice: &[StreamMessageWithProof],
-        from: u64,
-    ) -> &[StreamMessageWithProof] {
+    fn proven_slice_from(slice: &[StreamMessageWithProof], from: u64) -> &[StreamMessageWithProof] {
         let start = slice.partition_point(|entry| entry.message.seq < from);
         &slice[start..]
     }
@@ -3805,7 +3802,10 @@ mod tests {
 
     #[test]
     fn retry_after_seconds_has_floor_of_one_second() {
-        let rate = CapTokenRate { burst: 1, per_sec: 1_000 };
+        let rate = CapTokenRate {
+            burst: 1,
+            per_sec: 1_000,
+        };
         let state = TokenBucketState {
             tokens: 0,
             last_refill: 10_000,

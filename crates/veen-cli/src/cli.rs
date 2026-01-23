@@ -9598,7 +9598,8 @@ async fn handle_audit_enforce_check(args: AuditEnforceCheckArgs) -> Result<()> {
                 streams_to_scan.insert(stream.clone());
             }
         }
-        recovery_index = Some(collect_recovery_execution_index(&streams_to_scan, &mut cache).await?);
+        recovery_index =
+            Some(collect_recovery_execution_index(&streams_to_scan, &mut cache).await?);
     }
     for rule in &rules {
         match rule {
