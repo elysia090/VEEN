@@ -167,7 +167,9 @@ impl StreamRuntime {
             .message
             .seq;
         if from <= front_last_seq {
-            let mut out = Self::proven_slice_from(front, from).to_vec();
+            let front_slice = Self::proven_slice_from(front, from);
+            let mut out = Vec::with_capacity(front_slice.len() + back.len());
+            out.extend_from_slice(front_slice);
             out.extend_from_slice(back);
             return out;
         }
@@ -1037,25 +1039,32 @@ impl HubPipeline {
         from: u64,
         with_proof: bool,
     ) -> Result<StreamResponse> {
-        let runtime = {
-            let guard = self.inner.read().await;
-            guard
-                .streams
-                .get(stream)
-                .cloned()
-                .ok_or_else(|| anyhow!("stream {stream} has no stored messages"))?
-        };
-
-        let state = &runtime.state;
-        let proven_messages = &runtime.proven_messages;
-
         if !with_proof {
-            let messages = runtime.messages_from(from);
+            let messages = {
+                let guard = self.inner.read().await;
+                let runtime = guard
+                    .streams
+                    .get(stream)
+                    .ok_or_else(|| anyhow!("stream {stream} has no stored messages"))?;
+                runtime.messages_from(from)
+            };
             return Ok(StreamResponse::Messages(messages));
         }
 
-        let window_start = proven_messages.front().map(|entry| entry.message.seq);
-        let last_seq = state.messages.last().map(|msg| msg.seq).unwrap_or(0);
+        let (window_start, last_seq, proven_tail) = {
+            let guard = self.inner.read().await;
+            let runtime = guard
+                .streams
+                .get(stream)
+                .ok_or_else(|| anyhow!("stream {stream} has no stored messages"))?;
+            let window_start = runtime
+                .proven_messages
+                .front()
+                .map(|entry| entry.message.seq);
+            let last_seq = runtime.state.messages.last().map(|msg| msg.seq).unwrap_or(0);
+            let proven_tail = runtime.proven_messages_from(from);
+            (window_start, last_seq, proven_tail)
+        };
         let mut proven = Vec::new();
         if let Some(window_start) = window_start {
             if from < window_start {
@@ -1066,7 +1075,7 @@ impl HubPipeline {
                     );
                 }
             }
-            proven.extend(runtime.proven_messages_from(from));
+            proven.extend(proven_tail);
         } else if from <= last_seq {
             proven.extend(load_proven_messages_range(&self.storage, stream, from, last_seq).await?);
         }
