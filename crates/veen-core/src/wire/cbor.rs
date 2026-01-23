@@ -1,6 +1,8 @@
 use std::fmt;
 
 use serde::de::{Error as DeError, SeqAccess, Visitor};
+use serde::ser::SerializeSeq;
+use serde::Serializer;
 
 pub(crate) struct SeqLenExpectation(pub(crate) &'static str);
 
@@ -37,4 +39,18 @@ where
         return Err(DeError::invalid_length(idx, &SeqLenExpectation(expecting)));
     }
     Ok(())
+}
+
+pub(crate) fn serialize_fixed_seq<S, F>(
+    serializer: S,
+    len: usize,
+    write: F,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+    F: FnOnce(&mut S::SerializeSeq) -> Result<(), S::Error>,
+{
+    let mut seq = serializer.serialize_seq(Some(len))?;
+    write(&mut seq)?;
+    seq.end()
 }

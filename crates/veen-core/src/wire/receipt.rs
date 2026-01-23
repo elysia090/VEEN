@@ -6,16 +6,13 @@ use thiserror::Error;
 use crate::{
     label::Label,
     wire::{
-        cbor::{seq_next_required, seq_no_trailing},
+        cbor::{seq_next_required, seq_no_trailing, serialize_fixed_seq},
         types::{LeafHash, MmrRoot, Signature64, SignatureVerifyError, HASH_LEN},
         CborError,
     },
 };
 
-use super::{
-    derivation::TAG_SIG,
-    signing::{serialize_signable, tagged_hash},
-};
+use super::{derivation::TAG_SIG, signing::WireSignable};
 
 /// Wire format version for `RECEIPT` objects.
 pub const RECEIPT_VERSION: u64 = 1;
@@ -44,7 +41,7 @@ pub enum ReceiptVerifyError {
 }
 
 #[derive(Debug)]
-struct ReceiptSignable<'a> {
+pub(crate) struct ReceiptSignable<'a> {
     ver: u64,
     label: &'a Label,
     stream_seq: u64,
@@ -71,15 +68,16 @@ impl Serialize for Receipt {
     where
         S: Serializer,
     {
-        let mut seq = serializer.serialize_seq(Some(7))?;
-        seq.serialize_element(&self.ver)?;
-        seq.serialize_element(&self.label)?;
-        seq.serialize_element(&self.stream_seq)?;
-        seq.serialize_element(&self.leaf_hash)?;
-        seq.serialize_element(&self.mmr_root)?;
-        seq.serialize_element(&self.hub_ts)?;
-        seq.serialize_element(&self.hub_sig)?;
-        seq.end()
+        serialize_fixed_seq(serializer, 7, |seq| {
+            seq.serialize_element(&self.ver)?;
+            seq.serialize_element(&self.label)?;
+            seq.serialize_element(&self.stream_seq)?;
+            seq.serialize_element(&self.leaf_hash)?;
+            seq.serialize_element(&self.mmr_root)?;
+            seq.serialize_element(&self.hub_ts)?;
+            seq.serialize_element(&self.hub_sig)?;
+            Ok(())
+        })
     }
 }
 
@@ -88,14 +86,15 @@ impl Serialize for ReceiptSignable<'_> {
     where
         S: Serializer,
     {
-        let mut seq = serializer.serialize_seq(Some(6))?;
-        seq.serialize_element(&self.ver)?;
-        seq.serialize_element(&self.label)?;
-        seq.serialize_element(&self.stream_seq)?;
-        seq.serialize_element(&self.leaf_hash)?;
-        seq.serialize_element(&self.mmr_root)?;
-        seq.serialize_element(&self.hub_ts)?;
-        seq.end()
+        serialize_fixed_seq(serializer, 6, |seq| {
+            seq.serialize_element(&self.ver)?;
+            seq.serialize_element(&self.label)?;
+            seq.serialize_element(&self.stream_seq)?;
+            seq.serialize_element(&self.leaf_hash)?;
+            seq.serialize_element(&self.mmr_root)?;
+            seq.serialize_element(&self.hub_ts)?;
+            Ok(())
+        })
     }
 }
 
@@ -143,6 +142,14 @@ impl<'de> Deserialize<'de> for Receipt {
     }
 }
 
+impl WireSignable for Receipt {
+    type Signable<'a> = ReceiptSignable<'a>;
+
+    fn signable(&self) -> Self::Signable<'_> {
+        ReceiptSignable::from(self)
+    }
+}
+
 impl Receipt {
     /// Returns `true` if the receipt declares the canonical wire version.
     #[must_use]
@@ -152,12 +159,12 @@ impl Receipt {
 
     /// Serializes the receipt without the hub signature using deterministic CBOR.
     pub fn signing_bytes(&self) -> Result<Vec<u8>, CborError> {
-        serialize_signable(&ReceiptSignable::from(self))
+        WireSignable::signing_bytes(self)
     }
 
     /// Computes the `Ht("veen/sig", …)` digest required by spec-1 for hub signatures.
     pub fn signing_tagged_hash(&self) -> Result<[u8; 32], CborError> {
-        tagged_hash(TAG_SIG, &ReceiptSignable::from(self))
+        WireSignable::signing_tagged_hash(self, TAG_SIG)
     }
 
     /// Verifies `hub_sig` using the provided hub Ed25519 public key bytes.

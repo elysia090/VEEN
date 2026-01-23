@@ -6,16 +6,13 @@ use thiserror::Error;
 use crate::{
     label::Label,
     wire::{
-        cbor::{seq_next_required, seq_no_trailing},
+        cbor::{seq_next_required, seq_no_trailing, serialize_fixed_seq},
         types::{MmrRoot, Signature64, SignatureVerifyError, HASH_LEN},
         CborError,
     },
 };
 
-use super::{
-    derivation::TAG_SIG,
-    signing::{serialize_signable, tagged_hash},
-};
+use super::{derivation::TAG_SIG, signing::WireSignable};
 
 /// Wire format version for `CHECKPOINT` objects.
 pub const CHECKPOINT_VERSION: u64 = 1;
@@ -45,7 +42,7 @@ pub enum CheckpointVerifyError {
 }
 
 #[derive(Debug)]
-struct CheckpointSignable<'a> {
+pub(crate) struct CheckpointSignable<'a> {
     ver: u64,
     label_prev: &'a Label,
     label_curr: &'a Label,
@@ -74,19 +71,20 @@ impl Serialize for Checkpoint {
     where
         S: Serializer,
     {
-        let mut seq =
-            serializer.serialize_seq(Some(if self.witness_sigs.is_some() { 8 } else { 7 }))?;
-        seq.serialize_element(&self.ver)?;
-        seq.serialize_element(&self.label_prev)?;
-        seq.serialize_element(&self.label_curr)?;
-        seq.serialize_element(&self.upto_seq)?;
-        seq.serialize_element(&self.mmr_root)?;
-        seq.serialize_element(&self.epoch)?;
-        seq.serialize_element(&self.hub_sig)?;
-        if let Some(witness_sigs) = &self.witness_sigs {
-            seq.serialize_element(witness_sigs)?;
-        }
-        seq.end()
+        let len = if self.witness_sigs.is_some() { 8 } else { 7 };
+        serialize_fixed_seq(serializer, len, |seq| {
+            seq.serialize_element(&self.ver)?;
+            seq.serialize_element(&self.label_prev)?;
+            seq.serialize_element(&self.label_curr)?;
+            seq.serialize_element(&self.upto_seq)?;
+            seq.serialize_element(&self.mmr_root)?;
+            seq.serialize_element(&self.epoch)?;
+            seq.serialize_element(&self.hub_sig)?;
+            if let Some(witness_sigs) = &self.witness_sigs {
+                seq.serialize_element(witness_sigs)?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -95,18 +93,19 @@ impl Serialize for CheckpointSignable<'_> {
     where
         S: Serializer,
     {
-        let mut seq =
-            serializer.serialize_seq(Some(if self.witness_sigs.is_some() { 7 } else { 6 }))?;
-        seq.serialize_element(&self.ver)?;
-        seq.serialize_element(&self.label_prev)?;
-        seq.serialize_element(&self.label_curr)?;
-        seq.serialize_element(&self.upto_seq)?;
-        seq.serialize_element(&self.mmr_root)?;
-        seq.serialize_element(&self.epoch)?;
-        if let Some(witness_sigs) = &self.witness_sigs {
-            seq.serialize_element(witness_sigs)?;
-        }
-        seq.end()
+        let len = if self.witness_sigs.is_some() { 7 } else { 6 };
+        serialize_fixed_seq(serializer, len, |seq| {
+            seq.serialize_element(&self.ver)?;
+            seq.serialize_element(&self.label_prev)?;
+            seq.serialize_element(&self.label_curr)?;
+            seq.serialize_element(&self.upto_seq)?;
+            seq.serialize_element(&self.mmr_root)?;
+            seq.serialize_element(&self.epoch)?;
+            if let Some(witness_sigs) = &self.witness_sigs {
+                seq.serialize_element(witness_sigs)?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -156,6 +155,14 @@ impl<'de> Deserialize<'de> for Checkpoint {
     }
 }
 
+impl WireSignable for Checkpoint {
+    type Signable<'a> = CheckpointSignable<'a>;
+
+    fn signable(&self) -> Self::Signable<'_> {
+        CheckpointSignable::from(self)
+    }
+}
+
 impl Checkpoint {
     /// Returns `true` if the checkpoint declares the canonical wire version.
     #[must_use]
@@ -165,12 +172,12 @@ impl Checkpoint {
 
     /// Serializes the checkpoint without the hub signature field.
     pub fn signing_bytes(&self) -> Result<Vec<u8>, CborError> {
-        serialize_signable(&CheckpointSignable::from(self))
+        WireSignable::signing_bytes(self)
     }
 
     /// Computes the canonical `Ht("veen/sig", …)` digest for checkpoint signatures.
     pub fn signing_tagged_hash(&self) -> Result<[u8; 32], CborError> {
-        tagged_hash(TAG_SIG, &CheckpointSignable::from(self))
+        WireSignable::signing_tagged_hash(self, TAG_SIG)
     }
 
     /// Verifies `hub_sig` using the provided hub Ed25519 public key bytes.
