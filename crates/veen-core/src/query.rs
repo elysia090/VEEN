@@ -189,7 +189,7 @@ fn normalize_list_in_place(
     invalid_error: QueryError,
 ) -> Result<(), QueryError> {
     for value in values.iter_mut() {
-        normalize_string_in_place(value, invalid_error.clone())?;
+        normalize_string_in_place(value, &invalid_error)?;
     }
 
     Ok(())
@@ -227,14 +227,15 @@ fn normalize_non_empty(value: &str, error: QueryError) -> Result<String, QueryEr
 
 fn normalize_string_in_place(
     value: &mut String,
-    invalid_error: QueryError,
+    invalid_error: &QueryError,
 ) -> Result<(), QueryError> {
-    let trimmed = value.trim().to_string();
+    let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Err(invalid_error);
+        return Err(invalid_error.clone());
     }
     if trimmed.len() != value.len() {
-        *value = trimmed;
+        value.clear();
+        value.push_str(trimmed);
     }
     Ok(())
 }
