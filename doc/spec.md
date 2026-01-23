@@ -63,7 +63,9 @@ It targets the **intermediate space between CRUD, KV, and Queue**, while being *
 - Minimal-length integers.
 - Definite-length arrays and byte strings only.
 - No tags, no floats.
-- Unknown keys are rejected.
+- Unknown keys are rejected for all CBOR maps defined in this spec.
+- Wire objects are encoded as **CBOR arrays** unless explicitly defined as maps.
+- Any CBOR map in this spec uses **unsigned integer keys** with ascending key order.
 
 ### 3.2 Cryptographic profile (minimum)
 - Hash: SHA-256
@@ -74,6 +76,32 @@ It targets the **intermediate space between CRUD, KV, and Queue**, while being *
 - HPKE: RFC9180 base (X25519-HKDF-SHA256 + ChaCha20-Poly1305) for payload header
 
 **ProfileID** MUST be computed as `Ht("veen/profile", CBOR(profile))` and carried in every MSG.
+
+`profile` is a CBOR map with integer keys:
+```
+{
+  1: aead,       // tstr
+  2: kdf,        // tstr
+  3: sig,        // tstr
+  4: dh,         // tstr
+  5: hpke_suite, // tstr
+  6: epoch_sec,  // uint
+  7: pad_block,  // uint
+  8: mmr_hash    // tstr
+}
+```
+
+Allowed values for v0.0.1:
+- `aead`: `"xchacha20poly1305"`
+- `kdf`: `"hkdf-sha256"`
+- `sig`: `"ed25519"`
+- `dh`: `"x25519"`
+- `hpke_suite`: `"X25519-HKDF-SHA256-CHACHA20POLY1305"`
+- `mmr_hash`: `"sha256"`
+
+`epoch_sec` is an unsigned integer. Define `epoch = floor(unix_time_sec / epoch_sec)` if `epoch_sec > 0`, otherwise `epoch = 0`.
+
+`pad_block` is an unsigned integer encoded in the profile; there is no implicit default.
 
 ### 3.3 Notation and canonical hashes
 - `H(x)` = SHA-256 over byte string `x`.
@@ -138,7 +166,7 @@ All limits MUST be enforced with deterministic error codes and MUST NOT depend o
 ## 4. Core wire specification (v0.0.1)
 
 ### 4.1 MSG (submit)
-Fixed field order:
+CBOR array with fixed field order:
 1. `ver` (uint=1)
 2. `profile_id` (bstr32)
 3. `label` (bstr32)
@@ -163,8 +191,15 @@ Fixed field order:
 10. `ct_hash = H(ciphertext)`.
 11. `leaf_hash = Ht("veen/leaf", label || profile_id || ct_hash || client_id || u64be(client_seq))`.
 
+Receivers MUST parse ciphertext using `hdr_len`/`body_len` and:
+- Reject if `ciphertext` is shorter than `enc || hdr_len || body_len || hpke_ct_hdr || aead_ct_body`.
+- Reject if any trailing padding bytes are non-zero.
+- Ignore trailing zero padding beyond the encoded lengths.
+
+`pad_block` is a profile parameter and MUST be configured deterministically.
+
 ### 4.3 RECEIPT (admission proof)
-Fixed field order:
+CBOR array with fixed field order:
 1. `ver` (uint=1)
 2. `label` (bstr32)
 3. `stream_seq` (uint)
@@ -174,7 +209,7 @@ Fixed field order:
 7. `hub_sig` (bstr64) = `Sig(hub_pk, Ht("veen/sig", CBOR(RECEIPT without hub_sig)))`
 
 ### 4.4 CHECKPOINT (log snapshot)
-Fixed field order:
+CBOR array with fixed field order:
 1. `ver` (uint=1)
 2. `label_prev` (bstr32)
 3. `label_curr` (bstr32)
@@ -190,14 +225,15 @@ CHECKPOINTs MUST:
 - Be reproducible from the same log prefix and configuration.
 
 ### 4.5 Payload header (encrypted)
-CBOR(payload_hdr) fields:
-1. `schema` (bstr32)
-2. `parent_id` (bstr32, optional)
-3. `att_root` (bstr32, optional)
-4. `cap_ref` (bstr32, optional)
-5. `expires_at` (uint, optional)
+CBOR(payload_hdr) map with integer keys:
+- `1`: `schema` (bstr32)
+- `2`: `parent_id` (bstr32, optional)
+- `3`: `att_root` (bstr32, optional)
+- `4`: `cap_ref` (bstr32, optional)
+- `5`: `expires_at` (uint, optional)
 
 The hub never sees payload_hdr in plaintext.
+Unknown keys are rejected. `schema` is required.
 
 ### 4.6 Attachments
 - Attachment `i` uses `k_att = HPKE.Export(ctx, "veen/att-k" || u64be(i), 32)`.
@@ -234,28 +270,43 @@ Verification MUST reproduce the `mmr_root` recorded in a RECEIPT or CHECKPOINT.
 
 ## 6. Capability tokens (CapToken)
 
-cap_token CBOR map:
+cap_token CBOR map with integer keys:
 ```
 {
-  ver: 1,
-  issuer_pk: bstr(32),
-  subject_pk: bstr(32),
-  allow: {
-    stream_ids: [ bstr(32), ... ],
-    ttl: uint,
-    rate: { per_sec: uint, burst: uint }?
-  },
-  sig_chain: [ bstr(64), ... ]
+  1: ver,        // uint (MUST be 1)
+  2: issuer_pk,  // bstr32
+  3: subject_pk, // bstr32
+  4: allow,      // map
+  5: sig_chain   // [bstr64, ...]
+}
+```
+
+`allow` is a CBOR map with integer keys:
+```
+{
+  1: stream_ids, // [bstr32, ...]
+  2: ttl,        // uint
+  3: rate?       // map
+}
+```
+
+`rate` is a CBOR map with integer keys:
+```
+{
+  1: per_sec, // uint
+  2: burst    // uint
 }
 ```
 
 Rules:
+- `ver` MUST be `1`.
 - `allow.stream_ids` MUST be non-empty.
 - `auth_ref = Ht("veen/cap", CBOR(cap_token))`.
-- `MSG.auth_ref` MUST equal `payload_hdr.cap_ref` if `cap_ref` is present.
+- `MSG.auth_ref` MUST equal `payload_hdr.cap_ref` if `cap_ref` is present (enforced by clients/overlays; hubs do not inspect encrypted payloads).
 - Hubs MUST verify all signatures in `sig_chain` and enforce TTL and rate limits.
 - If a deployment cannot map `label -> stream_id`, it MUST document that hub-side stream scoping is disabled; clients MUST enforce scoping after decrypt.
 - CapToken revocation MUST be modeled as an overlay stream; hubs enforce revocation by querying the indexed revocation summary only (no scans).
+- Unknown keys are rejected in `cap_token`, `allow`, and `rate`.
 
 ---
 
