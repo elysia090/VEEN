@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use rand::rngs::OsRng;
-use reqwest::Client;
+use reqwest::{Client, ClientBuilder};
 use serde::Serialize;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, Semaphore};
@@ -74,14 +74,19 @@ pub struct PerfSummary {
     pub end_to_end_p99_ms: f64,
 }
 
+struct HttpContext {
+    base_url: String,
+    client: Client,
+}
+
 struct PerfHarness {
     mode: PerfMode,
     pipeline: HubPipeline,
     stream_label: String,
     client_id: String,
+    http: Option<Arc<HttpContext>>,
     _tempdir: TempDir,
     server: Option<HubServerHandle>,
-    base_url: Option<String>,
 }
 
 impl PerfHarness {
@@ -97,12 +102,19 @@ impl PerfHarness {
         let stream_label = "perf/main".to_string();
         cap_stream_id_from_label(&stream_label).context("validating perf stream label")?;
 
-        let (server, base_url) = match mode {
+        let (server, http) = match mode {
             PerfMode::InProcess => (None, None),
             PerfMode::Http => {
                 let server = HubServerHandle::spawn(listen, pipeline.clone()).await?;
                 let url = format!("http://{}:{}", listen.ip(), listen.port());
-                (Some(server), Some(url))
+                let client = ClientBuilder::new()
+                    .build()
+                    .context("building HTTP client for perf harness")?;
+                let http = Arc::new(HttpContext {
+                    base_url: url,
+                    client,
+                });
+                (Some(server), Some(http))
             }
         };
 
@@ -111,9 +123,9 @@ impl PerfHarness {
             pipeline,
             stream_label,
             client_id,
+            http,
             _tempdir: tempdir,
             server,
-            base_url,
         })
     }
 
@@ -230,7 +242,7 @@ struct PerfDriver {
     pipeline: HubPipeline,
     stream_label: String,
     client_id: String,
-    base_url: Option<String>,
+    http: Option<Arc<HttpContext>>,
     payload: serde_json::Value,
     idem: u64,
 }
@@ -247,7 +259,7 @@ impl PerfDriver {
             pipeline: harness.pipeline.clone(),
             stream_label: harness.stream_label.clone(),
             client_id: harness.client_id.clone(),
-            base_url: harness.base_url.clone(),
+            http: harness.http.clone(),
             payload,
             idem: idx,
         })
@@ -292,13 +304,13 @@ impl PerfDriver {
         match self.mode {
             PerfMode::InProcess => self.pipeline.submit(request).await,
             PerfMode::Http => {
-                let base = self
-                    .base_url
+                let http = self
+                    .http
                     .as_ref()
-                    .ok_or_else(|| anyhow!("missing base URL for HTTP mode"))?;
-                let url = format!("{base}/submit");
-                let client = Client::new();
-                let response = client
+                    .ok_or_else(|| anyhow!("missing HTTP context for perf run"))?;
+                let url = format!("{}/submit", http.base_url);
+                let response = http
+                    .client
                     .post(url)
                     .json(&request)
                     .send()
@@ -325,16 +337,15 @@ impl PerfDriver {
                     .await?;
             }
             PerfMode::Http => {
-                let base = self
-                    .base_url
+                let http = self
+                    .http
                     .as_ref()
-                    .ok_or_else(|| anyhow!("missing base URL for HTTP mode"))?;
+                    .ok_or_else(|| anyhow!("missing HTTP context for perf run"))?;
                 let url = format!(
-                    "{base}/stream?stream={}&from={}&with_proof=false",
-                    self.stream_label, response.seq
+                    "{}/stream?stream={}&from={}&with_proof=false",
+                    http.base_url, self.stream_label, response.seq
                 );
-                let client = Client::new();
-                let response = client.get(url).send().await?;
+                let response = http.client.get(url).send().await?;
                 if !response.status().is_success() {
                     return Err(anyhow!("failed to confirm commit over HTTP"));
                 }

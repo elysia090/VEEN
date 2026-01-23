@@ -189,7 +189,7 @@ fn normalize_list_in_place(
     invalid_error: QueryError,
 ) -> Result<(), QueryError> {
     for value in values.iter_mut() {
-        normalize_string_in_place(value, invalid_error)?;
+        normalize_string_in_place(value, invalid_error.clone())?;
     }
 
     Ok(())
@@ -229,13 +229,12 @@ fn normalize_string_in_place(
     value: &mut String,
     invalid_error: QueryError,
 ) -> Result<(), QueryError> {
-    let trimmed = value.trim();
+    let trimmed = value.trim().to_string();
     if trimmed.is_empty() {
         return Err(invalid_error);
     }
     if trimmed.len() != value.len() {
-        value.clear();
-        value.push_str(trimmed);
+        *value = trimmed;
     }
     Ok(())
 }
@@ -442,7 +441,7 @@ impl ResultDigest {
 }
 
 /// Errors raised when normalizing or hashing queries and results.
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error, PartialEq, Clone)]
 pub enum QueryError {
     #[error("scope must contain at least one stream")]
     EmptyScope,
