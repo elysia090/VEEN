@@ -9750,7 +9750,7 @@ impl RecoveryExecutionIndex {
 
 struct StreamMessageCache {
     reference: HubReference,
-    cache: BTreeMap<String, Vec<StoredMessage>>,
+    cache: HashMap<String, Vec<StoredMessage>>,
     audit_resource_classes: HashMap<String, HashSet<String>>,
 }
 
@@ -9758,15 +9758,17 @@ impl StreamMessageCache {
     fn new(reference: HubReference) -> Self {
         Self {
             reference,
-            cache: BTreeMap::new(),
+            cache: HashMap::new(),
             audit_resource_classes: HashMap::new(),
         }
     }
 
     async fn messages(&mut self, stream: &str) -> Result<&[StoredMessage]> {
-        if !self.cache.contains_key(stream) {
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            self.cache.entry(stream.to_string())
+        {
             let messages = fetch_stream_messages(&self.reference, stream).await?;
-            self.cache.insert(stream.to_string(), messages);
+            entry.insert(messages);
         }
         Ok(self
             .cache
@@ -9776,7 +9778,9 @@ impl StreamMessageCache {
     }
 
     async fn audit_resource_classes(&mut self, stream: &str) -> Result<&HashSet<String>> {
-        if !self.audit_resource_classes.contains_key(stream) {
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            self.audit_resource_classes.entry(stream.to_string())
+        {
             let messages = self.messages(stream).await?;
             let mut classes = HashSet::new();
             for message in messages {
@@ -9786,8 +9790,7 @@ impl StreamMessageCache {
                 let payload: QueryAuditLog = parse_message_payload(message)?;
                 classes.insert(payload.resource_class);
             }
-            self.audit_resource_classes
-                .insert(stream.to_string(), classes);
+            entry.insert(classes);
         }
         Ok(self
             .audit_resource_classes
