@@ -364,9 +364,13 @@ impl PerfDriver {
     async fn await_commit(&self, response: SubmitResponse) -> Result<()> {
         match self.mode {
             PerfMode::InProcess => {
-                self.pipeline
-                    .stream(&self.stream_label, response.seq, false)
-                    .await?;
+                if !self
+                    .pipeline
+                    .commit_status(&self.stream_label, response.seq)
+                    .await?
+                {
+                    return Err(anyhow!("commit not yet available in process"));
+                }
             }
             PerfMode::Http => {
                 let http = self
@@ -374,12 +378,16 @@ impl PerfDriver {
                     .as_ref()
                     .ok_or_else(|| anyhow!("missing HTTP context for perf run"))?;
                 let url = format!(
-                    "{}/stream?stream={}&from={}&with_proof=false",
+                    "{}/commit_wait?stream={}&seq={}",
                     http.base_url, self.stream_label, response.seq
                 );
                 let response = http.client.get(url).send().await?;
                 if !response.status().is_success() {
-                    return Err(anyhow!("failed to confirm commit over HTTP"));
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    return Err(anyhow!(
+                        "failed to confirm commit over HTTP: {status} {body}"
+                    ));
                 }
             }
         }

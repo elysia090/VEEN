@@ -41,6 +41,7 @@ impl HubServerHandle {
         let app = Router::new()
             .route("/submit", post(handle_submit))
             .route("/stream", get(handle_stream))
+            .route("/commit_wait", get(handle_commit_wait))
             .route("/resync", post(handle_resync))
             .route("/authorize", post(handle_authorize))
             .route("/authority", post(handle_authority))
@@ -99,6 +100,12 @@ struct StreamQuery {
     from: Option<u64>,
     #[serde(default)]
     with_proof: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitWaitQuery {
+    stream: String,
+    seq: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,6 +232,24 @@ async fn handle_stream(
         Err(err) => {
             tracing::warn!(error = ?err, "stream request failed");
             (StatusCode::NOT_FOUND, err.to_string()).into_response()
+        }
+    }
+}
+
+async fn handle_commit_wait(
+    State(pipeline): State<HubPipeline>,
+    Query(query): Query<CommitWaitQuery>,
+) -> impl IntoResponse {
+    match pipeline.commit_status(&query.stream, query.seq).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "commit not available".to_string()).into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "commit wait failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                err.to_string(),
+            )
+                .into_response()
         }
     }
 }
