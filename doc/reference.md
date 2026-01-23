@@ -1,16 +1,18 @@
-# VEEN Specifications (SSOT)
+# VEEN Specifications (Legacy Reference)
 
-This document consolidates all VEEN specification and operational documents into a single source of truth (SSOT).
-Original spec files have been merged here and should no longer be referenced individually.
+This document is a **legacy, non-normative** consolidation of historical VEEN specification and operational
+materials. The authoritative SSOT is [`doc/spec.md`](spec.md); this file exists solely for background and archival
+context.
 
-**SSOT policy**
-- Update **only** this file for spec changes.
-- Keep sections aligned to prevent drift across implementations.
-- If any legacy text conflicts with the normalization rules below, the normalization rules take precedence.
+**Status**
+- **Do not** treat this document as normative or update it to define spec behavior.
+- If any text here conflicts with [`doc/spec.md`](spec.md), the SSOT **always** takes precedence.
 
-## Document structure
+## Document structure (legacy)
 
-This SSOT is reorganized into clear layers so that normative protocol rules, overlay schemas, and operational guidance are easy to locate. All content is preserved; headings are reordered and grouped without semantic changes.
+This legacy document is reorganized into clear layers so that historical protocol rules, overlay schemas, and
+operational guidance are easy to locate. All content is preserved; headings are reordered and grouped without
+semantic changes.
 
 - **Normalization & global rules:** Cross-cutting invariants and conflict resolution.
 - **Protocol specifications:** Core wire protocol and invariants.
@@ -19,11 +21,12 @@ This SSOT is reorganized into clear layers so that normative protocol rules, ove
 - **Rationale & philosophy:** Design intent and adoption rationale.
 - **Source index:** Legacy source list (reference only).
 
-## Normalization and conflict resolution
+## Normalization and conflict resolution (legacy notes)
 
 
-The documents consolidated here were authored at different times. To avoid implementation drift, the following
-normalization rules are authoritative and resolve any conflicts across legacy sections:
+The documents consolidated here were authored at different times. The notes below summarize how conflicts were
+resolved at the time this legacy document was assembled. **They are not authoritative**; for all current
+implementations, refer to [`doc/spec.md`](spec.md).
 
 - **Canonical CLI name:** `veen` is the primary CLI binary. References to `veen-cli` are legacy aliases of `veen`.
 - **Hub runtime:** `veen hub start` is the canonical hub start command. Legacy `veen-hub run` or `veen-hub start`
@@ -36,14 +39,14 @@ normalization rules are authoritative and resolve any conflicts across legacy se
 - **Version layering:** v0.0.1 is the core spec; v0.0.1+ and v0.0.1++ are additive overlays and MUST NOT redefine
   or contradict v0.0.1 semantics.
 
-## Spec refactoring & optimization addendum (SSOT)
+## Spec refactoring & optimization addendum (legacy)
 
 
 This addendum resolves remaining ambiguities, removes effective duplication by declaring canonical sections, and
 summarizes hot paths, critical paths, implementation risks, and dependencies for implementers and reviewers.
 
 ### Canonical section map (authoritative for conflicts)
-- **Core wire objects and invariants:** `spec-1.txt` through `spec-4.txt` sections in this SSOT.
+- **Core wire objects and invariants:** `spec-1.txt` through `spec-4.txt` sections in this legacy reference.
 - **Overlay semantics:** `id-spec.txt`, `wallet-spec.txt`, `query-api-spec.txt`, plus any `spec-5.txt` overlays.
 - **Operational CLI semantics:** `USAGE.md` and CLI goal documents consolidated below.
 - **Rationale and philosophy:** `Design-Philosophy.txt`, `Whyuse.txt`, `CORE-GOALS.txt`, `OS-GOALS.txt`.
@@ -8916,7 +8919,7 @@ Temporary directories under `/tmp` are removed automatically on success or failu
 #### 10. Further reading
 
 
-- Protocol/overlay specs (SSOT): `doc/spec.md`
+- Protocol/overlay specs (SSOT): `doc/spec.md` (authoritative)
 - CLI/OS goals: `doc/CLI-GOALS-1.txt`–`CLI-GOALS-3.txt`, `doc/OS-GOALS.txt`
 - Design rationale: `doc/Design-Philosophy.txt`
 
@@ -9603,7 +9606,7 @@ In practical terms: VEEN lets you turn your network into something you can clone
 ## Source index (consolidated)
 
 
-### Documents merged into this SSOT (original files removed)
+### Documents merged into this legacy reference (original files removed)
 - Design-Philosophy.txt
 - Whyuse.txt
 - USAGE.md
