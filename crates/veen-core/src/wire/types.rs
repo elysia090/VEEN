@@ -10,6 +10,115 @@ use thiserror::Error;
 
 use crate::{hash::h, label::Label, profile::ProfileId, LengthError};
 
+macro_rules! fixed_bytes_type {
+    ($(#[$meta:meta])* $vis:vis struct $name:ident($len:expr); expecting: $expecting:expr;) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        $vis struct $name([u8; $len]);
+
+        impl $name {
+            #[must_use]
+            pub const fn new(bytes: [u8; $len]) -> Self {
+                Self(bytes)
+            }
+
+            #[must_use]
+            pub const fn as_bytes(&self) -> &[u8; $len] {
+                &self.0
+            }
+
+            pub fn from_slice(bytes: &[u8]) -> Result<Self, LengthError> {
+                if bytes.len() != $len {
+                    return Err(LengthError::new($len, bytes.len()));
+                }
+                let mut out = [0u8; $len];
+                out.copy_from_slice(bytes);
+                Ok(Self::new(out))
+            }
+        }
+
+        impl From<[u8; $len]> for $name {
+            fn from(value: [u8; $len]) -> Self {
+                Self::new(value)
+            }
+        }
+
+        impl From<&[u8; $len]> for $name {
+            fn from(value: &[u8; $len]) -> Self {
+                Self::new(*value)
+            }
+        }
+
+        impl TryFrom<&[u8]> for $name {
+            type Error = LengthError;
+
+            fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+                Self::from_slice(value)
+            }
+        }
+
+        impl TryFrom<Vec<u8>> for $name {
+            type Error = LengthError;
+
+            fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+                Self::from_slice(&value)
+            }
+        }
+
+        impl AsRef<[u8]> for $name {
+            fn as_ref(&self) -> &[u8] {
+                self.as_bytes()
+            }
+        }
+
+        crate::hexutil::impl_hex_fmt!($name);
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_bytes(self.as_ref())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                struct VisitorImpl;
+
+                impl<'de> Visitor<'de> for VisitorImpl {
+                    type Value = $name;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        formatter.write_str($expecting)
+                    }
+
+                    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+                    where
+                        E: DeError,
+                    {
+                        $name::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
+                    }
+
+                    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+                    where
+                        E: DeError,
+                    {
+                        self.visit_bytes(&v)
+                    }
+                }
+
+                deserializer.deserialize_bytes(VisitorImpl)
+            }
+        }
+
+        crate::hexutil::impl_fixed_hex_from_str!($name, $len);
+    };
+}
+
 /// Length in bytes of Ed25519-based identifiers and hashes used in VEEN wire objects.
 pub const HASH_LEN: usize = 32;
 /// Length in bytes of Ed25519 signatures used by VEEN wire objects.
@@ -17,240 +126,25 @@ pub const SIGNATURE_LEN: usize = 64;
 /// Length in bytes of AEAD nonces derived from the specification hashes.
 pub const AEAD_NONCE_LEN: usize = 24;
 
-/// Raw Ed25519 public key carried as `client_id` on the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ClientId([u8; HASH_LEN]);
+fixed_bytes_type!(
+    /// Raw Ed25519 public key carried as `client_id` on the wire.
+    pub struct ClientId(HASH_LEN);
+    expecting: "a 32-byte VEEN client identifier";
+);
 
-impl ClientId {
-    #[must_use]
-    pub const fn new(bytes: [u8; HASH_LEN]) -> Self {
-        Self(bytes)
-    }
+fixed_bytes_type!(
+    /// Admission reference carried on the wire to bind to a capability token.
+    pub struct AuthRef(HASH_LEN);
+    expecting: "a 32-byte VEEN auth_ref value";
+);
 
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; HASH_LEN] {
-        &self.0
-    }
-
-    pub fn from_slice(bytes: &[u8]) -> Result<Self, LengthError> {
-        if bytes.len() != HASH_LEN {
-            return Err(LengthError::new(HASH_LEN, bytes.len()));
-        }
-        let mut out = [0u8; HASH_LEN];
-        out.copy_from_slice(bytes);
-        Ok(Self::new(out))
-    }
-}
-
-impl From<[u8; HASH_LEN]> for ClientId {
-    fn from(value: [u8; HASH_LEN]) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&[u8; HASH_LEN]> for ClientId {
-    fn from(value: &[u8; HASH_LEN]) -> Self {
-        Self::new(*value)
-    }
-}
-
-impl TryFrom<&[u8]> for ClientId {
-    type Error = LengthError;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        Self::from_slice(value)
-    }
-}
-
-impl TryFrom<Vec<u8>> for ClientId {
-    type Error = LengthError;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::from_slice(&value)
-    }
-}
-
-impl AsRef<[u8]> for ClientId {
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
-    }
-}
-
-crate::hexutil::impl_hex_fmt!(ClientId);
-
-impl Serialize for ClientId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_bytes(self.as_ref())
-    }
-}
-
-struct ClientIdVisitor;
-
-impl<'de> Visitor<'de> for ClientIdVisitor {
-    type Value = ClientId;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a 32-byte VEEN client identifier")
-    }
-
-    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        ClientId::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
-    }
-
-    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        self.visit_bytes(&v)
-    }
-}
-
-impl<'de> Deserialize<'de> for ClientId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_bytes(ClientIdVisitor)
-    }
-}
-
-crate::hexutil::impl_fixed_hex_from_str!(ClientId, HASH_LEN);
-
-/// Admission reference carried on the wire to bind to a capability token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AuthRef([u8; HASH_LEN]);
-
-impl AuthRef {
-    #[must_use]
-    pub const fn new(bytes: [u8; HASH_LEN]) -> Self {
-        Self(bytes)
-    }
-
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; HASH_LEN] {
-        &self.0
-    }
-
-    pub fn from_slice(bytes: &[u8]) -> Result<Self, LengthError> {
-        if bytes.len() != HASH_LEN {
-            return Err(LengthError::new(HASH_LEN, bytes.len()));
-        }
-        let mut out = [0u8; HASH_LEN];
-        out.copy_from_slice(bytes);
-        Ok(Self::new(out))
-    }
-}
-
-impl From<[u8; HASH_LEN]> for AuthRef {
-    fn from(value: [u8; HASH_LEN]) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&[u8; HASH_LEN]> for AuthRef {
-    fn from(value: &[u8; HASH_LEN]) -> Self {
-        Self::new(*value)
-    }
-}
-
-impl TryFrom<&[u8]> for AuthRef {
-    type Error = LengthError;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        Self::from_slice(value)
-    }
-}
-
-impl TryFrom<Vec<u8>> for AuthRef {
-    type Error = LengthError;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::from_slice(&value)
-    }
-}
-
-impl AsRef<[u8]> for AuthRef {
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
-    }
-}
-
-crate::hexutil::impl_hex_fmt!(AuthRef);
-
-impl Serialize for AuthRef {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_bytes(self.as_ref())
-    }
-}
-
-struct AuthRefVisitor;
-
-impl<'de> Visitor<'de> for AuthRefVisitor {
-    type Value = AuthRef;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a 32-byte VEEN auth_ref value")
-    }
-
-    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        AuthRef::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
-    }
-
-    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        self.visit_bytes(&v)
-    }
-}
-
-impl<'de> Deserialize<'de> for AuthRef {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_bytes(AuthRefVisitor)
-    }
-}
-
-crate::hexutil::impl_fixed_hex_from_str!(AuthRef, HASH_LEN);
-
-/// Canonical SHA-256 hash of the ciphertext payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CtHash([u8; HASH_LEN]);
+fixed_bytes_type!(
+    /// Canonical SHA-256 hash of the ciphertext payload.
+    pub struct CtHash(HASH_LEN);
+    expecting: "a 32-byte VEEN ciphertext hash";
+);
 
 impl CtHash {
-    #[must_use]
-    pub const fn new(bytes: [u8; HASH_LEN]) -> Self {
-        Self(bytes)
-    }
-
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; HASH_LEN] {
-        &self.0
-    }
-
-    pub fn from_slice(bytes: &[u8]) -> Result<Self, LengthError> {
-        if bytes.len() != HASH_LEN {
-            return Err(LengthError::new(HASH_LEN, bytes.len()));
-        }
-        let mut out = [0u8; HASH_LEN];
-        out.copy_from_slice(bytes);
-        Ok(Self::new(out))
-    }
-
     /// Computes the canonical ciphertext hash `H(ciphertext)`.
     #[must_use]
     pub fn compute(ciphertext: &[u8]) -> Self {
@@ -258,110 +152,13 @@ impl CtHash {
     }
 }
 
-impl From<[u8; HASH_LEN]> for CtHash {
-    fn from(value: [u8; HASH_LEN]) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&[u8; HASH_LEN]> for CtHash {
-    fn from(value: &[u8; HASH_LEN]) -> Self {
-        Self::new(*value)
-    }
-}
-
-impl TryFrom<&[u8]> for CtHash {
-    type Error = LengthError;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        Self::from_slice(value)
-    }
-}
-
-impl TryFrom<Vec<u8>> for CtHash {
-    type Error = LengthError;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::from_slice(&value)
-    }
-}
-
-impl AsRef<[u8]> for CtHash {
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
-    }
-}
-
-crate::hexutil::impl_hex_fmt!(CtHash);
-
-impl Serialize for CtHash {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_bytes(self.as_ref())
-    }
-}
-
-struct CtHashVisitor;
-
-impl<'de> Visitor<'de> for CtHashVisitor {
-    type Value = CtHash;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a 32-byte VEEN ciphertext hash")
-    }
-
-    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        CtHash::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
-    }
-
-    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        self.visit_bytes(&v)
-    }
-}
-
-impl<'de> Deserialize<'de> for CtHash {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_bytes(CtHashVisitor)
-    }
-}
-
-crate::hexutil::impl_fixed_hex_from_str!(CtHash, HASH_LEN);
-
-/// Leaf hash committed into the MMR for each message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LeafHash([u8; HASH_LEN]);
+fixed_bytes_type!(
+    /// Leaf hash committed into the MMR for each message.
+    pub struct LeafHash(HASH_LEN);
+    expecting: "a 32-byte VEEN leaf hash";
+);
 
 impl LeafHash {
-    #[must_use]
-    pub const fn new(bytes: [u8; HASH_LEN]) -> Self {
-        Self(bytes)
-    }
-
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; HASH_LEN] {
-        &self.0
-    }
-
-    pub fn from_slice(bytes: &[u8]) -> Result<Self, LengthError> {
-        if bytes.len() != HASH_LEN {
-            return Err(LengthError::new(HASH_LEN, bytes.len()));
-        }
-        let mut out = [0u8; HASH_LEN];
-        out.copy_from_slice(bytes);
-        Ok(Self::new(out))
-    }
-
     /// Computes the canonical leaf hash derivation used by the specification.
     #[must_use]
     pub fn derive(
@@ -371,8 +168,7 @@ impl LeafHash {
         client_id: &ClientId,
         client_seq: u64,
     ) -> Self {
-        let mut data =
-            Vec::with_capacity(label.as_ref().len() + profile_id.as_ref().len() + 8 + 64);
+        let mut data = Vec::with_capacity(label.as_ref().len() + profile_id.as_ref().len() + 8 + 64);
         data.extend_from_slice(label.as_ref());
         data.extend_from_slice(profile_id.as_ref());
         data.extend_from_slice(ct_hash.as_ref());
@@ -395,110 +191,13 @@ impl LeafHash {
     }
 }
 
-impl From<[u8; HASH_LEN]> for LeafHash {
-    fn from(value: [u8; HASH_LEN]) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&[u8; HASH_LEN]> for LeafHash {
-    fn from(value: &[u8; HASH_LEN]) -> Self {
-        Self::new(*value)
-    }
-}
-
-impl TryFrom<&[u8]> for LeafHash {
-    type Error = LengthError;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        Self::from_slice(value)
-    }
-}
-
-impl TryFrom<Vec<u8>> for LeafHash {
-    type Error = LengthError;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::from_slice(&value)
-    }
-}
-
-impl AsRef<[u8]> for LeafHash {
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
-    }
-}
-
-crate::hexutil::impl_hex_fmt!(LeafHash);
-
-impl Serialize for LeafHash {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_bytes(self.as_ref())
-    }
-}
-
-struct LeafHashVisitor;
-
-impl<'de> Visitor<'de> for LeafHashVisitor {
-    type Value = LeafHash;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a 32-byte VEEN leaf hash")
-    }
-
-    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        LeafHash::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
-    }
-
-    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        self.visit_bytes(&v)
-    }
-}
-
-impl<'de> Deserialize<'de> for LeafHash {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_bytes(LeafHashVisitor)
-    }
-}
-
-crate::hexutil::impl_fixed_hex_from_str!(LeafHash, HASH_LEN);
-
-/// Intermediate MMR node or peak hash.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MmrNode([u8; HASH_LEN]);
+fixed_bytes_type!(
+    /// Intermediate MMR node or peak hash.
+    pub struct MmrNode(HASH_LEN);
+    expecting: "a 32-byte VEEN MMR node hash";
+);
 
 impl MmrNode {
-    #[must_use]
-    pub const fn new(bytes: [u8; HASH_LEN]) -> Self {
-        Self(bytes)
-    }
-
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; HASH_LEN] {
-        &self.0
-    }
-
-    pub fn from_slice(bytes: &[u8]) -> Result<Self, LengthError> {
-        if bytes.len() != HASH_LEN {
-            return Err(LengthError::new(HASH_LEN, bytes.len()));
-        }
-        let mut out = [0u8; HASH_LEN];
-        out.copy_from_slice(bytes);
-        Ok(Self::new(out))
-    }
-
     #[must_use]
     pub fn combine(left: &Self, right: &Self) -> Self {
         let mut data = [0u8; HASH_LEN * 2];
@@ -508,116 +207,19 @@ impl MmrNode {
     }
 }
 
-impl From<[u8; HASH_LEN]> for MmrNode {
-    fn from(value: [u8; HASH_LEN]) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&[u8; HASH_LEN]> for MmrNode {
-    fn from(value: &[u8; HASH_LEN]) -> Self {
-        Self::new(*value)
-    }
-}
-
-impl TryFrom<&[u8]> for MmrNode {
-    type Error = LengthError;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        Self::from_slice(value)
-    }
-}
-
-impl TryFrom<Vec<u8>> for MmrNode {
-    type Error = LengthError;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::from_slice(&value)
-    }
-}
-
-impl AsRef<[u8]> for MmrNode {
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
-    }
-}
-
-crate::hexutil::impl_hex_fmt!(MmrNode);
-
-impl Serialize for MmrNode {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_bytes(self.as_ref())
-    }
-}
-
-struct MmrNodeVisitor;
-
-impl<'de> Visitor<'de> for MmrNodeVisitor {
-    type Value = MmrNode;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a 32-byte VEEN MMR node hash")
-    }
-
-    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        MmrNode::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
-    }
-
-    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        self.visit_bytes(&v)
-    }
-}
-
-impl<'de> Deserialize<'de> for MmrNode {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_bytes(MmrNodeVisitor)
-    }
-}
-
-crate::hexutil::impl_fixed_hex_from_str!(MmrNode, HASH_LEN);
-
 impl From<LeafHash> for MmrNode {
     fn from(value: LeafHash) -> Self {
         Self::new(*value.as_bytes())
     }
 }
 
-/// Merkle Mountain Range root committed by hubs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MmrRoot([u8; HASH_LEN]);
+fixed_bytes_type!(
+    /// Merkle Mountain Range root committed by hubs.
+    pub struct MmrRoot(HASH_LEN);
+    expecting: "a 32-byte VEEN MMR root";
+);
 
 impl MmrRoot {
-    #[must_use]
-    pub const fn new(bytes: [u8; HASH_LEN]) -> Self {
-        Self(bytes)
-    }
-
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; HASH_LEN] {
-        &self.0
-    }
-
-    pub fn from_slice(bytes: &[u8]) -> Result<Self, LengthError> {
-        if bytes.len() != HASH_LEN {
-            return Err(LengthError::new(HASH_LEN, bytes.len()));
-        }
-        let mut out = [0u8; HASH_LEN];
-        out.copy_from_slice(bytes);
-        Ok(Self::new(out))
-    }
-
     /// Computes an MMR root by folding the provided peaks using the
     /// `Ht("veen/mmr-root", …)` derivation from the specification.
     #[must_use]
@@ -637,86 +239,6 @@ impl MmrRoot {
         Some(Self(crate::hash::ht("veen/mmr-root", &data)))
     }
 }
-
-impl From<[u8; HASH_LEN]> for MmrRoot {
-    fn from(value: [u8; HASH_LEN]) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&[u8; HASH_LEN]> for MmrRoot {
-    fn from(value: &[u8; HASH_LEN]) -> Self {
-        Self::new(*value)
-    }
-}
-
-impl TryFrom<&[u8]> for MmrRoot {
-    type Error = LengthError;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        Self::from_slice(value)
-    }
-}
-
-impl TryFrom<Vec<u8>> for MmrRoot {
-    type Error = LengthError;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::from_slice(&value)
-    }
-}
-
-impl AsRef<[u8]> for MmrRoot {
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
-    }
-}
-
-crate::hexutil::impl_hex_fmt!(MmrRoot);
-
-impl Serialize for MmrRoot {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_bytes(self.as_ref())
-    }
-}
-
-struct MmrRootVisitor;
-
-impl<'de> Visitor<'de> for MmrRootVisitor {
-    type Value = MmrRoot;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a 32-byte VEEN MMR root")
-    }
-
-    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        MmrRoot::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
-    }
-
-    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        self.visit_bytes(&v)
-    }
-}
-
-impl<'de> Deserialize<'de> for MmrRoot {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_bytes(MmrRootVisitor)
-    }
-}
-
-crate::hexutil::impl_fixed_hex_from_str!(MmrRoot, HASH_LEN);
 
 impl From<MmrNode> for MmrRoot {
     fn from(value: MmrNode) -> Self {
@@ -739,30 +261,13 @@ pub enum SignatureVerifyError {
     VerificationFailed(#[source] DalekSignatureError),
 }
 
-/// Canonical Ed25519 signature stored in `MSG.sig`, `RECEIPT.hub_sig`, and checkpoints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Signature64([u8; SIGNATURE_LEN]);
+fixed_bytes_type!(
+    /// Canonical Ed25519 signature stored in `MSG.sig`, `RECEIPT.hub_sig`, and checkpoints.
+    pub struct Signature64(SIGNATURE_LEN);
+    expecting: "a 64-byte VEEN Ed25519 signature";
+);
 
 impl Signature64 {
-    #[must_use]
-    pub const fn new(bytes: [u8; SIGNATURE_LEN]) -> Self {
-        Self(bytes)
-    }
-
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; SIGNATURE_LEN] {
-        &self.0
-    }
-
-    pub fn from_slice(bytes: &[u8]) -> Result<Self, LengthError> {
-        if bytes.len() != SIGNATURE_LEN {
-            return Err(LengthError::new(SIGNATURE_LEN, bytes.len()));
-        }
-        let mut out = [0u8; SIGNATURE_LEN];
-        out.copy_from_slice(bytes);
-        Ok(Self::new(out))
-    }
-
     /// Verifies the signature against the provided Ed25519 public key and
     /// message bytes.
     pub fn verify(
@@ -779,86 +284,6 @@ impl Signature64 {
             .map_err(SignatureVerifyError::VerificationFailed)
     }
 }
-
-impl From<[u8; SIGNATURE_LEN]> for Signature64 {
-    fn from(value: [u8; SIGNATURE_LEN]) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&[u8; SIGNATURE_LEN]> for Signature64 {
-    fn from(value: &[u8; SIGNATURE_LEN]) -> Self {
-        Self::new(*value)
-    }
-}
-
-impl TryFrom<&[u8]> for Signature64 {
-    type Error = LengthError;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        Self::from_slice(value)
-    }
-}
-
-impl TryFrom<Vec<u8>> for Signature64 {
-    type Error = LengthError;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Self::from_slice(&value)
-    }
-}
-
-impl AsRef<[u8]> for Signature64 {
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
-    }
-}
-
-crate::hexutil::impl_hex_fmt!(Signature64);
-
-impl Serialize for Signature64 {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_bytes(self.as_ref())
-    }
-}
-
-struct SignatureVisitor;
-
-impl<'de> Visitor<'de> for SignatureVisitor {
-    type Value = Signature64;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a 64-byte VEEN Ed25519 signature")
-    }
-
-    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        Signature64::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
-    }
-
-    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
-    where
-        E: DeError,
-    {
-        self.visit_bytes(&v)
-    }
-}
-
-impl<'de> Deserialize<'de> for Signature64 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_bytes(SignatureVisitor)
-    }
-}
-
-crate::hexutil::impl_fixed_hex_from_str!(Signature64, SIGNATURE_LEN);
 
 impl From<LeafHash> for MmrRoot {
     fn from(value: LeafHash) -> Self {
