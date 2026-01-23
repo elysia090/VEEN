@@ -2671,17 +2671,20 @@ async fn load_stream_state_from_index(
     storage: &HubStorage,
     path: &Path,
 ) -> Result<LoadedStreamState> {
-    let entries = stream_index::load_stream_index(path).await?;
-    if entries.is_empty() {
+    let Some(mut reader) = stream_index::StreamIndexReader::open(path).await? else {
+        return Ok(LoadedStreamState::default());
+    };
+    let mut next_entry = reader.next_entry().await?;
+    if next_entry.is_none() {
         return Ok(LoadedStreamState::default());
     }
 
-    let mut messages = Vec::with_capacity(entries.len());
-    let mut proven = Vec::with_capacity(entries.len());
+    let mut messages = Vec::new();
+    let mut proven = Vec::new();
     let mut mmr = Mmr::new();
     let mut migrations = Vec::new();
 
-    for entry in entries {
+    while let Some(entry) = next_entry {
         let bundle_path = stream_index::bundle_path(storage, &entry);
         let bundle = read_message_bundle(&bundle_path).await?;
         let StoredMessageBundle {
@@ -2749,6 +2752,7 @@ async fn load_stream_state_from_index(
             migrations.push(entry_with_proof);
         }
         messages.push(message);
+        next_entry = reader.next_entry().await?;
     }
 
     for entry in &migrations {
@@ -2900,13 +2904,10 @@ async fn load_proven_messages_range(
         return Ok(proven);
     }
 
-    let mut proven = Vec::new();
     let index_path = storage.stream_index_path(stream);
-    let entries = stream_index::load_stream_index(&index_path).await?;
+    let entries = stream_index::load_stream_index_range(&index_path, from, to).await?;
+    let mut proven = Vec::with_capacity(entries.len());
     for entry in entries {
-        if entry.seq < from || entry.seq > to {
-            continue;
-        }
         let bundle_path = stream_index::bundle_path(storage, &entry);
         let entry = read_proven_bundle(stream, entry.seq, &bundle_path).await?;
         proven.push(entry);
