@@ -472,17 +472,19 @@ MSG fields (in order):
 
 Ciphertext formation:
 	1.	(enc, ctx) = HPKE.SealSetup(pkR) where pkR is the receiver HPKE public key (for example derived from a prekey). For the fixed profile, enc is 32 bytes (X25519 KEM output).
-	2.	hpke_ct_hdr = HPKE.Seal(ctx, “”, CBOR(payload_hdr)).
-	3.	k_body = HPKE.Export(ctx, “veen/body-k”, 32).
-	4.	nonce = Trunc_24(Ht(“veen/nonce”, label || u64be(prev_ack) || client_id || u64be(client_seq))).
-	5.	aead_ct_body = AEAD_Encrypt(k_body, nonce, “”, body).
-	6.	hdr_len = u32be(len(hpke_ct_hdr)).
-	7.	body_len = u32be(len(aead_ct_body)).
-	8.	ciphertext = enc || hdr_len || body_len || hpke_ct_hdr || aead_ct_body.
-	9.	If pad_block > 0, right-pad ciphertext with zero bytes so that len(ciphertext) is a multiple of pad_block. Receivers MUST treat padding bytes as unauthenticated zeros and MUST strip them after parsing hdr_len/body_len and before AEAD_Decrypt.
-	10.	ct_hash = H(ciphertext). The hash covers the ciphertext including any right-padding bytes.
-	11.	leaf_hash = Ht(“veen/leaf”, label || profile_id || ct_hash || client_id || u64be(client_seq)).
-	12.	msg_id = leaf_hash.
+	2.	auth_ref_or_zero = auth_ref if present, else 32 zero bytes.
+	3.	aad = Ht(“veen/aad”, profile_id || label || client_id || u64be(client_seq) || u64be(prev_ack) || auth_ref_or_zero).
+	4.	hpke_ct_hdr = HPKE.Seal(ctx, aad, CBOR(payload_hdr)).
+	5.	k_body = HPKE.Export(ctx, “veen/body-k”, 32).
+	6.	nonce = Trunc_24(Ht(“veen/nonce”, label || u64be(prev_ack) || client_id || u64be(client_seq))).
+	7.	aead_ct_body = AEAD_Encrypt(k_body, nonce, aad, body).
+	8.	hdr_len = u32be(len(hpke_ct_hdr)).
+	9.	body_len = u32be(len(aead_ct_body)).
+	10.	ciphertext = enc || hdr_len || body_len || hpke_ct_hdr || aead_ct_body.
+	11.	If pad_block > 0, right-pad ciphertext with zero bytes so that len(ciphertext) is a multiple of pad_block. Receivers MUST treat padding bytes as unauthenticated zeros and MUST strip them after parsing hdr_len/body_len and before AEAD_Decrypt.
+	12.	ct_hash = H(ciphertext). The hash covers the ciphertext including any right-padding bytes.
+	13.	leaf_hash = Ht(“veen/leaf”, label || profile_id || ct_hash || client_id || u64be(client_seq)).
+	14.	msg_id = leaf_hash.
 
 RECEIPT fields (in order):
 	•	ver: uint (MUST be 1)
@@ -541,6 +543,8 @@ path: [ { dir: 0|1, sib: bstr(32) }, … ],
 peaks_after: [ bstr(32), … ]
 }
 
+Map keys are ordered exactly as listed for deterministic CBOR.
+
 Verification folds leaf_hash and path according to dir (0 for left, 1 for right) using Ht(“veen/mmr-node”, left || right) to reconstruct the relevant peak, and then folds peaks_after (ordered by increasing tree size, as in section 7) using Ht(“veen/mmr-root”, …) to yield mmr_root. The verifier checks that this mmr_root matches the mmr_root in some RECEIPT or CHECKPOINT.
 	9.	Client algorithms
 
@@ -553,7 +557,7 @@ Send:
 	•	Verify hub_sig using hub_pk.
 	•	Check invariants I1..I12.
 	•	Advance local MMR for this label to match mmr_root and stream_seq.
-	•	Set prev_ack = stream_seq for subsequent MSG under the same label.
+	•	Set prev_ack = stream_seq for subsequent MSG under the same label. Clients SHOULD advance prev_ack monotonically and MUST NOT decrease it for a given (label, client_id).
 	•	Rekey per receipt s: rk_next = HKDF(rk, “veen/rk” || u64be(s)) and derive send/recv keys from rk_next.
 	•	Refresh HPKE (new ctx, new enc) at least once per epoch and RECOMMENDED every M messages per (label, client_id), where M is implementation-defined (for example M = 256).
 
@@ -564,9 +568,10 @@ Receive:
 	4.	Decrypt:
 	•	Split ciphertext into enc (32 bytes), hdr_len (4 bytes), body_len (4 bytes), hpke_ct_hdr, and aead_ct_body as in section 5. Reject if ciphertext is shorter than 40 bytes, if hdr_len/body_len exceed MAX_HDR_BYTES/MAX_BODY_BYTES, or if the remaining ciphertext is shorter than hdr_len + body_len.
 	•	After consuming hpke_ct_hdr and aead_ct_body, any remaining bytes are padding. If pad_block > 0, verify remaining bytes are all zero and strip them; if pad_block == 0, reject any remaining bytes as E.SIZE.
-	•	Use HPKE.Open with enc to recover payload_hdr, and derive k_body via HPKE.Export(ctx, “veen/body-k”, 32). If ctx is not cached, reconstruct it via HPKE.SetupBaseR with enc and the receiver private key.
+	•	Recompute aad as in section 5 from profile_id, label, client_id, client_seq, prev_ack, and auth_ref (or 32 zero bytes if absent).
+	•	Use HPKE.Open with enc and aad to recover payload_hdr, and derive k_body via HPKE.Export(ctx, “veen/body-k”, 32). If ctx is not cached, reconstruct it via HPKE.SetupBaseR with enc and the receiver private key.
 	•	Recompute nonce as in section 5.
-	•	AEAD_Decrypt with k_body, nonce, and associated data “” to recover body.
+	•	AEAD_Decrypt with k_body, nonce, and associated data aad to recover body.
 	5.	Deliver decrypted payload to the application if all checks pass.
 	6.	Accept epochs E in [E_local - CLOCK_SKEW_EPOCHS, E_local + CLOCK_SKEW_EPOCHS] for labels.
 
@@ -580,10 +585,11 @@ For attachment i (0-based index, contiguous starting at 0 and ascending by 1):
 	4.	coid = H(c).
 
 att_root is a Merkle root over the ordered list of coids (sorted by attachment index i ascending) with:
+	•	Leaf: coid (no extra hashing)
 	•	Internal node: Ht(“veen/att-node”, left || right)
 	•	Root: Ht(“veen/att-root”, peak1 || …)
 
-where peaks are ordered and combined similarly to section 7.
+where peaks are ordered and combined similarly to section 7 (MMR-style folds over the ordered coid list).
 
 att_root is placed into payload_hdr.att_root. Verification requires recomputing the ordered coid list and the Merkle root and checking equality with att_root.
 	11.	Capability tokens and admission
@@ -607,9 +613,9 @@ allow.stream_ids MUST contain at least one entry. An empty array is invalid and 
 allow.rate is optional. If absent, no rate limit is enforced for that capability; if present, rate limits MUST follow the token bucket semantics in OP0.3.
 
 allow.ttl is a validity duration in seconds. In v0.0.1 core (without KEX1+ issued_at), hubs MUST bind an issued_at timestamp to each auth_ref on first observation and MUST enforce expiry as now <= issued_at + ttl. issued_at is defined as:
-	•	the hub’s hub_ts at the time of /authorize, if /authorize is used; or
-	•	the hub’s hub_ts at first successful MSG admission using the auth_ref, if /authorize is not used.
+	•	the hub’s hub_ts in the RECEIPT for the first successful MSG admission using the auth_ref.
 The issued_at chosen for a given auth_ref MUST remain stable for the lifetime of the admission record; re-verifying a cap_token MUST NOT extend its ttl.
+issued_at MUST be reconstructable from logs/receipts; hubs MUST NOT rely on hidden state for TTL evaluation. v0.0.1 MUST NOT use /authorize unless it produces a log-replayable receipt with a hub_ts used as issued_at.
 
 Each link in sig_chain is an Ed25519 signature over:
 
@@ -632,6 +638,7 @@ cap_ref = auth_ref
 If payload_hdr.cap_ref is present, MSG.auth_ref MUST be present and MUST equal payload_hdr.cap_ref to bind the encrypted payload to the same capability used for admission.
 
 Hubs MUST, at admission time, verify every signature in sig_chain back to the root (prev_link_hash = zeros). Any verification failure yields E.CAP. Hubs MAY cache validated cap_tokens keyed by auth_ref for performance.
+All sig_chain links are verified with issuer_pk; v0.0.1 does not define delegation or per-link signer rotation.
 
 Hubs MAY enforce admission via /authorize (section 16). A successful authorization installs an admission record keyed by auth_ref.
 
@@ -739,6 +746,7 @@ checkpoint_range:
 authorize:
 	•	Request: POST CBOR(cap_token)
 	•	Response: { auth_ref: bstr(32), expires_at: uint }
+	•	v0.0.1 MUST NOT use /authorize unless it produces a log-replayable receipt with a hub_ts used as issued_at.
 
 report_equivocation:
 	•	Request: POST two RECEIPT with identical (label, stream_seq) and differing leaf_hash or mmr_root

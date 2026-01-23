@@ -184,16 +184,18 @@ CBOR array with fixed field order:
 
 ### 4.2 Ciphertext construction (normative)
 1. `enc, ctx = HPKE.SealSetup(pkR)` (enc is 32 bytes).
-2. `hpke_ct_hdr = HPKE.Seal(ctx, "", CBOR(payload_hdr))`.
-3. `k_body = HPKE.Export(ctx, "veen/body-k", 32)`.
-4. `nonce = Trunc_24(Ht("veen/nonce", label || u64be(prev_ack) || client_id || u64be(client_seq)))`.
-5. `aead_ct_body = AEAD_Encrypt(k_body, nonce, "", body)`.
-6. `hdr_len = u32be(len(hpke_ct_hdr))`.
-7. `body_len = u32be(len(aead_ct_body))`.
-8. `ciphertext = enc || hdr_len || body_len || hpke_ct_hdr || aead_ct_body`.
-9. If `pad_block > 0`, right-pad with zeros to a multiple of `pad_block` (padding bytes are unauthenticated zeros).
-10. `ct_hash = H(ciphertext)`.
-11. `leaf_hash = Ht("veen/leaf", label || profile_id || ct_hash || client_id || u64be(client_seq))`.
+2. `auth_ref_or_zero = auth_ref if present, else 32 zero bytes`.
+3. `aad = Ht("veen/aad", profile_id || label || client_id || u64be(client_seq) || u64be(prev_ack) || auth_ref_or_zero)`.
+4. `hpke_ct_hdr = HPKE.Seal(ctx, aad, CBOR(payload_hdr))`.
+5. `k_body = HPKE.Export(ctx, "veen/body-k", 32)`.
+6. `nonce = Trunc_24(Ht("veen/nonce", label || u64be(prev_ack) || client_id || u64be(client_seq)))`.
+7. `aead_ct_body = AEAD_Encrypt(k_body, nonce, aad, body)`.
+8. `hdr_len = u32be(len(hpke_ct_hdr))`.
+9. `body_len = u32be(len(aead_ct_body))`.
+10. `ciphertext = enc || hdr_len || body_len || hpke_ct_hdr || aead_ct_body`.
+11. If `pad_block > 0`, right-pad with zeros to a multiple of `pad_block` (padding bytes are unauthenticated zeros).
+12. `ct_hash = H(ciphertext)`.
+13. `leaf_hash = Ht("veen/leaf", label || profile_id || ct_hash || client_id || u64be(client_seq))`.
 
 Receivers MUST parse ciphertext using `hdr_len`/`body_len` and:
 - Reject if `ciphertext` is shorter than `enc || hdr_len || body_len || hpke_ct_hdr || aead_ct_body`.
@@ -246,7 +248,10 @@ Unknown keys are rejected. `schema` is required.
 - Attachment `i` uses `k_att = HPKE.Export(ctx, "veen/att-k" || u64be(i), 32)`.
 - Nonce `n_att = Trunc_24(Ht("veen/att-nonce", msg_id || u64be(i)))`.
 - `coid = H(AEAD_Encrypt(k_att, n_att, "", attachment))`.
-- `att_root` is a Merkle root over ordered `coid` values.
+- Leaves are the ordered `coid` values (attachment index ascending).
+- Internal nodes are `Ht("veen/att-node", left || right)`.
+- Peaks are combined as `Ht("veen/att-root", concat(peaks))` with the same peak ordering and fold rules as section 5.1.
+- `att_root` is the resulting root.
 
 ---
 
@@ -266,7 +271,16 @@ Unknown keys are rejected. `schema` is required.
 - `peaks` is an array of 32-byte hashes ordered by increasing height (left-to-right within the same height). `concat(peaks)` is the raw 32-byte concatenation in that order.
 
 ### 5.2 Inclusion proof
-`mmr_proof` is a deterministic CBOR object containing the path and peaks.
+`mmr_proof` is a deterministic CBOR map with the following fixed keys:
+```
+{
+  ver: uint (MUST be 1),
+  leaf_hash: bstr32,
+  path: [ { dir: 0|1, sib: bstr32 }, ... ],
+  peaks_after: [ bstr32, ... ]
+}
+```
+Keys are ordered exactly as listed for deterministic CBOR.
 Verification MUST reproduce the `mmr_root` recorded in a RECEIPT or CHECKPOINT.
 
 ### 5.3 Proof compactness (normative)
@@ -312,7 +326,9 @@ Rules:
 - `auth_ref = Ht("veen/cap", CBOR(cap_token))`.
 - `MSG.auth_ref` MUST equal `payload_hdr.cap_ref` if `cap_ref` is present (enforced by clients/overlays; hubs do not inspect encrypted payloads).
 - `sig_chain` is ordered; each link is an Ed25519 signature over `Ht("veen/cap-link", CBOR(cap_token without sig_chain) || prev_sig)` where `prev_sig` is 64 zero bytes for the first link and the prior signature for subsequent links.
-- Hubs MUST verify all signatures in `sig_chain` and enforce TTL and rate limits. TTL evaluation uses `hub_ts` at admission time; the hub MUST bind a stable `issued_at` to each `auth_ref` on first successful admission (or `/authorize`) and enforce `hub_ts <= issued_at + ttl` for the lifetime of the admission record.
+- All `sig_chain` links are verified with `issuer_pk`; v0.0.1 does not define delegation or per-link signer rotation. The chain represents issuer re-signing history, not delegated authority.
+- Hubs MUST verify all signatures in `sig_chain` and enforce TTL and rate limits. TTL evaluation uses `hub_ts` at admission time; the hub MUST bind a stable `issued_at` to each `auth_ref` on first successful admission and enforce `hub_ts <= issued_at + ttl` for the lifetime of the admission record.
+- `issued_at` is defined as the `hub_ts` in the RECEIPT for the first accepted MSG that uses the `auth_ref`. It MUST be reconstructable from logs/receipts; a hub MUST NOT depend on hidden state to determine `issued_at`. v0.0.1 MUST NOT use `/authorize` unless it produces a log-replayable receipt with a `hub_ts` that serves as `issued_at`.
 - If a deployment cannot map `label -> stream_id`, it MUST document that hub-side stream scoping is disabled; clients MUST enforce scoping after decrypt.
 - CapToken revocation MUST be modeled as an overlay stream and is enforced by clients/overlays in v0.0.1 (hubs do not enforce revocation).
 - Unknown keys are rejected in `cap_token`, `allow`, and `rate`.
@@ -337,6 +353,8 @@ For any accepted (MSG, RECEIPT) pair:
 - **I13:** Admission order and error codes are deterministic given the same log prefix and configuration.
 
 Any violation MUST be rejected with a deterministic error code.
+
+`prev_ack` is the client’s last verified `RECEIPT.stream_seq` for the label. Clients SHOULD advance it monotonically and MUST NOT decrease it for a given `(label, client_id)`; hubs MAY reject regressions as `E.SEQ`.
 
 ---
 
