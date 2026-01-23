@@ -1,15 +1,18 @@
-use serde::{Deserialize, Serialize};
-use serde_bytes::Bytes;
+use serde::de::{SeqAccess, Visitor};
+use serde::ser::SerializeSeq;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_bytes::{ByteBuf, Bytes};
 use thiserror::Error;
 
 use crate::{
     label::Label,
     profile::ProfileId,
     wire::{
+        cbor::{seq_next_required, seq_no_trailing},
         derivation::{hash_tagged, TAG_NONCE, TAG_SIG},
         types::{
-            truncate_nonce, AuthRef, ClientId, CtHash, LeafHash, Signature64,
-            SignatureVerifyError, AEAD_NONCE_LEN,
+            truncate_nonce, AuthRef, ClientId, CtHash, LeafHash, Signature64, SignatureVerifyError,
+            AEAD_NONCE_LEN,
         },
         CborError,
     },
@@ -20,9 +23,8 @@ use super::signing::{serialize_signable, tagged_hash};
 /// Wire format version for `MSG` objects.
 pub const MSG_VERSION: u64 = 1;
 
-/// VEEN MSG object as defined in section 5 of spec-1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// VEEN MSG object as defined in section 4.1 of spec-1.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Msg {
     pub ver: u64,
     pub profile_id: ProfileId,
@@ -30,10 +32,8 @@ pub struct Msg {
     pub client_id: ClientId,
     pub client_seq: u64,
     pub prev_ack: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_ref: Option<AuthRef>,
     pub ct_hash: CtHash,
-    #[serde(with = "serde_bytes")]
     pub ciphertext: Vec<u8>,
     pub sig: Signature64,
 }
@@ -49,8 +49,7 @@ pub enum MsgVerifyError {
     Signature(#[from] SignatureVerifyError),
 }
 
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 struct MsgSignable<'a> {
     ver: u64,
     profile_id: &'a ProfileId,
@@ -58,7 +57,6 @@ struct MsgSignable<'a> {
     client_id: &'a ClientId,
     client_seq: u64,
     prev_ack: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     auth_ref: Option<&'a AuthRef>,
     ct_hash: &'a CtHash,
     ciphertext: &'a Bytes,
@@ -80,6 +78,95 @@ impl<'a> From<&'a Msg> for MsgSignable<'a> {
     }
 }
 
+impl Serialize for MsgSignable<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(9))?;
+        seq.serialize_element(&self.ver)?;
+        seq.serialize_element(&self.profile_id)?;
+        seq.serialize_element(&self.label)?;
+        seq.serialize_element(&self.client_id)?;
+        seq.serialize_element(&self.client_seq)?;
+        seq.serialize_element(&self.prev_ack)?;
+        seq.serialize_element(&self.auth_ref)?;
+        seq.serialize_element(&self.ct_hash)?;
+        seq.serialize_element(self.ciphertext)?;
+        seq.end()
+    }
+}
+
+impl Serialize for Msg {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(10))?;
+        seq.serialize_element(&self.ver)?;
+        seq.serialize_element(&self.profile_id)?;
+        seq.serialize_element(&self.label)?;
+        seq.serialize_element(&self.client_id)?;
+        seq.serialize_element(&self.client_seq)?;
+        seq.serialize_element(&self.prev_ack)?;
+        seq.serialize_element(&self.auth_ref.as_ref())?;
+        seq.serialize_element(&self.ct_hash)?;
+        seq.serialize_element(&Bytes::new(&self.ciphertext))?;
+        seq.serialize_element(&self.sig)?;
+        seq.end()
+    }
+}
+
+struct MsgVisitor;
+
+impl<'de> Visitor<'de> for MsgVisitor {
+    type Value = Msg;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VEEN MSG array with 10 elements")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let expecting = "VEEN MSG array with 10 elements";
+        let ver = seq_next_required(&mut seq, 0, expecting)?;
+        let profile_id = seq_next_required(&mut seq, 1, expecting)?;
+        let label = seq_next_required(&mut seq, 2, expecting)?;
+        let client_id = seq_next_required(&mut seq, 3, expecting)?;
+        let client_seq = seq_next_required(&mut seq, 4, expecting)?;
+        let prev_ack = seq_next_required(&mut seq, 5, expecting)?;
+        let auth_ref: Option<AuthRef> = seq_next_required(&mut seq, 6, expecting)?;
+        let ct_hash = seq_next_required(&mut seq, 7, expecting)?;
+        let ciphertext: ByteBuf = seq_next_required(&mut seq, 8, expecting)?;
+        let sig = seq_next_required(&mut seq, 9, expecting)?;
+        seq_no_trailing(&mut seq, 10, expecting)?;
+
+        Ok(Msg {
+            ver,
+            profile_id,
+            label,
+            client_id,
+            client_seq,
+            prev_ack,
+            auth_ref,
+            ct_hash,
+            ciphertext: ciphertext.into_vec(),
+            sig,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Msg {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(MsgVisitor)
+    }
+}
+
 impl Msg {
     /// Derives the AEAD nonce `Trunc_24(Ht("veen/nonce", …))` defined by the specification.
     #[must_use]
@@ -89,16 +176,15 @@ impl Msg {
         client_id: &ClientId,
         client_seq: u64,
     ) -> [u8; AEAD_NONCE_LEN] {
-        let mut data = Vec::with_capacity(
-            label.as_ref().len()
-                + std::mem::size_of::<u64>()
-                + client_id.as_ref().len()
-                + std::mem::size_of::<u64>(),
-        );
-        data.extend_from_slice(label.as_ref());
-        data.extend_from_slice(&prev_ack.to_be_bytes());
-        data.extend_from_slice(client_id.as_ref());
-        data.extend_from_slice(&client_seq.to_be_bytes());
+        let mut data = [0u8; 80];
+        let mut offset = 0;
+        data[offset..offset + 32].copy_from_slice(label.as_ref());
+        offset += 32;
+        data[offset..offset + 8].copy_from_slice(&prev_ack.to_be_bytes());
+        offset += 8;
+        data[offset..offset + 32].copy_from_slice(client_id.as_ref());
+        offset += 32;
+        data[offset..offset + 8].copy_from_slice(&client_seq.to_be_bytes());
 
         truncate_nonce(hash_tagged(TAG_NONCE, &data))
     }
@@ -342,18 +428,42 @@ mod tests {
         ciborium::ser::into_writer(&msg, &mut buf).unwrap();
         let value: Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
 
-        let map = match value {
-            Value::Map(entries) => entries,
-            _ => panic!("expected map"),
+        let array = match value {
+            Value::Array(entries) => entries,
+            _ => panic!("expected array"),
         };
 
-        let ciphertext_value = map
-            .into_iter()
-            .find(|(key, _)| matches!(key, Value::Text(text) if text == "ciphertext"))
-            .map(|(_, value)| value)
-            .expect("ciphertext entry");
+        let ciphertext_value = array.get(8).expect("ciphertext entry at index 8");
 
         assert!(matches!(ciphertext_value, Value::Bytes(_)));
+    }
+
+    #[test]
+    fn msg_serializes_as_cbor_array_with_null_auth_ref() {
+        let msg = Msg {
+            ver: MSG_VERSION,
+            profile_id: ProfileId::from_slice(&[0x20; 32]).unwrap(),
+            label: Label::from_slice(&[0x21; 32]).unwrap(),
+            client_id: ClientId::new([0x22; 32]),
+            client_seq: 2,
+            prev_ack: 1,
+            auth_ref: None,
+            ct_hash: CtHash::new([0x23; 32]),
+            ciphertext: vec![0xAA, 0xBB],
+            sig: Signature64::new([0x24; 64]),
+        };
+
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&msg, &mut buf).unwrap();
+        let value: Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+
+        let array = match value {
+            Value::Array(entries) => entries,
+            _ => panic!("expected array"),
+        };
+
+        assert_eq!(array.len(), 10);
+        assert!(matches!(array.get(6), Some(Value::Null)));
     }
 
     #[test]

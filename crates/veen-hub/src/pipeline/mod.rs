@@ -3974,9 +3974,7 @@ mod tests {
                 pipeline.publish_revocation(&payload).await.unwrap();
             }
 
-            let response = pipeline
-                .revocation_list(None, None, false, Some(2))
-                .await?;
+            let response = pipeline.revocation_list(None, None, false, Some(2)).await?;
             assert_eq!(response.revocations.len(), 2);
             assert!(response.revocations[0].ts >= response.revocations[1].ts);
             assert_eq!(response.revocations[0].ts, records[1].ts);

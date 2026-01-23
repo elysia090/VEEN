@@ -1,6 +1,7 @@
 use std::fmt;
 
-use serde::de::{Error as DeError, Visitor};
+use serde::de::{Error as DeError, MapAccess, Visitor};
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
@@ -14,19 +15,116 @@ use crate::{
 };
 
 /// Canonical payload header carried inside encrypted VEEN messages as defined
-/// in section 6 of spec-1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// in section 4.5 of spec-1.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PayloadHeader {
     pub schema: SchemaId,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<LeafHash>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub att_root: Option<AttachmentRoot>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cap_ref: Option<AuthRef>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
+}
+
+impl Serialize for PayloadHeader {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry(&1u64, &self.schema)?;
+        if let Some(parent_id) = &self.parent_id {
+            map.serialize_entry(&2u64, parent_id)?;
+        }
+        if let Some(att_root) = &self.att_root {
+            map.serialize_entry(&3u64, att_root)?;
+        }
+        if let Some(cap_ref) = &self.cap_ref {
+            map.serialize_entry(&4u64, cap_ref)?;
+        }
+        if let Some(expires_at) = &self.expires_at {
+            map.serialize_entry(&5u64, expires_at)?;
+        }
+        map.end()
+    }
+}
+
+struct PayloadHeaderVisitor;
+
+impl<'de> Visitor<'de> for PayloadHeaderVisitor {
+    type Value = PayloadHeader;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("VEEN payload header map with integer keys")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut schema: Option<SchemaId> = None;
+        let mut parent_id: Option<LeafHash> = None;
+        let mut att_root: Option<AttachmentRoot> = None;
+        let mut cap_ref: Option<AuthRef> = None;
+        let mut expires_at: Option<u64> = None;
+
+        while let Some(key) = map.next_key::<u64>()? {
+            match key {
+                1 => {
+                    if schema.is_some() {
+                        return Err(DeError::duplicate_field("schema"));
+                    }
+                    schema = Some(map.next_value()?);
+                }
+                2 => {
+                    if parent_id.is_some() {
+                        return Err(DeError::duplicate_field("parent_id"));
+                    }
+                    parent_id = Some(map.next_value()?);
+                }
+                3 => {
+                    if att_root.is_some() {
+                        return Err(DeError::duplicate_field("att_root"));
+                    }
+                    att_root = Some(map.next_value()?);
+                }
+                4 => {
+                    if cap_ref.is_some() {
+                        return Err(DeError::duplicate_field("cap_ref"));
+                    }
+                    cap_ref = Some(map.next_value()?);
+                }
+                5 => {
+                    if expires_at.is_some() {
+                        return Err(DeError::duplicate_field("expires_at"));
+                    }
+                    expires_at = Some(map.next_value()?);
+                }
+                _ => {
+                    return Err(DeError::custom(format!(
+                        "unknown payload header key: {key}"
+                    )));
+                }
+            }
+        }
+
+        let schema = schema.ok_or_else(|| DeError::missing_field("schema"))?;
+        Ok(PayloadHeader {
+            schema,
+            parent_id,
+            att_root,
+            cap_ref,
+            expires_at,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for PayloadHeader {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(PayloadHeaderVisitor)
+    }
 }
 
 /// Identifier of an attachment ciphertext (coid) derived as `H(ciphertext)`.
@@ -341,6 +439,7 @@ impl AsRef<[u8]> for AttachmentNode {
 
 #[cfg(test)]
 mod tests {
+    use ciborium::value::Value;
     use hex::FromHex;
 
     use super::*;
@@ -446,5 +545,51 @@ mod tests {
         let computed = AttachmentRoot::from_ciphertexts([c1.as_ref(), c2.as_ref(), c3.as_ref()])
             .expect("computed root");
         assert_eq!(computed, expected);
+    }
+
+    #[test]
+    fn payload_header_serializes_as_integer_keyed_map() {
+        let header = PayloadHeader {
+            schema: SchemaId::new([0x10; 32]),
+            parent_id: None,
+            att_root: Some(AttachmentRoot::new([0x11; 32])),
+            cap_ref: None,
+            expires_at: Some(42),
+        };
+
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&header, &mut buf).unwrap();
+        let value: Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+
+        let map = match value {
+            Value::Map(entries) => entries,
+            _ => panic!("expected map"),
+        };
+
+        let keys: Vec<u64> = map
+            .iter()
+            .map(|(key, _)| match key {
+                Value::Integer(value) => (*value).try_into().unwrap(),
+                _ => panic!("expected integer key"),
+            })
+            .collect();
+
+        assert!(keys.contains(&1));
+        assert!(keys.contains(&3));
+        assert!(keys.contains(&5));
+        assert_eq!(keys.len(), 3);
+    }
+
+    #[test]
+    fn payload_header_rejects_unknown_key() {
+        let value = Value::Map(vec![(
+            Value::Integer(9.into()),
+            Value::Bytes(vec![0x01; 32]),
+        )]);
+
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&value, &mut buf).unwrap();
+        let decoded: Result<PayloadHeader, _> = ciborium::de::from_reader(buf.as_slice());
+        assert!(decoded.is_err());
     }
 }

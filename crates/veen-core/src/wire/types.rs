@@ -177,21 +177,26 @@ impl LeafHash {
         client_id: &ClientId,
         client_seq: u64,
     ) -> Self {
-        let mut data = Vec::with_capacity(label.as_ref().len() + profile_id.as_ref().len() + 8 + 64);
-        data.extend_from_slice(label.as_ref());
-        data.extend_from_slice(profile_id.as_ref());
-        data.extend_from_slice(ct_hash.as_ref());
-        data.extend_from_slice(client_id.as_ref());
-        data.extend_from_slice(&client_seq.to_be_bytes());
+        let mut data = [0u8; 136];
+        let mut offset = 0;
+        data[offset..offset + 32].copy_from_slice(label.as_ref());
+        offset += 32;
+        data[offset..offset + 32].copy_from_slice(profile_id.as_ref());
+        offset += 32;
+        data[offset..offset + 32].copy_from_slice(ct_hash.as_ref());
+        offset += 32;
+        data[offset..offset + 32].copy_from_slice(client_id.as_ref());
+        offset += 32;
+        data[offset..offset + 8].copy_from_slice(&client_seq.to_be_bytes());
         Self(hash_tagged(TAG_LEAF, &data))
     }
 
     /// Computes the attachment nonce `Trunc_24(Ht("veen/att-nonce", msg_id || u64be(i)))`.
     #[must_use]
     pub fn attachment_nonce(&self, index: u64) -> [u8; AEAD_NONCE_LEN] {
-        let mut data = Vec::with_capacity(self.as_ref().len() + std::mem::size_of::<u64>());
-        data.extend_from_slice(self.as_ref());
-        data.extend_from_slice(&index.to_be_bytes());
+        let mut data = [0u8; 40];
+        data[..HASH_LEN].copy_from_slice(self.as_ref());
+        data[HASH_LEN..].copy_from_slice(&index.to_be_bytes());
         truncate_nonce(hash_tagged(TAG_ATT_NONCE, &data))
     }
 }

@@ -19,3 +19,4 @@ pub use types::{
     AuthRef, ClientId, CtHash, LeafHash, MmrNode, MmrRoot, Signature64, SignatureVerifyError,
     AEAD_NONCE_LEN,
 };
+mod cbor;
