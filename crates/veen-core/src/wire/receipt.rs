@@ -1,9 +1,12 @@
-use serde::{Deserialize, Serialize};
+use serde::de::{SeqAccess, Visitor};
+use serde::ser::SerializeSeq;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::{
     label::Label,
     wire::{
+        cbor::{seq_next_required, seq_no_trailing},
         types::{LeafHash, MmrRoot, Signature64, SignatureVerifyError, HASH_LEN},
         CborError,
     },
@@ -17,9 +20,8 @@ use super::{
 /// Wire format version for `RECEIPT` objects.
 pub const RECEIPT_VERSION: u64 = 1;
 
-/// VEEN RECEIPT object as defined in section 5 of spec-1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// VEEN RECEIPT object as defined in section 4.3 of spec-1.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Receipt {
     pub ver: u64,
     pub label: Label,
@@ -41,8 +43,7 @@ pub enum ReceiptVerifyError {
     Signature(#[from] SignatureVerifyError),
 }
 
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 struct ReceiptSignable<'a> {
     ver: u64,
     label: &'a Label,
@@ -62,6 +63,83 @@ impl<'a> From<&'a Receipt> for ReceiptSignable<'a> {
             mmr_root: &value.mmr_root,
             hub_ts: value.hub_ts,
         }
+    }
+}
+
+impl Serialize for Receipt {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(7))?;
+        seq.serialize_element(&self.ver)?;
+        seq.serialize_element(&self.label)?;
+        seq.serialize_element(&self.stream_seq)?;
+        seq.serialize_element(&self.leaf_hash)?;
+        seq.serialize_element(&self.mmr_root)?;
+        seq.serialize_element(&self.hub_ts)?;
+        seq.serialize_element(&self.hub_sig)?;
+        seq.end()
+    }
+}
+
+impl Serialize for ReceiptSignable<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(6))?;
+        seq.serialize_element(&self.ver)?;
+        seq.serialize_element(&self.label)?;
+        seq.serialize_element(&self.stream_seq)?;
+        seq.serialize_element(&self.leaf_hash)?;
+        seq.serialize_element(&self.mmr_root)?;
+        seq.serialize_element(&self.hub_ts)?;
+        seq.end()
+    }
+}
+
+struct ReceiptVisitor;
+
+impl<'de> Visitor<'de> for ReceiptVisitor {
+    type Value = Receipt;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VEEN RECEIPT array with 7 elements")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let expecting = "VEEN RECEIPT array with 7 elements";
+        let ver = seq_next_required(&mut seq, 0, expecting)?;
+        let label = seq_next_required(&mut seq, 1, expecting)?;
+        let stream_seq = seq_next_required(&mut seq, 2, expecting)?;
+        let leaf_hash = seq_next_required(&mut seq, 3, expecting)?;
+        let mmr_root = seq_next_required(&mut seq, 4, expecting)?;
+        let hub_ts = seq_next_required(&mut seq, 5, expecting)?;
+        let hub_sig = seq_next_required(&mut seq, 6, expecting)?;
+        seq_no_trailing(&mut seq, 7, expecting)?;
+
+        Ok(Receipt {
+            ver,
+            label,
+            stream_seq,
+            leaf_hash,
+            mmr_root,
+            hub_ts,
+            hub_sig,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Receipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(ReceiptVisitor)
     }
 }
 
@@ -185,5 +263,29 @@ mod tests {
                 SignatureVerifyError::VerificationFailed(_)
             ))
         ));
+    }
+
+    #[test]
+    fn receipt_serializes_as_cbor_array() {
+        let receipt = Receipt {
+            ver: RECEIPT_VERSION,
+            label: Label::from_slice(&[0x41; 32]).unwrap(),
+            stream_seq: 7,
+            leaf_hash: LeafHash::new([0x42; 32]),
+            mmr_root: MmrRoot::new([0x43; 32]),
+            hub_ts: 1_700_000_123,
+            hub_sig: Signature64::new([0x44; 64]),
+        };
+
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&receipt, &mut buf).unwrap();
+        let value: ciborium::value::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+
+        let array = match value {
+            ciborium::value::Value::Array(entries) => entries,
+            _ => panic!("expected array"),
+        };
+
+        assert_eq!(array.len(), 7);
     }
 }

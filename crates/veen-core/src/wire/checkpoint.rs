@@ -1,9 +1,12 @@
-use serde::{Deserialize, Serialize};
+use serde::de::{SeqAccess, Visitor};
+use serde::ser::SerializeSeq;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::{
     label::Label,
     wire::{
+        cbor::{seq_next_required, seq_no_trailing},
         types::{MmrRoot, Signature64, SignatureVerifyError, HASH_LEN},
         CborError,
     },
@@ -17,9 +20,8 @@ use super::{
 /// Wire format version for `CHECKPOINT` objects.
 pub const CHECKPOINT_VERSION: u64 = 1;
 
-/// VEEN CHECKPOINT object as defined in section 5 of spec-1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// VEEN CHECKPOINT object as defined in section 4.4 of spec-1.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
     pub ver: u64,
     pub label_prev: Label,
@@ -28,7 +30,6 @@ pub struct Checkpoint {
     pub mmr_root: MmrRoot,
     pub epoch: u64,
     pub hub_sig: Signature64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub witness_sigs: Option<Vec<Signature64>>,
 }
 
@@ -43,8 +44,7 @@ pub enum CheckpointVerifyError {
     Signature(#[from] SignatureVerifyError),
 }
 
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 struct CheckpointSignable<'a> {
     ver: u64,
     label_prev: &'a Label,
@@ -52,7 +52,6 @@ struct CheckpointSignable<'a> {
     upto_seq: u64,
     mmr_root: &'a MmrRoot,
     epoch: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     witness_sigs: Option<&'a [Signature64]>,
 }
 
@@ -67,6 +66,93 @@ impl<'a> From<&'a Checkpoint> for CheckpointSignable<'a> {
             epoch: value.epoch,
             witness_sigs: value.witness_sigs.as_deref(),
         }
+    }
+}
+
+impl Serialize for Checkpoint {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq =
+            serializer.serialize_seq(Some(if self.witness_sigs.is_some() { 8 } else { 7 }))?;
+        seq.serialize_element(&self.ver)?;
+        seq.serialize_element(&self.label_prev)?;
+        seq.serialize_element(&self.label_curr)?;
+        seq.serialize_element(&self.upto_seq)?;
+        seq.serialize_element(&self.mmr_root)?;
+        seq.serialize_element(&self.epoch)?;
+        seq.serialize_element(&self.hub_sig)?;
+        if let Some(witness_sigs) = &self.witness_sigs {
+            seq.serialize_element(witness_sigs)?;
+        }
+        seq.end()
+    }
+}
+
+impl Serialize for CheckpointSignable<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq =
+            serializer.serialize_seq(Some(if self.witness_sigs.is_some() { 7 } else { 6 }))?;
+        seq.serialize_element(&self.ver)?;
+        seq.serialize_element(&self.label_prev)?;
+        seq.serialize_element(&self.label_curr)?;
+        seq.serialize_element(&self.upto_seq)?;
+        seq.serialize_element(&self.mmr_root)?;
+        seq.serialize_element(&self.epoch)?;
+        if let Some(witness_sigs) = &self.witness_sigs {
+            seq.serialize_element(witness_sigs)?;
+        }
+        seq.end()
+    }
+}
+
+struct CheckpointVisitor;
+
+impl<'de> Visitor<'de> for CheckpointVisitor {
+    type Value = Checkpoint;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VEEN CHECKPOINT array with 7 or 8 elements")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let expecting = "VEEN CHECKPOINT array with 7 or 8 elements";
+        let ver = seq_next_required(&mut seq, 0, expecting)?;
+        let label_prev = seq_next_required(&mut seq, 1, expecting)?;
+        let label_curr = seq_next_required(&mut seq, 2, expecting)?;
+        let upto_seq = seq_next_required(&mut seq, 3, expecting)?;
+        let mmr_root = seq_next_required(&mut seq, 4, expecting)?;
+        let epoch = seq_next_required(&mut seq, 5, expecting)?;
+        let hub_sig = seq_next_required(&mut seq, 6, expecting)?;
+        let witness_sigs: Option<Vec<Signature64>> = seq.next_element()?;
+        seq_no_trailing(&mut seq, 8, expecting)?;
+
+        Ok(Checkpoint {
+            ver,
+            label_prev,
+            label_curr,
+            upto_seq,
+            mmr_root,
+            epoch,
+            hub_sig,
+            witness_sigs,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Checkpoint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(CheckpointVisitor)
     }
 }
 
@@ -194,5 +280,55 @@ mod tests {
                 SignatureVerifyError::VerificationFailed(_)
             ))
         ));
+    }
+
+    #[test]
+    fn checkpoint_serializes_as_cbor_array_without_witnesses() {
+        let checkpoint = Checkpoint {
+            ver: CHECKPOINT_VERSION,
+            label_prev: Label::from_slice(&[0x51; 32]).unwrap(),
+            label_curr: Label::from_slice(&[0x52; 32]).unwrap(),
+            upto_seq: 5,
+            mmr_root: MmrRoot::new([0x53; 32]),
+            epoch: 12,
+            hub_sig: Signature64::new([0x54; 64]),
+            witness_sigs: None,
+        };
+
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&checkpoint, &mut buf).unwrap();
+        let value: ciborium::value::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+
+        let array = match value {
+            ciborium::value::Value::Array(entries) => entries,
+            _ => panic!("expected array"),
+        };
+
+        assert_eq!(array.len(), 7);
+    }
+
+    #[test]
+    fn checkpoint_serializes_as_cbor_array_with_witnesses() {
+        let checkpoint = Checkpoint {
+            ver: CHECKPOINT_VERSION,
+            label_prev: Label::from_slice(&[0x61; 32]).unwrap(),
+            label_curr: Label::from_slice(&[0x62; 32]).unwrap(),
+            upto_seq: 9,
+            mmr_root: MmrRoot::new([0x63; 32]),
+            epoch: 21,
+            hub_sig: Signature64::new([0x64; 64]),
+            witness_sigs: Some(vec![Signature64::new([0x65; 64])]),
+        };
+
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&checkpoint, &mut buf).unwrap();
+        let value: ciborium::value::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+
+        let array = match value {
+            ciborium::value::Value::Array(entries) => entries,
+            _ => panic!("expected array"),
+        };
+
+        assert_eq!(array.len(), 8);
     }
 }
