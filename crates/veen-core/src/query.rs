@@ -23,6 +23,16 @@ pub enum EvidenceMode {
     Full,
 }
 
+impl EvidenceMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            EvidenceMode::None => "none",
+            EvidenceMode::Spot => "spot",
+            EvidenceMode::Full => "full",
+        }
+    }
+}
+
 /// Evidence policy attached to a query descriptor or result digest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidencePolicy {
@@ -125,12 +135,6 @@ impl QueryFilter {
             )?);
         }
 
-        if let Some(from) = self.time.from.as_ref() {
-            if from.trim().is_empty() {
-                return Err(QueryError::InvalidTimestamp);
-            }
-        }
-
         self.time.normalize()?;
 
         Ok(self)
@@ -185,13 +189,7 @@ fn normalize_list_in_place(
     invalid_error: QueryError,
 ) -> Result<(), QueryError> {
     for value in values.iter_mut() {
-        let trimmed_len = value.trim().len();
-        if trimmed_len == 0 {
-            return Err(invalid_error);
-        }
-        if trimmed_len != value.len() {
-            trim_string_in_place(value);
-        }
+        normalize_string_in_place(value, invalid_error)?;
     }
 
     Ok(())
@@ -227,13 +225,19 @@ fn normalize_non_empty(value: &str, error: QueryError) -> Result<String, QueryEr
     }
 }
 
-fn trim_string_in_place(value: &mut String) {
-    let start = value.len() - value.trim_start().len();
-    let end = value.trim_end().len();
-    if start > 0 {
-        value.drain(..start);
+fn normalize_string_in_place(
+    value: &mut String,
+    invalid_error: QueryError,
+) -> Result<(), QueryError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(invalid_error);
     }
-    value.truncate(end - start);
+    if trimmed.len() != value.len() {
+        value.clear();
+        value.push_str(trimmed);
+    }
+    Ok(())
 }
 
 impl QueryDescriptor {
@@ -583,11 +587,7 @@ fn validate_evidence_summary(
         .and_then(Value::as_str)
         .ok_or(QueryError::InvalidEvidenceSummary)?;
 
-    let expected_mode = match policy.mode {
-        EvidenceMode::None => "none",
-        EvidenceMode::Spot => "spot",
-        EvidenceMode::Full => "full",
-    };
+    let expected_mode = policy.mode.as_str();
 
     if mode != expected_mode {
         return Err(QueryError::EvidenceModeMismatch);
