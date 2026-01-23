@@ -186,7 +186,7 @@ pub struct QueryDescriptor {
 
 fn normalize_list_in_place(
     values: &mut [String],
-    invalid_error: QueryError,
+    invalid_error: &QueryError,
 ) -> Result<(), QueryError> {
     for value in values.iter_mut() {
         normalize_string_in_place(value, &invalid_error)?;
@@ -199,7 +199,7 @@ fn normalize_optional_list(
     mut values: Vec<String>,
     invalid_error: QueryError,
 ) -> Result<Vec<String>, QueryError> {
-    normalize_list_in_place(&mut values, invalid_error)?;
+    normalize_list_in_place(&mut values, &invalid_error)?;
     Ok(values)
 }
 
@@ -212,7 +212,7 @@ fn normalize_required_list(
         return Err(empty_error);
     }
 
-    normalize_list_in_place(&mut values, invalid_error)?;
+    normalize_list_in_place(&mut values, &invalid_error)?;
     Ok(values)
 }
 
