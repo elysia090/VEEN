@@ -118,6 +118,23 @@ impl LatencyRecorder {
         Ok(())
     }
 
+    pub fn merge_from(&mut self, other: &LatencyRecorder) -> anyhow::Result<()> {
+        let stats = other.stats();
+        let count = stats.count.load(Ordering::Relaxed);
+        if count == 0 {
+            return Ok(());
+        }
+        self.histogram.add(other.histogram())?;
+        self.count.fetch_add(count, Ordering::Relaxed);
+        self.sum
+            .fetch_add(stats.sum.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.min
+            .fetch_min(stats.min.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.max
+            .fetch_max(stats.max.load(Ordering::Relaxed), Ordering::Relaxed);
+        Ok(())
+    }
+
     pub fn histogram(&self) -> &Histogram<u64> {
         &self.histogram
     }
