@@ -752,6 +752,20 @@ impl HubPipeline {
         })
     }
 
+    pub async fn commit_status(&self, stream: &str, seq: u64) -> Result<bool> {
+        let guard = self.inner.read().await;
+        let Some(runtime) = guard.streams.get(stream) else {
+            return Ok(false);
+        };
+        let last_seq = runtime
+            .state
+            .messages
+            .last()
+            .map(|message| message.seq)
+            .unwrap_or_default();
+        Ok(last_seq >= seq)
+    }
+
     async fn capability_err<T>(
         &self,
         guard: RwLockWriteGuard<'_, HubState>,
