@@ -75,6 +75,7 @@ struct HubState {
     revocations: RevocationView,
     revocation_log: Vec<RevocationRecord>,
     revocation_index: HashMap<(RevocationKind, RevocationTarget), RevocationRecord>,
+    revocation_order: BTreeMap<u64, Vec<usize>>,
     admission_events: VecDeque<AdmissionLogEvent>,
     authority_records: Vec<AuthorityRecord>,
     authority_view: AuthorityView,
@@ -298,13 +299,14 @@ impl HubPipeline {
     pub async fn initialise(config: &HubRuntimeConfig, storage: &HubStorage) -> Result<Self> {
         let observability = HubObservability::new();
         let streams = load_existing_streams(storage).await?;
-        let attachment_ref_counts = rebuild_attachment_ref_counts(storage, &streams).await?;
+        let attachment_ref_counts = load_attachment_ref_counts(storage, &streams).await?;
         let capabilities = load_capabilities(storage).await?;
         let anchors = load_anchor_log(storage).await?;
         let revocation_log = load_revocation_log(storage).await?;
         let mut revocations = RevocationView::new();
         revocations.extend(revocation_log.iter().cloned());
         let revocation_index = build_revocation_index(&revocation_log);
+        let revocation_order = build_revocation_order(&revocation_log);
         let authority_records = load_authority_records(storage).await?;
         let mut authority_view = AuthorityView::new();
         authority_view.extend(authority_records.iter().cloned());
@@ -330,6 +332,7 @@ impl HubPipeline {
             revocations,
             revocation_log,
             revocation_index,
+            revocation_order,
             authority_records,
             authority_view,
             label_class_records,
@@ -893,7 +896,9 @@ impl HubPipeline {
         let mut guard = self.inner.write().await;
         guard.revocations.insert(record.clone());
         update_revocation_index(&mut guard.revocation_index, &record);
-        guard.revocation_log.push(record);
+        let index = guard.revocation_log.len();
+        guard.revocation_log.push(record.clone());
+        update_revocation_order(&mut guard.revocation_order, record.ts, index);
         persist_revocations(&self.storage, &guard.revocation_log).await
     }
 
@@ -1486,35 +1491,45 @@ impl HubPipeline {
     ) -> Result<HubRevocationList> {
         let now = current_unix_timestamp()?;
         let guard = self.inner.read().await;
-        let mut entries: Vec<HubRevocationEntry> = guard
-            .revocation_log
-            .iter()
-            .filter(|record| match kind {
-                Some(expected) => record.kind == expected,
-                None => true,
-            })
-            .filter(|record| match since {
-                Some(ts) => record.ts >= ts,
-                None => true,
-            })
-            .filter_map(|record| {
+        let mut entries = Vec::new();
+        let range = match since {
+            Some(start) => guard.revocation_order.range(start..),
+            None => guard.revocation_order.range(..),
+        };
+        for (_, indices) in range.rev() {
+            for &index in indices {
+                let record = guard
+                    .revocation_log
+                    .get(index)
+                    .expect("revocation index entry missing");
+                if let Some(expected) = kind {
+                    if record.kind != expected {
+                        continue;
+                    }
+                }
                 let active_now = record.is_active_at(now);
                 if active_only && !active_now {
-                    return None;
+                    continue;
                 }
-                Some(HubRevocationEntry {
+                entries.push(HubRevocationEntry {
                     kind: revocation_kind_label(record.kind).to_string(),
                     target: hex::encode(record.target.as_bytes()),
                     ts: record.ts,
                     ttl: record.ttl,
                     reason: record.reason.clone(),
                     active_now,
-                })
-            })
-            .collect();
-        entries.sort_by(|a, b| b.ts.cmp(&a.ts));
-        if let Some(limit) = limit {
-            entries.truncate(limit);
+                });
+                if let Some(limit) = limit {
+                    if entries.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            if let Some(limit) = limit {
+                if entries.len() >= limit {
+                    break;
+                }
+            }
         }
         Ok(HubRevocationList {
             ok: true,
@@ -2625,6 +2640,17 @@ async fn rebuild_attachment_ref_counts(
     Ok(counts)
 }
 
+async fn load_attachment_ref_counts(
+    storage: &HubStorage,
+    streams: &HashMap<String, StreamRuntime>,
+) -> Result<HashMap<String, u64>> {
+    if let Some(counts) = attachments::load_refcounts(storage).await? {
+        return Ok(counts);
+    }
+
+    rebuild_attachment_ref_counts(storage, streams).await
+}
+
 #[derive(Default)]
 struct LoadedStreamState {
     state: HubStreamState,
@@ -3447,6 +3473,18 @@ fn build_revocation_index(
     index
 }
 
+fn build_revocation_order(records: &[RevocationRecord]) -> BTreeMap<u64, Vec<usize>> {
+    let mut order = BTreeMap::new();
+    for (index, record) in records.iter().enumerate() {
+        update_revocation_order(&mut order, record.ts, index);
+    }
+    order
+}
+
+fn update_revocation_order(order: &mut BTreeMap<u64, Vec<usize>>, ts: u64, index: usize) {
+    order.entry(ts).or_default().push(index);
+}
+
 fn build_schema_registry(records: &[SchemaDescriptor]) -> SchemaRegistry {
     let mut registry = SchemaRegistry::new();
     for (idx, descriptor) in records.iter().cloned().enumerate() {
@@ -3891,6 +3929,58 @@ mod tests {
                 response.revocations[0].reason.as_deref(),
                 Some("compromised")
             );
+            Ok::<(), anyhow::Error>(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn revocation_list_returns_latest_first_with_limit() -> Result<()> {
+        let rt = Runtime::new()?;
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let pipeline = init_pipeline(temp.path()).await;
+            let now = current_unix_timestamp()?;
+            let targets = [
+                RevocationTarget::new([0x01; REVOCATION_TARGET_LEN]),
+                RevocationTarget::new([0x02; REVOCATION_TARGET_LEN]),
+                RevocationTarget::new([0x03; REVOCATION_TARGET_LEN]),
+            ];
+            let records = [
+                RevocationRecord {
+                    kind: RevocationKind::AuthRef,
+                    target: targets[0],
+                    reason: None,
+                    ts: now.saturating_sub(30),
+                    ttl: None,
+                },
+                RevocationRecord {
+                    kind: RevocationKind::AuthRef,
+                    target: targets[1],
+                    reason: None,
+                    ts: now.saturating_sub(10),
+                    ttl: None,
+                },
+                RevocationRecord {
+                    kind: RevocationKind::AuthRef,
+                    target: targets[2],
+                    reason: None,
+                    ts: now.saturating_sub(20),
+                    ttl: None,
+                },
+            ];
+            for record in &records {
+                let payload = encode_envelope(schema_revocation(), record.clone());
+                pipeline.publish_revocation(&payload).await.unwrap();
+            }
+
+            let response = pipeline
+                .revocation_list(None, None, false, Some(2))
+                .await?;
+            assert_eq!(response.revocations.len(), 2);
+            assert!(response.revocations[0].ts >= response.revocations[1].ts);
+            assert_eq!(response.revocations[0].ts, records[1].ts);
+            assert_eq!(response.revocations[1].ts, records[2].ts);
             Ok::<(), anyhow::Error>(())
         })?;
         Ok(())
