@@ -4,9 +4,12 @@ use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
-    hash::{h, ht},
+    hash::h,
     meta::SchemaId,
-    wire::types::{AuthRef, LeafHash, HASH_LEN},
+    wire::{
+        derivation::{hash_tagged, TAG_ATT_NODE, TAG_ATT_ROOT},
+        types::{AuthRef, LeafHash, HASH_LEN},
+    },
     LengthError,
 };
 
@@ -215,7 +218,7 @@ impl AttachmentRoot {
                 for peak in peaks {
                     data.extend_from_slice(peak.as_ref());
                 }
-                Some(Self(ht("veen/att-root", &data)))
+                Some(Self(hash_tagged(TAG_ATT_ROOT, &data)))
             }
         }
     }
@@ -321,7 +324,7 @@ impl AttachmentNode {
         let mut data = [0u8; HASH_LEN * 2];
         data[..HASH_LEN].copy_from_slice(left.as_ref());
         data[HASH_LEN..].copy_from_slice(right.as_ref());
-        Self(ht("veen/att-node", &data))
+        Self(hash_tagged(TAG_ATT_NODE, &data))
     }
 
     #[must_use]

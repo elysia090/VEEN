@@ -3,12 +3,13 @@ use serde_bytes::Bytes;
 use thiserror::Error;
 
 use crate::{
-    hash::ht,
     label::Label,
     profile::ProfileId,
     wire::{
+        derivation::{hash_tagged, TAG_NONCE, TAG_SIG},
         types::{
-            AuthRef, ClientId, CtHash, LeafHash, Signature64, SignatureVerifyError, AEAD_NONCE_LEN,
+            truncate_nonce, AuthRef, ClientId, CtHash, LeafHash, Signature64,
+            SignatureVerifyError, AEAD_NONCE_LEN,
         },
         CborError,
     },
@@ -80,13 +81,6 @@ impl<'a> From<&'a Msg> for MsgSignable<'a> {
 }
 
 impl Msg {
-    /// Computes the truncated hash used for AEAD nonces.
-    fn truncate_nonce_bytes(digest: [u8; 32]) -> [u8; AEAD_NONCE_LEN] {
-        let mut nonce = [0u8; AEAD_NONCE_LEN];
-        nonce.copy_from_slice(&digest[..AEAD_NONCE_LEN]);
-        nonce
-    }
-
     /// Derives the AEAD nonce `Trunc_24(Ht("veen/nonce", …))` defined by the specification.
     #[must_use]
     pub fn derive_body_nonce(
@@ -106,7 +100,7 @@ impl Msg {
         data.extend_from_slice(client_id.as_ref());
         data.extend_from_slice(&client_seq.to_be_bytes());
 
-        Self::truncate_nonce_bytes(ht("veen/nonce", &data))
+        truncate_nonce(hash_tagged(TAG_NONCE, &data))
     }
 
     /// Returns the AEAD nonce derived from the message fields.
@@ -160,7 +154,7 @@ impl Msg {
     /// Computes the domain separated hash `Ht("veen/sig", …)` used for
     /// Ed25519 signatures over `MSG` objects.
     pub fn signing_tagged_hash(&self) -> Result<[u8; 32], CborError> {
-        tagged_hash("veen/sig", &MsgSignable::from(self))
+        tagged_hash(TAG_SIG, &MsgSignable::from(self))
     }
 
     /// Verifies `MSG.sig` using the embedded `client_id` and signing digest.
@@ -179,7 +173,7 @@ mod tests {
     use hex::FromHex;
 
     use super::*;
-    use crate::hash::ht;
+    use crate::wire::derivation::{hash_tagged, TAG_LEAF, TAG_NONCE, TAG_SIG};
 
     #[test]
     fn msg_version_matches_spec() {
@@ -267,7 +261,7 @@ mod tests {
         data.extend_from_slice(ct_hash.as_ref());
         data.extend_from_slice(client_id.as_ref());
         data.extend_from_slice(&client_seq.to_be_bytes());
-        let expected = LeafHash::new(ht("veen/leaf", &data));
+        let expected = LeafHash::new(hash_tagged(TAG_LEAF, &data));
 
         assert_eq!(msg.leaf_hash(), expected);
         assert_eq!(msg.msg_id(), expected);
@@ -291,7 +285,7 @@ mod tests {
         let view = MsgSignable::from(&msg);
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&view, &mut buf).unwrap();
-        let expected = ht("veen/sig", &buf);
+        let expected = hash_tagged(TAG_SIG, &buf);
 
         let computed = msg.signing_tagged_hash().unwrap();
         assert_eq!(computed.as_slice(), expected);
@@ -317,7 +311,7 @@ mod tests {
         data.extend_from_slice(&msg.prev_ack.to_be_bytes());
         data.extend_from_slice(msg.client_id.as_ref());
         data.extend_from_slice(&msg.client_seq.to_be_bytes());
-        let digest = ht("veen/nonce", &data);
+        let digest = hash_tagged(TAG_NONCE, &data);
 
         let mut expected = [0u8; AEAD_NONCE_LEN];
         expected.copy_from_slice(&digest[..AEAD_NONCE_LEN]);
