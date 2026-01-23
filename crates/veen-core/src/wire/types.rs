@@ -82,36 +82,36 @@ macro_rules! fixed_bytes_type {
             }
         }
 
-        struct $nameVisitor;
-
-        impl<'de> Visitor<'de> for $nameVisitor {
-            type Value = $name;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str($expecting)
-            }
-
-            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-            where
-                E: DeError,
-            {
-                $name::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
-            }
-
-            fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
-            where
-                E: DeError,
-            {
-                self.visit_bytes(&v)
-            }
-        }
-
         impl<'de> Deserialize<'de> for $name {
             fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
             where
                 D: Deserializer<'de>,
             {
-                deserializer.deserialize_bytes($nameVisitor)
+                struct VisitorImpl;
+
+                impl<'de> Visitor<'de> for VisitorImpl {
+                    type Value = $name;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        formatter.write_str($expecting)
+                    }
+
+                    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+                    where
+                        E: DeError,
+                    {
+                        $name::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
+                    }
+
+                    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+                    where
+                        E: DeError,
+                    {
+                        self.visit_bytes(&v)
+                    }
+                }
+
+                deserializer.deserialize_bytes(VisitorImpl)
             }
         }
 
