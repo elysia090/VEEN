@@ -5585,7 +5585,11 @@ async fn handle_cap_authorize_remote(client: HubHttpClient, args: CapAuthorizeAr
     let auth_ref_hex = hex::encode(response.auth_ref.as_ref());
     println!("authorised capability");
     println!("  auth_ref: {}", auth_ref_hex);
-    println!("  expires_at: {}", response.expires_at);
+    let expires_at = response
+        .expires_at
+        .map(|ts| ts.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("  expires_at: {}", expires_at);
     log_cli_goal("CLI.CAP0.AUTHORIZE");
     Ok(())
 }
@@ -9778,9 +9782,7 @@ impl StreamMessageCache {
     }
 
     async fn audit_resource_classes(&mut self, stream: &str) -> Result<&HashSet<String>> {
-        if let std::collections::hash_map::Entry::Vacant(entry) =
-            self.audit_resource_classes.entry(stream.to_string())
-        {
+        if !self.audit_resource_classes.contains_key(stream) {
             let messages = self.messages(stream).await?;
             let mut classes = HashSet::new();
             for message in messages {
@@ -9790,7 +9792,8 @@ impl StreamMessageCache {
                 let payload: QueryAuditLog = parse_message_payload(message)?;
                 classes.insert(payload.resource_class);
             }
-            entry.insert(classes);
+            self.audit_resource_classes
+                .insert(stream.to_string(), classes);
         }
         Ok(self
             .audit_resource_classes
