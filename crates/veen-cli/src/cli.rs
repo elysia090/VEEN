@@ -5585,7 +5585,11 @@ async fn handle_cap_authorize_remote(client: HubHttpClient, args: CapAuthorizeAr
     let auth_ref_hex = hex::encode(response.auth_ref.as_ref());
     println!("authorised capability");
     println!("  auth_ref: {}", auth_ref_hex);
-    println!("  expires_at: {}", response.expires_at);
+    let expires_at = response
+        .expires_at
+        .map(|ts| ts.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("  expires_at: {}", expires_at);
     log_cli_goal("CLI.CAP0.AUTHORIZE");
     Ok(())
 }

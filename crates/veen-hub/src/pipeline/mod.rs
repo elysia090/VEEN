@@ -749,6 +749,10 @@ impl HubPipeline {
         };
         stream_runtime.push_proven(message_with_proof.clone());
 
+        let issued_at_dirty =
+            apply_capability_issued_at(&mut guard.capabilities, auth_ref.as_deref(), submitted_at);
+        capability_store_dirty |= issued_at_dirty;
+
         let usage_applied_dirty =
             match apply_client_usage_update(&mut guard.capabilities, usage_update) {
                 Ok(dirty) => dirty,
@@ -1111,8 +1115,6 @@ impl HubPipeline {
             bail!("capability ttl must be greater than zero seconds");
         }
 
-        let now = current_unix_timestamp()?;
-        let expires_at = now.saturating_add(token.allow.ttl);
         let auth_ref = token.auth_ref().context("computing capability auth_ref")?;
         let auth_ref_hex = hex::encode(auth_ref.as_ref());
         let subject_hex = hex::encode(token.subject_pk.as_ref());
@@ -1130,7 +1132,6 @@ impl HubPipeline {
             streams = ?stream_ids,
             ttl = token.allow.ttl,
             rate = ?token.allow.rate,
-            expires_at,
             "authorised capability admission"
         );
 
@@ -1146,7 +1147,8 @@ impl HubPipeline {
             subject: subject_hex,
             stream_ids,
             stream_id_set,
-            expires_at,
+            issued_at: None,
+            expires_at: None,
             ttl: token.allow.ttl,
             rate: token.allow.rate.clone(),
             bucket_state,
@@ -1161,7 +1163,7 @@ impl HubPipeline {
 
         Ok(AuthorizeResponse {
             auth_ref,
-            expires_at,
+            expires_at: None,
         })
     }
 
@@ -1546,13 +1548,19 @@ impl HubPipeline {
                 (None, None, None)
             };
 
+        let expires_at = record.and_then(|rec| rec.computed_expires_at());
+        let currently_valid = record.is_some()
+            && expires_at
+                .map(|expires_at| expires_at > now)
+                .unwrap_or(true);
+
         Ok(HubCapStatusResponse {
             ok: true,
             auth_ref: auth_ref_hex.to_string(),
             hub_known: record.is_some(),
-            currently_valid: record.map(|rec| rec.expires_at > now).unwrap_or(false),
+            currently_valid,
             revoked: revocation_kind.is_some(),
-            expires_at: record.map(|rec| rec.expires_at),
+            expires_at,
             revocation_kind,
             revocation_ts,
             reason,
@@ -2093,6 +2101,16 @@ impl CapabilityStore {
         }
     }
 
+    fn normalise_expiry(&mut self) {
+        for record in self.records.values_mut() {
+            if let Some(issued_at) = record.issued_at {
+                record.expires_at = Some(issued_at.saturating_add(record.ttl));
+            } else {
+                record.expires_at = None;
+            }
+        }
+    }
+
     fn rebuild_stream_indexes(&mut self) {
         for record in self.records.values_mut() {
             record.rebuild_stream_index();
@@ -2106,7 +2124,10 @@ struct CapabilityRecord {
     stream_ids: Vec<String>,
     #[serde(skip)]
     stream_id_set: HashSet<String>,
-    expires_at: u64,
+    #[serde(default)]
+    issued_at: Option<u64>,
+    #[serde(default)]
+    expires_at: Option<u64>,
     ttl: u64,
     rate: Option<CapTokenRate>,
     #[serde(default)]
@@ -2166,6 +2187,11 @@ impl CapabilityRecord {
 
     fn allows_stream(&self, stream_hex: &str) -> bool {
         self.stream_id_set.contains(stream_hex)
+    }
+
+    fn computed_expires_at(&self) -> Option<u64> {
+        self.issued_at
+            .map(|issued_at| issued_at.saturating_add(self.ttl))
     }
 }
 
@@ -2283,7 +2309,8 @@ impl SubmitError {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthorizeResponse {
     pub auth_ref: AuthRef,
-    pub expires_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3307,6 +3334,26 @@ fn apply_client_usage_update(
     Ok(store_dirty)
 }
 
+fn apply_capability_issued_at(
+    store: &mut CapabilityStore,
+    auth_ref: Option<&str>,
+    issued_at: u64,
+) -> bool {
+    let Some(auth_ref) = auth_ref else {
+        return false;
+    };
+
+    if let Some(record) = store.records.get_mut(auth_ref) {
+        if record.issued_at.is_none() {
+            record.issued_at = Some(issued_at);
+            record.expires_at = Some(issued_at.saturating_add(record.ttl));
+            return true;
+        }
+    }
+
+    false
+}
+
 fn enforce_capability(
     store: &mut CapabilityStore,
     auth_ref: &str,
@@ -3322,12 +3369,12 @@ fn enforce_capability(
     }
 
     let mut store_dirty = false;
-    if let Some(expired) = store
-        .records
-        .get(auth_ref)
-        .map(|record| record.expires_at < now)
-    {
-        if expired {
+    if let Some(record) = store.records.get(auth_ref) {
+        if record
+            .computed_expires_at()
+            .map(|expires_at| expires_at < now)
+            .unwrap_or(false)
+        {
             store.records.remove(auth_ref);
             return Err(CapabilityError::Expired {
                 auth_ref: auth_ref.to_string(),
@@ -3487,6 +3534,7 @@ async fn load_capabilities(storage: &HubStorage) -> Result<CapabilityStore> {
     let mut store: CapabilityStore = serde_json::from_slice(&data)
         .with_context(|| format!("parsing capability store from {}", path.display()))?;
     store.normalise_bucket_state();
+    store.normalise_expiry();
     store.rebuild_stream_indexes();
     Ok(store)
 }
@@ -3918,7 +3966,8 @@ mod tests {
                         subject: "client".into(),
                         stream_ids: vec!["core/test".into()],
                         stream_id_set: ["core/test".to_string()].into_iter().collect(),
-                        expires_at,
+                        issued_at: Some(expires_at.saturating_sub(600)),
+                        expires_at: Some(expires_at),
                         ttl: 600,
                         rate: None,
                         bucket_state: None,
@@ -3962,7 +4011,8 @@ mod tests {
                     subject: "client".into(),
                     stream_ids: vec!["deadbeef".into()],
                     stream_id_set: HashSet::new(),
-                    expires_at: 1,
+                    issued_at: None,
+                    expires_at: Some(1),
                     ttl: 1,
                     rate: None,
                     bucket_state: None,
