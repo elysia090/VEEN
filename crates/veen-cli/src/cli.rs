@@ -9778,9 +9778,7 @@ impl StreamMessageCache {
     }
 
     async fn audit_resource_classes(&mut self, stream: &str) -> Result<&HashSet<String>> {
-        if let std::collections::hash_map::Entry::Vacant(entry) =
-            self.audit_resource_classes.entry(stream.to_string())
-        {
+        if !self.audit_resource_classes.contains_key(stream) {
             let messages = self.messages(stream).await?;
             let mut classes = HashSet::new();
             for message in messages {
@@ -9790,7 +9788,8 @@ impl StreamMessageCache {
                 let payload: QueryAuditLog = parse_message_payload(message)?;
                 classes.insert(payload.resource_class);
             }
-            entry.insert(classes);
+            self.audit_resource_classes
+                .insert(stream.to_string(), classes);
         }
         Ok(self
             .audit_resource_classes
