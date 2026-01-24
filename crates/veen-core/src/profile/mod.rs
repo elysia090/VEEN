@@ -1,6 +1,8 @@
 use ciborium::ser::into_writer;
 use hex::encode;
-use serde::{Deserialize, Serialize};
+use serde::de::{Error as DeError, MapAccess, Visitor};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 mod error;
 mod id;
@@ -11,18 +13,171 @@ pub use self::id::ProfileId;
 use crate::ht;
 
 /// The canonical VEEN cryptographic profile definition.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Profile {
     pub aead: &'static str,
     pub kdf: &'static str,
     pub sig: &'static str,
     pub dh: &'static str,
-    #[serde(rename = "hpke_suite")]
     pub hpke_suite: &'static str,
     pub epoch_sec: u64,
     pub pad_block: u64,
     pub mmr_hash: &'static str,
+}
+
+impl Serialize for Profile {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(8))?;
+        map.serialize_entry(&1u64, &self.aead)?;
+        map.serialize_entry(&2u64, &self.kdf)?;
+        map.serialize_entry(&3u64, &self.sig)?;
+        map.serialize_entry(&4u64, &self.dh)?;
+        map.serialize_entry(&5u64, &self.hpke_suite)?;
+        map.serialize_entry(&6u64, &self.epoch_sec)?;
+        map.serialize_entry(&7u64, &self.pad_block)?;
+        map.serialize_entry(&8u64, &self.mmr_hash)?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Profile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ProfileVisitor;
+
+        fn require_value<'de, E>(
+            label: &'static str,
+            value: Option<String>,
+        ) -> Result<String, E>
+        where
+            E: DeError,
+        {
+            value.ok_or_else(|| DeError::missing_field(label))
+        }
+
+        fn resolve_allowed<'de, E>(
+            field: &'static str,
+            value: String,
+            allowed: &'static str,
+        ) -> Result<&'static str, E>
+        where
+            E: DeError,
+        {
+            if value == allowed {
+                Ok(allowed)
+            } else {
+                Err(DeError::custom(format!(
+                    "unsupported {field} value {value}"
+                )))
+            }
+        }
+
+        impl<'de> Visitor<'de> for ProfileVisitor {
+            type Value = Profile;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a VEEN profile map with integer keys 1..=8")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut aead: Option<String> = None;
+                let mut kdf: Option<String> = None;
+                let mut sig: Option<String> = None;
+                let mut dh: Option<String> = None;
+                let mut hpke_suite: Option<String> = None;
+                let mut epoch_sec: Option<u64> = None;
+                let mut pad_block: Option<u64> = None;
+                let mut mmr_hash: Option<String> = None;
+
+                while let Some(key) = map.next_key::<u64>()? {
+                    match key {
+                        1 => {
+                            if aead.replace(map.next_value()?).is_some() {
+                                return Err(DeError::custom("duplicate profile key 1"));
+                            }
+                        }
+                        2 => {
+                            if kdf.replace(map.next_value()?).is_some() {
+                                return Err(DeError::custom("duplicate profile key 2"));
+                            }
+                        }
+                        3 => {
+                            if sig.replace(map.next_value()?).is_some() {
+                                return Err(DeError::custom("duplicate profile key 3"));
+                            }
+                        }
+                        4 => {
+                            if dh.replace(map.next_value()?).is_some() {
+                                return Err(DeError::custom("duplicate profile key 4"));
+                            }
+                        }
+                        5 => {
+                            if hpke_suite.replace(map.next_value()?).is_some() {
+                                return Err(DeError::custom("duplicate profile key 5"));
+                            }
+                        }
+                        6 => {
+                            if epoch_sec.replace(map.next_value()?).is_some() {
+                                return Err(DeError::custom("duplicate profile key 6"));
+                            }
+                        }
+                        7 => {
+                            if pad_block.replace(map.next_value()?).is_some() {
+                                return Err(DeError::custom("duplicate profile key 7"));
+                            }
+                        }
+                        8 => {
+                            if mmr_hash.replace(map.next_value()?).is_some() {
+                                return Err(DeError::custom("duplicate profile key 8"));
+                            }
+                        }
+                        _ => {
+                            return Err(DeError::custom(format!(
+                                "unknown profile key {key}"
+                            )));
+                        }
+                    }
+                }
+
+                let aead =
+                    resolve_allowed("aead", require_value("1 (aead)", aead)?, "xchacha20poly1305")?;
+                let kdf =
+                    resolve_allowed("kdf", require_value("2 (kdf)", kdf)?, "hkdf-sha256")?;
+                let sig = resolve_allowed("sig", require_value("3 (sig)", sig)?, "ed25519")?;
+                let dh = resolve_allowed("dh", require_value("4 (dh)", dh)?, "x25519")?;
+                let hpke_suite = resolve_allowed(
+                    "hpke_suite",
+                    require_value("5 (hpke_suite)", hpke_suite)?,
+                    "X25519-HKDF-SHA256-CHACHA20POLY1305",
+                )?;
+                let epoch_sec = epoch_sec.ok_or_else(|| DeError::missing_field("6 (epoch_sec)"))?;
+                let pad_block = pad_block.ok_or_else(|| DeError::missing_field("7 (pad_block)"))?;
+                let mmr_hash =
+                    resolve_allowed("mmr_hash", require_value("8 (mmr_hash)", mmr_hash)?, "sha256")?;
+
+                Ok(Profile {
+                    aead,
+                    kdf,
+                    sig,
+                    dh,
+                    hpke_suite,
+                    epoch_sec,
+                    pad_block,
+                    mmr_hash,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(ProfileVisitor)
+    }
 }
 
 impl Default for Profile {
@@ -70,7 +225,7 @@ mod tests {
         let as_hex = id.encode_hex::<String>();
         assert_eq!(
             as_hex,
-            "d70369a2b28de76cfc9be41353b5f9c7c398d4135cc937074f3617dafd1209f5"
+            "1db91032b4bf4cd8b9f56a782b299458e6f782d3a1276f04c50c7b02651038ca"
         );
     }
 

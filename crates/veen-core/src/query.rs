@@ -229,13 +229,12 @@ fn normalize_string_in_place(
     value: &mut String,
     invalid_error: &QueryError,
 ) -> Result<(), QueryError> {
-    let trimmed = value.trim();
+    let trimmed = value.trim().to_string();
     if trimmed.is_empty() {
         return Err(invalid_error.clone());
     }
     if trimmed.len() != value.len() {
-        value.clear();
-        value.push_str(trimmed);
+        *value = trimmed;
     }
     Ok(())
 }
