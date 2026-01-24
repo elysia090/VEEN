@@ -245,11 +245,7 @@ async fn handle_commit_wait(
         Ok(false) => (StatusCode::NOT_FOUND, "commit not available".to_string()).into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "commit wait failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                err.to_string(),
-            )
-                .into_response()
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
         }
     }
 }

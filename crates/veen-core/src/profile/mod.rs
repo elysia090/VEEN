@@ -50,17 +50,14 @@ impl<'de> Deserialize<'de> for Profile {
     {
         struct ProfileVisitor;
 
-        fn require_value<'de, E>(
-            label: &'static str,
-            value: Option<String>,
-        ) -> Result<String, E>
+        fn require_value<E>(label: &'static str, value: Option<String>) -> Result<String, E>
         where
             E: DeError,
         {
             value.ok_or_else(|| DeError::missing_field(label))
         }
 
-        fn resolve_allowed<'de, E>(
+        fn resolve_allowed<E>(
             field: &'static str,
             value: String,
             allowed: &'static str,
@@ -140,17 +137,17 @@ impl<'de> Deserialize<'de> for Profile {
                             }
                         }
                         _ => {
-                            return Err(DeError::custom(format!(
-                                "unknown profile key {key}"
-                            )));
+                            return Err(DeError::custom(format!("unknown profile key {key}")));
                         }
                     }
                 }
 
-                let aead =
-                    resolve_allowed("aead", require_value("1 (aead)", aead)?, "xchacha20poly1305")?;
-                let kdf =
-                    resolve_allowed("kdf", require_value("2 (kdf)", kdf)?, "hkdf-sha256")?;
+                let aead = resolve_allowed(
+                    "aead",
+                    require_value("1 (aead)", aead)?,
+                    "xchacha20poly1305",
+                )?;
+                let kdf = resolve_allowed("kdf", require_value("2 (kdf)", kdf)?, "hkdf-sha256")?;
                 let sig = resolve_allowed("sig", require_value("3 (sig)", sig)?, "ed25519")?;
                 let dh = resolve_allowed("dh", require_value("4 (dh)", dh)?, "x25519")?;
                 let hpke_suite = resolve_allowed(
@@ -160,8 +157,11 @@ impl<'de> Deserialize<'de> for Profile {
                 )?;
                 let epoch_sec = epoch_sec.ok_or_else(|| DeError::missing_field("6 (epoch_sec)"))?;
                 let pad_block = pad_block.ok_or_else(|| DeError::missing_field("7 (pad_block)"))?;
-                let mmr_hash =
-                    resolve_allowed("mmr_hash", require_value("8 (mmr_hash)", mmr_hash)?, "sha256")?;
+                let mmr_hash = resolve_allowed(
+                    "mmr_hash",
+                    require_value("8 (mmr_hash)", mmr_hash)?,
+                    "sha256",
+                )?;
 
                 Ok(Profile {
                     aead,

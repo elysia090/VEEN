@@ -234,14 +234,8 @@ async fn merge_task_latencies(
     end: Arc<Mutex<LatencyRecorder>>,
     task_latencies: TaskLatencies,
 ) -> Result<()> {
-    verify
-        .lock()
-        .await
-        .merge_from(&task_latencies.verify)?;
-    commit
-        .lock()
-        .await
-        .merge_from(&task_latencies.commit)?;
+    verify.lock().await.merge_from(&task_latencies.verify)?;
+    commit.lock().await.merge_from(&task_latencies.commit)?;
     end.lock().await.merge_from(&task_latencies.end)?;
     Ok(())
 }

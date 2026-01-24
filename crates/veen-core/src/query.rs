@@ -189,7 +189,7 @@ fn normalize_list_in_place(
     invalid_error: &QueryError,
 ) -> Result<(), QueryError> {
     for value in values.iter_mut() {
-        normalize_string_in_place(value, &invalid_error)?;
+        normalize_string_in_place(value, invalid_error)?;
     }
 
     Ok(())

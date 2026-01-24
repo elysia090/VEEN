@@ -567,10 +567,11 @@ impl HubPipeline {
                     );
                 }
 
-                if guard
-                    .revocations
-                    .is_revoked(RevocationKind::ClientId, client_target, submitted_at)
-                {
+                if guard.revocations.is_revoked(
+                    RevocationKind::ClientId,
+                    client_target,
+                    submitted_at,
+                ) {
                     return Err(anyhow::Error::new(CapabilityError::ClientIdRevoked {
                         client_id: client_id.clone(),
                     }));
@@ -729,10 +730,8 @@ impl HubPipeline {
                 leaf_hash: leaf_hex,
             }));
         }
-        let (computed_seq, mmr_root, proof) =
-            tracing::info_span!("hub_submit.mmr_append").in_scope(|| {
-                stream_runtime.mmr.append_with_proof(leaf)
-            });
+        let (computed_seq, mmr_root, proof) = tracing::info_span!("hub_submit.mmr_append")
+            .in_scope(|| stream_runtime.mmr.append_with_proof(leaf));
         debug_assert_eq!(computed_seq, seq, "stream mmr seq must match message seq");
         stream_runtime.insert_message_with_leaf(stored_message.clone(), leaf);
         let mmr_root_hex = hex::encode(mmr_root.as_bytes());
@@ -1065,7 +1064,12 @@ impl HubPipeline {
                 .proven_messages
                 .front()
                 .map(|entry| entry.message.seq);
-            let last_seq = runtime.state.messages.last().map(|msg| msg.seq).unwrap_or(0);
+            let last_seq = runtime
+                .state
+                .messages
+                .last()
+                .map(|msg| msg.seq)
+                .unwrap_or(0);
             let proven_tail = runtime.proven_messages_from(from);
             (window_start, last_seq, proven_tail)
         };
@@ -2699,8 +2703,7 @@ fn collect_recent_dedup_entries(
         }
     }
 
-    let mut entries: Vec<DedupCandidate> =
-        heap.into_iter().map(|entry| entry.0).collect();
+    let mut entries: Vec<DedupCandidate> = heap.into_iter().map(|entry| entry.0).collect();
     entries.sort_by_key(|entry| (entry.ts, entry.seq));
     Ok(entries.into_iter().map(|entry| entry.key).collect())
 }
