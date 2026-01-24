@@ -49,7 +49,6 @@ pub(crate) struct CheckpointSignable<'a> {
     upto_seq: u64,
     mmr_root: &'a MmrRoot,
     epoch: u64,
-    witness_sigs: Option<&'a [Signature64]>,
 }
 
 impl<'a> From<&'a Checkpoint> for CheckpointSignable<'a> {
@@ -61,7 +60,6 @@ impl<'a> From<&'a Checkpoint> for CheckpointSignable<'a> {
             upto_seq: value.upto_seq,
             mmr_root: &value.mmr_root,
             epoch: value.epoch,
-            witness_sigs: value.witness_sigs.as_deref(),
         }
     }
 }
@@ -93,17 +91,13 @@ impl Serialize for CheckpointSignable<'_> {
     where
         S: Serializer,
     {
-        let len = if self.witness_sigs.is_some() { 7 } else { 6 };
-        serialize_fixed_seq(serializer, len, |seq| {
+        serialize_fixed_seq(serializer, 6, |seq| {
             seq.serialize_element(&self.ver)?;
             seq.serialize_element(&self.label_prev)?;
             seq.serialize_element(&self.label_curr)?;
             seq.serialize_element(&self.upto_seq)?;
             seq.serialize_element(&self.mmr_root)?;
             seq.serialize_element(&self.epoch)?;
-            if let Some(witness_sigs) = &self.witness_sigs {
-                seq.serialize_element(witness_sigs)?;
-            }
             Ok(())
         })
     }
@@ -130,7 +124,7 @@ impl<'de> Visitor<'de> for CheckpointVisitor {
         let mmr_root = seq_next_required(&mut seq, 4, expecting)?;
         let epoch = seq_next_required(&mut seq, 5, expecting)?;
         let hub_sig = seq_next_required(&mut seq, 6, expecting)?;
-        let witness_sigs: Option<Vec<Signature64>> = seq.next_element()?;
+        let witness_sigs = seq.next_element::<Vec<Signature64>>()?;
         seq_no_trailing(&mut seq, 8, expecting)?;
 
         Ok(Checkpoint {
@@ -337,5 +331,24 @@ mod tests {
         };
 
         assert_eq!(array.len(), 8);
+    }
+
+    #[test]
+    fn checkpoint_rejects_null_witnesses() {
+        let mut buf = Vec::new();
+        let payload = ciborium::value::Value::Array(vec![
+            ciborium::value::Value::Integer(CHECKPOINT_VERSION.into()),
+            ciborium::value::Value::Bytes(vec![0x11; 32]),
+            ciborium::value::Value::Bytes(vec![0x12; 32]),
+            ciborium::value::Value::Integer(7u8.into()),
+            ciborium::value::Value::Bytes(vec![0x13; 32]),
+            ciborium::value::Value::Integer(9u8.into()),
+            ciborium::value::Value::Bytes(vec![0x14; 64]),
+            ciborium::value::Value::Null,
+        ]);
+        ciborium::ser::into_writer(&payload, &mut buf).unwrap();
+
+        let decoded: Result<Checkpoint, _> = ciborium::de::from_reader(buf.as_slice());
+        assert!(decoded.is_err());
     }
 }
