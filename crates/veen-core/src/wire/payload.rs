@@ -277,20 +277,25 @@ impl AttachmentRoot {
         I: IntoIterator<Item = AttachmentId>,
     {
         let mut peaks = Vec::new();
-        let mut seq = 0u64;
+        let mut peak_heights = Vec::new();
 
         for id in ids {
-            seq = seq.checked_add(1)?;
             let mut carry = AttachmentNode::from(id);
-            let mut index = seq;
+            let mut height = 0u32;
 
-            while index & 1 == 0 {
-                let left = peaks.pop()?;
+            while let Some(index) = peak_heights.iter().position(|h| *h == height) {
+                let left = peaks.remove(index);
+                peak_heights.remove(index);
                 carry = AttachmentNode::combine(&left, &carry);
-                index >>= 1;
+                height = height.saturating_add(1);
             }
 
-            peaks.push(carry);
+            let insert_at = peak_heights
+                .iter()
+                .position(|h| *h > height)
+                .unwrap_or(peaks.len());
+            peaks.insert(insert_at, carry);
+            peak_heights.insert(insert_at, height);
         }
 
         Self::from_peaks(&peaks)
@@ -530,15 +535,22 @@ mod tests {
         let coid3 = AttachmentId::from_ciphertext(c3);
 
         let mut peaks = Vec::new();
-        for (seq, id) in [coid1, coid2, coid3].into_iter().enumerate() {
+        let mut peak_heights = Vec::new();
+        for id in [coid1, coid2, coid3] {
             let mut carry = AttachmentNode::from(id);
-            let mut index = seq + 1;
-            while index & 1 == 0 {
-                let left = peaks.pop().unwrap();
+            let mut height = 0u32;
+            while let Some(index) = peak_heights.iter().position(|h| *h == height) {
+                let left = peaks.remove(index);
+                peak_heights.remove(index);
                 carry = AttachmentNode::combine(&left, &carry);
-                index >>= 1;
+                height = height.saturating_add(1);
             }
-            peaks.push(carry);
+            let insert_at = peak_heights
+                .iter()
+                .position(|h| *h > height)
+                .unwrap_or(peaks.len());
+            peaks.insert(insert_at, carry);
+            peak_heights.insert(insert_at, height);
         }
         let expected = AttachmentRoot::from_peaks(&peaks).expect("expected root");
 
