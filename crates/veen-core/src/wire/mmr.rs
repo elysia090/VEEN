@@ -6,6 +6,7 @@ use crate::wire::types::{LeafHash, MmrNode, MmrRoot};
 pub struct Mmr {
     seq: u64,
     peaks: Vec<MmrNode>,
+    peak_heights: Vec<u32>,
 }
 
 impl Mmr {
@@ -21,7 +22,7 @@ impl Mmr {
         self.seq
     }
 
-    /// Returns the current peaks ordered by increasing tree size.
+    /// Returns the current peaks ordered by increasing height.
     #[must_use]
     pub fn peaks(&self) -> &[MmrNode] {
         &self.peaks
@@ -52,11 +53,12 @@ impl Mmr {
     ) -> (u64, MmrRoot, Option<MmrProof>) {
         self.seq = self.seq.checked_add(1).expect("stream_seq overflow");
         let mut carry = MmrNode::from(leaf);
-        let mut seq = self.seq;
+        let mut height = 0u32;
         let mut path = with_proof.then(Vec::new);
 
-        while seq & 1 == 0 {
-            let left = self.peaks.pop().expect("folding requires an existing peak");
+        while let Some(index) = self.peak_heights.iter().position(|h| *h == height) {
+            let left = self.peaks.remove(index);
+            self.peak_heights.remove(index);
             if let Some(path) = path.as_mut() {
                 path.push(MmrPathNode {
                     dir: Direction::Left,
@@ -64,11 +66,17 @@ impl Mmr {
                 });
             }
             carry = MmrNode::combine(&left, &carry);
-            seq >>= 1;
+            height = height.saturating_add(1);
         }
 
         let peaks_after = path.as_ref().map(|_| self.peaks.clone());
-        self.peaks.push(carry);
+        let insert_at = self
+            .peak_heights
+            .iter()
+            .position(|h| *h > height)
+            .unwrap_or(self.peaks.len());
+        self.peaks.insert(insert_at, carry);
+        self.peak_heights.insert(insert_at, height);
         let root = MmrRoot::from_peaks(&self.peaks).expect("peaks must be non-empty");
 
         let proof = path.map(|path| MmrProof {
@@ -117,9 +125,9 @@ mod tests {
         let leaf3 = leaf(0x33);
         let (seq3, root3) = mmr.append(leaf3);
         assert_eq!(seq3, 3);
-        let expected_root = MmrRoot::from_peaks(&[expected_fold, MmrNode::from(leaf3)]).unwrap();
+        let expected_root = MmrRoot::from_peaks(&[MmrNode::from(leaf3), expected_fold]).unwrap();
         assert_eq!(root3, expected_root);
-        assert_eq!(mmr.peaks(), &[expected_fold, MmrNode::from(leaf3)]);
+        assert_eq!(mmr.peaks(), &[MmrNode::from(leaf3), expected_fold]);
     }
 
     #[test]
