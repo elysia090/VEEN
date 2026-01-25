@@ -10,7 +10,6 @@ pub struct Mmr {
     peaks_by_height: [Option<MmrNode>; MAX_HEIGHT],
     peak_bitmap: u64,
     peaks_scratch: Vec<MmrNode>,
-    root_scratch: Vec<u8>,
 }
 
 impl Mmr {
@@ -98,8 +97,8 @@ impl Mmr {
             self.peaks_scratch.push(peak);
         }
         let peak_index = peak_index.expect("new peak must be recorded");
-        let root = MmrRoot::from_peaks_with_scratch(&self.peaks_scratch, &mut self.root_scratch)
-            .expect("peaks must be non-empty");
+        let root =
+            MmrRoot::from_peaks(&self.peaks_scratch).expect("peaks must be non-empty");
 
         let proof = path.map(|path| MmrProof {
             ver: PROOF_VERSION,
@@ -136,7 +135,6 @@ impl Default for Mmr {
             peaks_by_height: [None; MAX_HEIGHT],
             peak_bitmap: 0,
             peaks_scratch: Vec::with_capacity(MAX_HEIGHT),
-            root_scratch: Vec::with_capacity(MAX_HEIGHT * 32),
         }
     }
 }
