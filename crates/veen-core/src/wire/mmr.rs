@@ -6,6 +6,8 @@ use crate::wire::types::{LeafHash, MmrNode, MmrRoot};
 pub struct Mmr {
     seq: u64,
     peaks_by_height: Vec<Option<MmrNode>>,
+    peaks_scratch: Vec<MmrNode>,
+    root_scratch: Vec<u8>,
 }
 
 impl Mmr {
@@ -78,20 +80,26 @@ impl Mmr {
             panic!("mmr height overflow");
         }
 
-        let peaks_after = path.as_ref().map(|_| {
-            (height + 1..Self::MAX_HEIGHT)
-                .filter_map(|idx| self.peaks_by_height[idx])
-                .collect::<Vec<_>>()
-        });
         self.peaks_by_height[height] = Some(carry);
-        let peaks = self.collect_peaks();
-        let root = MmrRoot::from_peaks(&peaks).expect("peaks must be non-empty");
+        self.peaks_scratch.clear();
+        let mut peak_index = None;
+        for (idx, peak) in self.peaks_by_height.iter().enumerate() {
+            if let Some(peak) = peak {
+                if idx == height {
+                    peak_index = Some(self.peaks_scratch.len());
+                }
+                self.peaks_scratch.push(*peak);
+            }
+        }
+        let peak_index = peak_index.expect("new peak must be recorded");
+        let root = MmrRoot::from_peaks_with_scratch(&self.peaks_scratch, &mut self.root_scratch)
+            .expect("peaks must be non-empty");
 
         let proof = path.map(|path| MmrProof {
             ver: PROOF_VERSION,
             leaf_hash: leaf,
             path,
-            peaks_after: peaks_after.unwrap_or_default(),
+            peaks_after: self.peaks_scratch[peak_index.saturating_add(1)..].to_vec(),
         });
 
         (self.seq, root, proof)
@@ -110,6 +118,8 @@ impl Default for Mmr {
         Self {
             seq: 0,
             peaks_by_height: vec![None; Self::MAX_HEIGHT],
+            peaks_scratch: Vec::with_capacity(Self::MAX_HEIGHT),
+            root_scratch: Vec::with_capacity(Self::MAX_HEIGHT * 32),
         }
     }
 }

@@ -248,6 +248,25 @@ impl MmrRoot {
         }
         Some(Self(hash_tagged(TAG_MMR_ROOT, &data)))
     }
+
+    /// Computes an MMR root using the provided scratch buffer to avoid reallocations.
+    #[must_use]
+    pub fn from_peaks_with_scratch(peaks: &[MmrNode], scratch: &mut Vec<u8>) -> Option<Self> {
+        if peaks.is_empty() {
+            return None;
+        }
+
+        if peaks.len() == 1 {
+            return Some(Self::from(peaks[0]));
+        }
+
+        scratch.clear();
+        scratch.reserve(peaks.len() * HASH_LEN);
+        for peak in peaks {
+            scratch.extend_from_slice(peak.as_ref());
+        }
+        Some(Self(hash_tagged(TAG_MMR_ROOT, scratch)))
+    }
 }
 
 impl From<MmrNode> for MmrRoot {
