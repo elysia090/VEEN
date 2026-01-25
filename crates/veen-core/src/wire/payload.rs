@@ -30,7 +30,20 @@ impl Serialize for PayloadHeader {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(None)?;
+        let mut len = 1;
+        if self.parent_id.is_some() {
+            len += 1;
+        }
+        if self.att_root.is_some() {
+            len += 1;
+        }
+        if self.cap_ref.is_some() {
+            len += 1;
+        }
+        if self.expires_at.is_some() {
+            len += 1;
+        }
+        let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry(&1u64, &self.schema)?;
         if let Some(parent_id) = &self.parent_id {
             map.serialize_entry(&2u64, parent_id)?;
