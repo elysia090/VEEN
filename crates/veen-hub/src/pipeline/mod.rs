@@ -2665,6 +2665,19 @@ fn collect_recent_dedup_entries(
         return Ok(Vec::new());
     }
 
+    let mut total_entries = 0usize;
+    let mut stream_windows = Vec::with_capacity(streams.len());
+    for runtime in streams.values() {
+        let len = runtime.state.messages.len();
+        let start = len.saturating_sub(limit);
+        total_entries = total_entries.saturating_add(len - start);
+        stream_windows.push((runtime, start));
+    }
+
+    if total_entries == 0 {
+        return Ok(Vec::new());
+    }
+
     #[derive(Eq, PartialEq)]
     struct DedupCandidate {
         ts: u64,
@@ -2684,26 +2697,37 @@ fn collect_recent_dedup_entries(
         }
     }
 
-    let mut heap = std::collections::BinaryHeap::with_capacity(limit.saturating_add(1));
+    let mut entries = Vec::with_capacity(total_entries.min(limit));
 
-    for runtime in streams.values() {
-        let len = runtime.state.messages.len();
-        let start = len.saturating_sub(limit);
-        for message in runtime.state.messages.iter().skip(start) {
-            let leaf = leaf_hash_for(message)?;
-            let candidate = DedupCandidate {
-                ts: message.sent_at,
-                seq: message.seq,
-                key: DedupKey::new(message.stream.clone(), leaf),
-            };
-            heap.push(std::cmp::Reverse(candidate));
-            if heap.len() > limit {
-                heap.pop();
+    if total_entries <= limit {
+        for (runtime, start) in stream_windows {
+            for message in runtime.state.messages.iter().skip(start) {
+                let leaf = leaf_hash_for(message)?;
+                entries.push(DedupCandidate {
+                    ts: message.sent_at,
+                    seq: message.seq,
+                    key: DedupKey::new(message.stream.clone(), leaf),
+                });
             }
         }
+    } else {
+        let mut heap = std::collections::BinaryHeap::with_capacity(limit.saturating_add(1));
+        for (runtime, start) in stream_windows {
+            for message in runtime.state.messages.iter().skip(start) {
+                let leaf = leaf_hash_for(message)?;
+                heap.push(std::cmp::Reverse(DedupCandidate {
+                    ts: message.sent_at,
+                    seq: message.seq,
+                    key: DedupKey::new(message.stream.clone(), leaf),
+                }));
+                if heap.len() > limit {
+                    heap.pop();
+                }
+            }
+        }
+        entries.extend(heap.into_iter().map(|entry| entry.0));
     }
 
-    let mut entries: Vec<DedupCandidate> = heap.into_iter().map(|entry| entry.0).collect();
     entries.sort_by_key(|entry| (entry.ts, entry.seq));
     Ok(entries.into_iter().map(|entry| entry.key).collect())
 }
