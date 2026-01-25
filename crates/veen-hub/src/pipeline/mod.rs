@@ -298,11 +298,7 @@ impl DuplicateDetector {
     }
 
     fn recent_keys(&self) -> Vec<DedupKeyHash> {
-        self.recent
-            .iter()
-            .rev()
-            .map(|(key, _)| *key)
-            .collect()
+        self.recent.iter().rev().map(|(key, _)| *key).collect()
     }
 }
 
@@ -2802,10 +2798,7 @@ async fn load_recent_dedup_cache(
     Ok(Some(keys))
 }
 
-async fn persist_recent_dedup_cache(
-    storage: &HubStorage,
-    entries: &[DedupKeyHash],
-) -> Result<()> {
+async fn persist_recent_dedup_cache(storage: &HubStorage, entries: &[DedupKeyHash]) -> Result<()> {
     let path = storage.recent_leaf_hashes_path();
     let encoded: Vec<DedupCacheEntry> = entries.iter().map(DedupCacheEntry::from).collect();
     let data = serde_json::to_vec(&encoded)
@@ -2896,9 +2889,8 @@ async fn load_stream_state_from_index(
         } = bundle;
         let (leaf, leaf_hex) = match receipt.as_ref() {
             Some(receipt) => {
-                let leaf = LeafHash::from_str(&receipt.leaf_hash).with_context(|| {
-                    format!("parsing receipt leaf hash {}", receipt.leaf_hash)
-                })?;
+                let leaf = LeafHash::from_str(&receipt.leaf_hash)
+                    .with_context(|| format!("parsing receipt leaf hash {}", receipt.leaf_hash))?;
                 (leaf, receipt.leaf_hash.clone())
             }
             None => {
