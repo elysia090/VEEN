@@ -225,34 +225,24 @@ impl StreamRuntime {
     }
 }
 
+type DedupKeyHash = [u8; 32];
+
 struct DuplicateDetector {
     bloom: Bloom<[u8; 32]>,
-    recent: LruCache<DedupKey, ()>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct DedupKey {
-    stream: String,
-    leaf_hash: LeafHash,
-}
-
-impl DedupKey {
-    fn new(stream: String, leaf_hash: LeafHash) -> Self {
-        Self { stream, leaf_hash }
-    }
+    recent: LruCache<DedupKeyHash, ()>,
 }
 
 #[derive(Deserialize, Serialize)]
-struct DedupCacheEntry {
-    stream: String,
-    leaf_hash: String,
+#[serde(untagged)]
+enum DedupCacheEntry {
+    Legacy { stream: String, leaf_hash: String },
+    Hashed { key_hash: String },
 }
 
-impl From<&DedupKey> for DedupCacheEntry {
-    fn from(key: &DedupKey) -> Self {
-        Self {
-            stream: key.stream.clone(),
-            leaf_hash: hex::encode(key.leaf_hash.as_bytes()),
+impl From<&DedupKeyHash> for DedupCacheEntry {
+    fn from(key: &DedupKeyHash) -> Self {
+        Self::Hashed {
+            key_hash: hex::encode(key),
         }
     }
 }
@@ -274,25 +264,23 @@ impl DuplicateDetector {
         }
     }
 
-    fn seed<I: IntoIterator<Item = DedupKey>>(&mut self, entries: I) {
+    fn seed<I: IntoIterator<Item = DedupKeyHash>>(&mut self, entries: I) {
         for entry in entries {
             self.insert(entry);
         }
     }
 
-    fn insert(&mut self, key: DedupKey) {
-        let key_bytes = dedup_key_bytes(&key.stream, &key.leaf_hash);
-        self.bloom.set(&key_bytes);
+    fn insert(&mut self, key: DedupKeyHash) {
+        self.bloom.set(&key);
         self.recent.put(key, ());
     }
 
     fn check_and_insert(&mut self, stream: &str, leaf_hash: &LeafHash) -> DedupCheck {
-        let key = DedupKey::new(stream.to_string(), *leaf_hash);
+        let key = dedup_key_bytes(stream, leaf_hash);
         if self.recent.get(&key).is_some() {
             return DedupCheck::RecentDuplicate;
         }
-        let key_bytes = dedup_key_bytes(stream, leaf_hash);
-        if self.bloom.check(&key_bytes) {
+        if self.bloom.check(&key) {
             return DedupCheck::BloomHit;
         }
         self.insert(key);
@@ -300,19 +288,20 @@ impl DuplicateDetector {
     }
 
     fn confirm_duplicate(&mut self, stream: &str, leaf_hash: &LeafHash) {
-        self.recent
-            .put(DedupKey::new(stream.to_string(), *leaf_hash), ());
+        let key = dedup_key_bytes(stream, leaf_hash);
+        self.recent.put(key, ());
     }
 
     fn confirm_unique(&mut self, stream: &str, leaf_hash: &LeafHash) {
-        self.insert(DedupKey::new(stream.to_string(), *leaf_hash));
+        let key = dedup_key_bytes(stream, leaf_hash);
+        self.insert(key);
     }
 
-    fn recent_keys(&self) -> Vec<DedupKey> {
+    fn recent_keys(&self) -> Vec<DedupKeyHash> {
         self.recent
             .iter()
             .rev()
-            .map(|(key, _)| key.clone())
+            .map(|(key, _)| *key)
             .collect()
     }
 }
@@ -2695,7 +2684,7 @@ async fn load_existing_streams(storage: &HubStorage) -> Result<HashMap<String, S
 fn collect_recent_dedup_entries(
     streams: &HashMap<String, StreamRuntime>,
     config: &DedupConfig,
-) -> Result<Vec<DedupKey>> {
+) -> Result<Vec<DedupKeyHash>> {
     let limit = config.bloom_capacity.max(config.lru_capacity);
     if limit == 0 {
         return Ok(Vec::new());
@@ -2718,7 +2707,7 @@ fn collect_recent_dedup_entries(
     struct DedupCandidate {
         ts: u64,
         seq: u64,
-        key: DedupKey,
+        key: DedupKeyHash,
     }
 
     impl Ord for DedupCandidate {
@@ -2744,7 +2733,7 @@ fn collect_recent_dedup_entries(
                 entries.push(DedupCandidate {
                     ts: message.sent_at,
                     seq: message.seq,
-                    key: DedupKey::new(message.stream.clone(), *leaf),
+                    key: dedup_key_bytes(&message.stream, leaf),
                 });
             }
         }
@@ -2758,7 +2747,7 @@ fn collect_recent_dedup_entries(
                 heap.push(std::cmp::Reverse(DedupCandidate {
                     ts: message.sent_at,
                     seq: message.seq,
-                    key: DedupKey::new(message.stream.clone(), *leaf),
+                    key: dedup_key_bytes(&message.stream, leaf),
                 }));
                 if heap.len() > limit {
                     heap.pop();
@@ -2775,7 +2764,7 @@ fn collect_recent_dedup_entries(
 async fn load_recent_dedup_cache(
     storage: &HubStorage,
     config: &DedupConfig,
-) -> Result<Option<Vec<DedupKey>>> {
+) -> Result<Option<Vec<DedupKeyHash>>> {
     let path = storage.recent_leaf_hashes_path();
     let data = match fs::read(&path).await {
         Ok(data) => data,
@@ -2792,9 +2781,20 @@ async fn load_recent_dedup_cache(
     let limit = config.bloom_capacity.max(config.lru_capacity);
     let mut keys = Vec::with_capacity(encoded.len());
     for entry in encoded {
-        let leaf_hash = LeafHash::from_str(&entry.leaf_hash)
-            .with_context(|| format!("parsing cached leaf hash {}", entry.leaf_hash))?;
-        keys.push(DedupKey::new(entry.stream, leaf_hash));
+        match entry {
+            DedupCacheEntry::Legacy { stream, leaf_hash } => {
+                let leaf_hash = LeafHash::from_str(&leaf_hash)
+                    .with_context(|| format!("parsing cached leaf hash {leaf_hash}"))?;
+                keys.push(dedup_key_bytes(&stream, &leaf_hash));
+            }
+            DedupCacheEntry::Hashed { key_hash } => {
+                let bytes = hex::decode(&key_hash)
+                    .with_context(|| format!("parsing dedup key hash {key_hash}"))?;
+                let parsed = <[u8; 32]>::try_from(bytes.as_slice())
+                    .map_err(|_| anyhow!("dedup key hash {key_hash} must be 32 bytes"))?;
+                keys.push(parsed);
+            }
+        }
     }
     if keys.len() > limit {
         keys.drain(0..keys.len().saturating_sub(limit));
@@ -2802,7 +2802,10 @@ async fn load_recent_dedup_cache(
     Ok(Some(keys))
 }
 
-async fn persist_recent_dedup_cache(storage: &HubStorage, entries: &[DedupKey]) -> Result<()> {
+async fn persist_recent_dedup_cache(
+    storage: &HubStorage,
+    entries: &[DedupKeyHash],
+) -> Result<()> {
     let path = storage.recent_leaf_hashes_path();
     let encoded: Vec<DedupCacheEntry> = entries.iter().map(DedupCacheEntry::from).collect();
     let data = serde_json::to_vec(&encoded)
