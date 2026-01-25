@@ -1,18 +1,19 @@
 use crate::wire::proof::{Direction, MmrPathNode, MmrProof, PROOF_VERSION};
 use crate::wire::types::{LeafHash, MmrNode, MmrRoot};
 
+const MAX_HEIGHT: usize = 64;
+
 /// Maintains the per-label Merkle Mountain Range state as described in spec-1.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mmr {
     seq: u64,
-    peaks_by_height: Vec<Option<MmrNode>>,
+    peaks_by_height: [Option<MmrNode>; MAX_HEIGHT],
+    peak_bitmap: u64,
     peaks_scratch: Vec<MmrNode>,
     root_scratch: Vec<u8>,
 }
 
 impl Mmr {
-    const MAX_HEIGHT: usize = 64;
-
     /// Creates an empty MMR state.
     #[must_use]
     pub fn new() -> Self {
@@ -58,14 +59,16 @@ impl Mmr {
         self.seq = self.seq.checked_add(1).expect("stream_seq overflow");
         let mut carry = MmrNode::from(leaf);
         let mut height = 0usize;
-        let mut path = with_proof.then(Vec::new);
+        let mut path = with_proof.then(|| Vec::with_capacity(MAX_HEIGHT));
 
-        while height < Self::MAX_HEIGHT {
-            let left = match self.peaks_by_height.get_mut(height) {
-                Some(slot) => slot.take(),
-                None => None,
-            };
-            let Some(left) = left else { break };
+        while height < MAX_HEIGHT {
+            if self.peak_bitmap & (1u64 << height) == 0 {
+                break;
+            }
+            let left = self.peaks_by_height[height]
+                .take()
+                .expect("peak bitmap out of sync");
+            self.peak_bitmap &= !(1u64 << height);
             if let Some(path) = path.as_mut() {
                 path.push(MmrPathNode {
                     dir: Direction::Left,
@@ -76,20 +79,23 @@ impl Mmr {
             height = height.saturating_add(1);
         }
 
-        if height >= Self::MAX_HEIGHT {
+        if height >= MAX_HEIGHT {
             panic!("mmr height overflow");
         }
 
         self.peaks_by_height[height] = Some(carry);
+        self.peak_bitmap |= 1u64 << height;
         self.peaks_scratch.clear();
         let mut peak_index = None;
-        for (idx, peak) in self.peaks_by_height.iter().enumerate() {
-            if let Some(peak) = peak {
-                if idx == height {
-                    peak_index = Some(self.peaks_scratch.len());
-                }
-                self.peaks_scratch.push(*peak);
+        let mut bitmap = self.peak_bitmap;
+        while bitmap != 0 {
+            let idx = bitmap.trailing_zeros() as usize;
+            bitmap &= !(1u64 << idx);
+            let peak = self.peaks_by_height[idx].expect("peak bitmap out of sync");
+            if idx == height {
+                peak_index = Some(self.peaks_scratch.len());
             }
+            self.peaks_scratch.push(peak);
         }
         let peak_index = peak_index.expect("new peak must be recorded");
         let root = MmrRoot::from_peaks_with_scratch(&self.peaks_scratch, &mut self.root_scratch)
@@ -99,17 +105,27 @@ impl Mmr {
             ver: PROOF_VERSION,
             leaf_hash: leaf,
             path,
-            peaks_after: self.peaks_scratch[peak_index.saturating_add(1)..].to_vec(),
+            peaks_after: {
+                let start = peak_index.saturating_add(1);
+                let suffix = &self.peaks_scratch[start..];
+                let mut out = Vec::with_capacity(suffix.len());
+                out.extend_from_slice(suffix);
+                out
+            },
         });
 
         (self.seq, root, proof)
     }
 
     fn collect_peaks(&self) -> Vec<MmrNode> {
-        self.peaks_by_height
-            .iter()
-            .filter_map(|peak| *peak)
-            .collect()
+        let mut peaks = Vec::with_capacity(self.peaks_by_height.len());
+        let mut bitmap = self.peak_bitmap;
+        while bitmap != 0 {
+            let idx = bitmap.trailing_zeros() as usize;
+            bitmap &= !(1u64 << idx);
+            peaks.push(self.peaks_by_height[idx].expect("peak bitmap out of sync"));
+        }
+        peaks
     }
 }
 
@@ -117,9 +133,10 @@ impl Default for Mmr {
     fn default() -> Self {
         Self {
             seq: 0,
-            peaks_by_height: vec![None; Self::MAX_HEIGHT],
-            peaks_scratch: Vec::with_capacity(Self::MAX_HEIGHT),
-            root_scratch: Vec::with_capacity(Self::MAX_HEIGHT * 32),
+            peaks_by_height: [None; MAX_HEIGHT],
+            peak_bitmap: 0,
+            peaks_scratch: Vec::with_capacity(MAX_HEIGHT),
+            root_scratch: Vec::with_capacity(MAX_HEIGHT * 32),
         }
     }
 }
