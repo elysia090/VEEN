@@ -289,28 +289,7 @@ impl AttachmentRoot {
     where
         I: IntoIterator<Item = AttachmentId>,
     {
-        let mut peaks = Vec::new();
-        let mut peak_heights = Vec::new();
-
-        for id in ids {
-            let mut carry = AttachmentNode::from(id);
-            let mut height = 0u32;
-
-            while let Some(index) = peak_heights.iter().position(|h| *h == height) {
-                let left = peaks.remove(index);
-                peak_heights.remove(index);
-                carry = AttachmentNode::combine(&left, &carry);
-                height = height.saturating_add(1);
-            }
-
-            let insert_at = peak_heights
-                .iter()
-                .position(|h| *h > height)
-                .unwrap_or(peaks.len());
-            peaks.insert(insert_at, carry);
-            peak_heights.insert(insert_at, height);
-        }
-
+        let peaks = Self::peaks_from_ids(ids);
         Self::from_peaks(&peaks)
     }
 
@@ -334,6 +313,36 @@ impl AttachmentRoot {
             data.extend_from_slice(peak.as_ref());
         }
         Some(Self(hash_tagged(TAG_ATT_ROOT, &data)))
+    }
+
+    fn peaks_from_ids<I>(ids: I) -> Vec<AttachmentNode>
+    where
+        I: IntoIterator<Item = AttachmentId>,
+    {
+        let mut peaks_by_height: Vec<Option<AttachmentNode>> = Vec::new();
+
+        for id in ids {
+            let mut carry = AttachmentNode::from(id);
+            let mut height = 0usize;
+
+            loop {
+                if height == peaks_by_height.len() {
+                    peaks_by_height.push(Some(carry));
+                    break;
+                }
+
+                if let Some(left) = peaks_by_height[height].take() {
+                    carry = AttachmentNode::combine(&left, &carry);
+                    height += 1;
+                    continue;
+                }
+
+                peaks_by_height[height] = Some(carry);
+                break;
+            }
+        }
+
+        peaks_by_height.into_iter().flatten().collect()
     }
 }
 
@@ -544,24 +553,7 @@ mod tests {
         let coid2 = AttachmentId::from_ciphertext(c2);
         let coid3 = AttachmentId::from_ciphertext(c3);
 
-        let mut peaks = Vec::new();
-        let mut peak_heights = Vec::new();
-        for id in [coid1, coid2, coid3] {
-            let mut carry = AttachmentNode::from(id);
-            let mut height = 0u32;
-            while let Some(index) = peak_heights.iter().position(|h| *h == height) {
-                let left = peaks.remove(index);
-                peak_heights.remove(index);
-                carry = AttachmentNode::combine(&left, &carry);
-                height = height.saturating_add(1);
-            }
-            let insert_at = peak_heights
-                .iter()
-                .position(|h| *h > height)
-                .unwrap_or(peaks.len());
-            peaks.insert(insert_at, carry);
-            peak_heights.insert(insert_at, height);
-        }
+        let peaks = AttachmentRoot::peaks_from_ids([coid1, coid2, coid3]);
         let expected = AttachmentRoot::from_peaks(&peaks).expect("expected root");
 
         let computed = AttachmentRoot::from_ciphertexts([c1.as_ref(), c2.as_ref(), c3.as_ref()])
