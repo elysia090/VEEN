@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::convert::TryInto;
-use std::io::{Cursor, ErrorKind};
+use std::io::{Cursor, ErrorKind, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -17,7 +17,7 @@ use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use serde_json::Value as JsonValue;
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::fs::OpenOptions;
@@ -3809,11 +3809,39 @@ async fn persist_revocations(storage: &HubStorage, records: &[RevocationRecord])
 }
 
 fn leaf_hash_for(message: &StoredMessage) -> Result<LeafHash> {
-    let encoded = serde_json::to_vec(message).context("encoding message for leaf hash")?;
-    let digest = sha2::Sha256::digest(&encoded);
+    let mut hasher = Sha256::new();
+    {
+        let writer = HashingWriter::new(&mut hasher);
+        let mut serializer = serde_json::Serializer::new(writer);
+        message
+            .serialize(&mut serializer)
+            .context("encoding message for leaf hash")?;
+    }
+    let digest = hasher.finalize();
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(&digest);
     Ok(LeafHash::new(bytes))
+}
+
+struct HashingWriter<'a, D> {
+    digest: &'a mut D,
+}
+
+impl<'a, D> HashingWriter<'a, D> {
+    fn new(digest: &'a mut D) -> Self {
+        Self { digest }
+    }
+}
+
+impl<'a, D: Digest> Write for HashingWriter<'a, D> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.digest.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn current_unix_timestamp() -> Result<u64> {
