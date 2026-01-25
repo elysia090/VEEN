@@ -283,7 +283,7 @@ impl AttachmentRoot {
     }
 
     /// Computes the attachment root for the provided attachment identifiers
-    /// using the Merkle construction defined in spec-1 section 10.
+    /// using the Merkle construction defined in spec section 4.6.
     #[must_use]
     pub fn from_ids<I>(ids: I) -> Option<Self>
     where
@@ -326,17 +326,14 @@ impl AttachmentRoot {
     }
 
     fn from_peaks(peaks: &[AttachmentNode]) -> Option<Self> {
-        match peaks.len() {
-            0 => None,
-            1 => Some(Self::new(*peaks[0].as_bytes())),
-            _ => {
-                let mut data = Vec::with_capacity(peaks.len() * HASH_LEN);
-                for peak in peaks {
-                    data.extend_from_slice(peak.as_ref());
-                }
-                Some(Self(hash_tagged(TAG_ATT_ROOT, &data)))
-            }
+        if peaks.is_empty() {
+            return None;
         }
+        let mut data = Vec::with_capacity(peaks.len() * HASH_LEN);
+        for peak in peaks {
+            data.extend_from_slice(peak.as_ref());
+        }
+        Some(Self(hash_tagged(TAG_ATT_ROOT, &data)))
     }
 }
 
