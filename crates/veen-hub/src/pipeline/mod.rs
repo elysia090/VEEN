@@ -93,10 +93,19 @@ struct StreamRuntime {
     mmr: Mmr,
     message_index: HashMap<u64, usize>,
     leaf_index: HashSet<LeafHash>,
+    leaf_hashes: Vec<LeafHash>,
 }
 
 impl StreamRuntime {
     fn new(state: HubStreamState, proven_messages: Vec<StreamMessageWithProof>) -> Result<Self> {
+        Self::new_with_leaves(state, proven_messages, None)
+    }
+
+    fn new_with_leaves(
+        state: HubStreamState,
+        proven_messages: Vec<StreamMessageWithProof>,
+        leaf_hashes: Option<Vec<LeafHash>>,
+    ) -> Result<Self> {
         if state.messages.len() < proven_messages.len() {
             bail!(
                 "stream state and proof history length mismatch: {} vs {}",
@@ -104,14 +113,31 @@ impl StreamRuntime {
                 proven_messages.len()
             );
         }
+        let leaf_hashes = match leaf_hashes {
+            Some(leaves) => {
+                ensure!(
+                    leaves.len() == state.messages.len(),
+                    "stream leaf hash count mismatch: {} vs {}",
+                    leaves.len(),
+                    state.messages.len()
+                );
+                leaves
+            }
+            None => {
+                let mut leaves = Vec::with_capacity(state.messages.len());
+                for message in &state.messages {
+                    leaves.push(leaf_hash_for(message)?);
+                }
+                leaves
+            }
+        };
         let mut mmr = Mmr::new();
         let mut message_index = HashMap::with_capacity(state.messages.len());
         let mut leaf_index = HashSet::with_capacity(state.messages.len());
-        for (idx, message) in state.messages.iter().enumerate() {
-            let leaf = leaf_hash_for(message)?;
-            mmr.append(leaf);
+        for (idx, (message, leaf)) in state.messages.iter().zip(leaf_hashes.iter()).enumerate() {
+            mmr.append(*leaf);
             message_index.insert(message.seq, idx);
-            leaf_index.insert(leaf);
+            leaf_index.insert(*leaf);
         }
         let mut runtime = Self {
             state,
@@ -119,6 +145,7 @@ impl StreamRuntime {
             mmr,
             message_index,
             leaf_index,
+            leaf_hashes,
         };
         runtime.trim_proven_messages();
         Ok(runtime)
@@ -137,6 +164,7 @@ impl StreamRuntime {
         let index = self.state.messages.len();
         self.message_index.insert(message.seq, index);
         self.leaf_index.insert(leaf);
+        self.leaf_hashes.push(leaf);
         self.state.messages.push(message);
     }
 
@@ -149,6 +177,10 @@ impl StreamRuntime {
     fn messages_from(&self, from: u64) -> Vec<StoredMessage> {
         let start = self.state.messages.partition_point(|msg| msg.seq < from);
         self.state.messages[start..].to_vec()
+    }
+
+    fn leaf_hash_at(&self, index: usize) -> Option<&LeafHash> {
+        self.leaf_hashes.get(index)
     }
 
     fn proven_messages_from(&self, from: u64) -> Vec<StreamMessageWithProof> {
@@ -2648,7 +2680,11 @@ async fn load_existing_streams(storage: &HubStorage) -> Result<HashMap<String, S
                         .map(|s| s.to_string())
                 });
             if let Some(name) = stream_name {
-                let runtime = StreamRuntime::new(loaded.state, loaded.proven)?;
+                let runtime = StreamRuntime::new_with_leaves(
+                    loaded.state,
+                    loaded.proven,
+                    Some(loaded.leaf_hashes),
+                )?;
                 map.insert(name, runtime);
             }
         }
@@ -2701,24 +2737,28 @@ fn collect_recent_dedup_entries(
 
     if total_entries <= limit {
         for (runtime, start) in stream_windows {
-            for message in runtime.state.messages.iter().skip(start) {
-                let leaf = leaf_hash_for(message)?;
+            for (index, message) in runtime.state.messages.iter().enumerate().skip(start) {
+                let leaf = runtime.leaf_hash_at(index).ok_or_else(|| {
+                    anyhow!("missing leaf hash for {}#{}", message.stream, message.seq)
+                })?;
                 entries.push(DedupCandidate {
                     ts: message.sent_at,
                     seq: message.seq,
-                    key: DedupKey::new(message.stream.clone(), leaf),
+                    key: DedupKey::new(message.stream.clone(), *leaf),
                 });
             }
         }
     } else {
         let mut heap = std::collections::BinaryHeap::with_capacity(limit.saturating_add(1));
         for (runtime, start) in stream_windows {
-            for message in runtime.state.messages.iter().skip(start) {
-                let leaf = leaf_hash_for(message)?;
+            for (index, message) in runtime.state.messages.iter().enumerate().skip(start) {
+                let leaf = runtime.leaf_hash_at(index).ok_or_else(|| {
+                    anyhow!("missing leaf hash for {}#{}", message.stream, message.seq)
+                })?;
                 heap.push(std::cmp::Reverse(DedupCandidate {
                     ts: message.sent_at,
                     seq: message.seq,
-                    key: DedupKey::new(message.stream.clone(), leaf),
+                    key: DedupKey::new(message.stream.clone(), *leaf),
                 }));
                 if heap.len() > limit {
                     heap.pop();
@@ -2808,6 +2848,7 @@ async fn load_attachment_ref_counts(
 struct LoadedStreamState {
     state: HubStreamState,
     proven: Vec<StreamMessageWithProof>,
+    leaf_hashes: Vec<LeafHash>,
 }
 
 async fn load_legacy_stream_state(path: &Path) -> Result<LoadedStreamState> {
@@ -2816,8 +2857,12 @@ async fn load_legacy_stream_state(path: &Path) -> Result<LoadedStreamState> {
         .with_context(|| format!("reading stream state from {}", path.display()))?;
     let state: HubStreamState = serde_json::from_slice(&data)
         .with_context(|| format!("decoding stream state from {}", path.display()))?;
-    let proven = build_proven_messages(&state.messages)?;
-    Ok(LoadedStreamState { state, proven })
+    let (proven, leaf_hashes) = build_proven_messages(&state.messages)?;
+    Ok(LoadedStreamState {
+        state,
+        proven,
+        leaf_hashes,
+    })
 }
 
 async fn load_stream_state_from_index(
@@ -2834,6 +2879,7 @@ async fn load_stream_state_from_index(
 
     let mut messages = Vec::new();
     let mut proven = Vec::new();
+    let mut leaf_hashes = Vec::new();
     let mut mmr = Mmr::new();
     let mut migrations = Vec::new();
 
@@ -2845,9 +2891,27 @@ async fn load_stream_state_from_index(
             receipt,
             proof,
         } = bundle;
-        let leaf = leaf_hash_for(&message)?;
-        let leaf_hex = hex::encode(leaf.as_bytes());
+        let (leaf, leaf_hex) = match receipt.as_ref() {
+            Some(receipt) => {
+                let leaf = LeafHash::from_str(&receipt.leaf_hash).with_context(|| {
+                    format!("parsing receipt leaf hash {}", receipt.leaf_hash)
+                })?;
+                (leaf, receipt.leaf_hash.clone())
+            }
+            None => {
+                let leaf = leaf_hash_for(&message)?;
+                (leaf, hex::encode(leaf.as_bytes()))
+            }
+        };
         if let (Some(receipt), Some(proof)) = (receipt, proof) {
+            if cfg!(debug_assertions) {
+                let computed = leaf_hash_for(&message)?;
+                ensure!(
+                    computed == leaf,
+                    "receipt leaf hash mismatch for {}",
+                    bundle_path.display()
+                );
+            }
             let (seq, root) = mmr.append(leaf);
             ensure!(
                 seq == message.seq,
@@ -2861,11 +2925,6 @@ async fn load_stream_state_from_index(
                 "receipt seq {} diverges from message seq {} for {}",
                 receipt.seq,
                 message.seq,
-                bundle_path.display()
-            );
-            ensure!(
-                receipt.leaf_hash == leaf_hex,
-                "receipt leaf hash mismatch for {}",
                 bundle_path.display()
             );
             let computed_root = hex::encode(root.as_bytes());
@@ -2905,6 +2964,7 @@ async fn load_stream_state_from_index(
             migrations.push(entry_with_proof);
         }
         messages.push(message);
+        leaf_hashes.push(leaf);
         next_entry = reader.next_entry().await?;
     }
 
@@ -2915,6 +2975,7 @@ async fn load_stream_state_from_index(
     Ok(LoadedStreamState {
         state: HubStreamState { messages },
         proven,
+        leaf_hashes,
     })
 }
 
@@ -2969,9 +3030,12 @@ async fn read_proven_bundle(
     })
 }
 
-fn build_proven_messages(messages: &[StoredMessage]) -> Result<Vec<StreamMessageWithProof>> {
+fn build_proven_messages(
+    messages: &[StoredMessage],
+) -> Result<(Vec<StreamMessageWithProof>, Vec<LeafHash>)> {
     let mut mmr = Mmr::new();
     let mut proven = Vec::with_capacity(messages.len());
+    let mut leaf_hashes = Vec::with_capacity(messages.len());
     for message in messages {
         let leaf = leaf_hash_for(message)?;
         let (seq, root, proof) = mmr.append_with_proof(leaf);
@@ -2992,8 +3056,9 @@ fn build_proven_messages(messages: &[StoredMessage]) -> Result<Vec<StreamMessage
             receipt,
             proof: StreamProof::from(proof),
         });
+        leaf_hashes.push(leaf);
     }
-    Ok(proven)
+    Ok((proven, leaf_hashes))
 }
 
 async fn load_proven_messages_range(
