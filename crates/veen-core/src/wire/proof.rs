@@ -273,14 +273,8 @@ impl MmrProof {
             acc = step.fold(&acc);
         }
 
-        let mut peaks = Vec::with_capacity(1 + self.peaks_after.len());
-        peaks.push(acc);
-        peaks.extend_from_slice(&self.peaks_after);
-
-        match MmrRoot::from_peaks(&peaks) {
-            Some(root) => root == *expected_root,
-            None => false,
-        }
+        let root = MmrRoot::from_peak_and_suffix(&acc, &self.peaks_after);
+        root == *expected_root
     }
 }
 

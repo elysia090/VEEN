@@ -11,6 +11,7 @@ use thiserror::Error;
 use crate::{hash::h, label::Label, profile::ProfileId, LengthError};
 
 use super::derivation::{hash_tagged, TAG_ATT_NONCE, TAG_LEAF, TAG_MMR_NODE, TAG_MMR_ROOT};
+use crate::hash::ht_parts;
 
 macro_rules! fixed_bytes_type {
     ($(#[$meta:meta])* $vis:vis struct $name:ident($len:expr); expecting: $expecting:expr;) => {
@@ -242,16 +243,13 @@ impl MmrRoot {
             return Some(Self::from(peaks[0]));
         }
 
-        let mut data = Vec::with_capacity(peaks.len() * HASH_LEN);
-        for peak in peaks {
-            data.extend_from_slice(peak.as_ref());
-        }
-        Some(Self(hash_tagged(TAG_MMR_ROOT, &data)))
+        let root = ht_parts(TAG_MMR_ROOT, peaks.iter().map(|peak| peak.as_ref()));
+        Some(Self(root))
     }
 
-    /// Computes an MMR root using the provided scratch buffer to avoid reallocations.
+    /// Computes an MMR root using the provided scratch buffer for API compatibility.
     #[must_use]
-    pub fn from_peaks_with_scratch(peaks: &[MmrNode], scratch: &mut Vec<u8>) -> Option<Self> {
+    pub fn from_peaks_with_scratch(peaks: &[MmrNode], _scratch: &mut Vec<u8>) -> Option<Self> {
         if peaks.is_empty() {
             return None;
         }
@@ -260,12 +258,23 @@ impl MmrRoot {
             return Some(Self::from(peaks[0]));
         }
 
-        scratch.clear();
-        scratch.reserve(peaks.len() * HASH_LEN);
-        for peak in peaks {
-            scratch.extend_from_slice(peak.as_ref());
+        let root = ht_parts(TAG_MMR_ROOT, peaks.iter().map(|peak| peak.as_ref()));
+        Some(Self(root))
+    }
+
+    /// Computes an MMR root from a leading peak and trailing peaks without
+    /// allocating an intermediate buffer.
+    #[must_use]
+    pub fn from_peak_and_suffix(peak: &MmrNode, suffix: &[MmrNode]) -> Self {
+        if suffix.is_empty() {
+            return Self::from(*peak);
         }
-        Some(Self(hash_tagged(TAG_MMR_ROOT, scratch)))
+
+        let root = ht_parts(
+            TAG_MMR_ROOT,
+            std::iter::once(peak.as_ref()).chain(suffix.iter().map(|node| node.as_ref())),
+        );
+        Self(root)
     }
 }
 
