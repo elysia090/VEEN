@@ -5,6 +5,7 @@ use std::io::{Cursor, ErrorKind, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -67,6 +68,7 @@ pub struct HubPipeline {
     federation: FederationConfig,
     identity: HubIdentity,
     dedup: Arc<Mutex<DuplicateDetector>>,
+    dedup_dirty: Arc<AtomicBool>,
 }
 
 struct HubState {
@@ -377,6 +379,7 @@ impl HubPipeline {
             federation: config.federation.clone(),
             identity,
             dedup: Arc::new(Mutex::new(dedup_detector)),
+            dedup_dirty: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -705,10 +708,11 @@ impl HubPipeline {
             idem,
         };
 
-        let (leaf, leaf_hex, confirmed_duplicate) = async {
+        let (leaf, leaf_hex, confirmed_duplicate, dedup_dirty) = async {
             let leaf = leaf_hash_for(&stored_message)?;
             let leaf_hex = hex::encode(leaf.as_bytes());
             let mut confirmed_duplicate = false;
+            let mut dedup_dirty = false;
             let dedup_result = {
                 let mut dedup = self.dedup.lock().await;
                 dedup.check_and_insert(&stream, &leaf)
@@ -725,13 +729,19 @@ impl HubPipeline {
                     } else {
                         dedup.confirm_unique(&stream, &leaf);
                     }
+                    dedup_dirty = true;
                 }
-                DedupCheck::New => {}
+                DedupCheck::New => {
+                    dedup_dirty = true;
+                }
             }
-            Ok::<_, anyhow::Error>((leaf, leaf_hex, confirmed_duplicate))
+            Ok::<_, anyhow::Error>((leaf, leaf_hex, confirmed_duplicate, dedup_dirty))
         }
         .instrument(tracing::info_span!("hub_submit.dedup_lookup"))
         .await?;
+        if dedup_dirty {
+            self.dedup_dirty.store(true, AtomicOrdering::Release);
+        }
         if confirmed_duplicate {
             tracing::warn!(
                 stream = %stream,
@@ -854,11 +864,20 @@ impl HubPipeline {
     }
 
     async fn persist_recent_dedup_cache(&self) -> Result<()> {
+        if !self.dedup_dirty.swap(false, AtomicOrdering::AcqRel) {
+            return Ok(());
+        }
         let entries = {
             let dedup = self.dedup.lock().await;
             dedup.recent_keys()
         };
-        persist_recent_dedup_cache(&self.storage, &entries).await
+        match persist_recent_dedup_cache(&self.storage, &entries).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.dedup_dirty.store(true, AtomicOrdering::Release);
+                Err(err)
+            }
+        }
     }
 
     pub async fn bridge_ingest(
