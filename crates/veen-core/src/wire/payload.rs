@@ -5,7 +5,7 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
-    hash::h,
+    hash::{h, ht_parts},
     schema::SchemaId,
     wire::{
         derivation::{hash_tagged, TAG_ATT_NODE, TAG_ATT_ROOT},
@@ -308,11 +308,8 @@ impl AttachmentRoot {
         if peaks.is_empty() {
             return None;
         }
-        let mut data = Vec::with_capacity(peaks.len() * HASH_LEN);
-        for peak in peaks {
-            data.extend_from_slice(peak.as_ref());
-        }
-        Some(Self(hash_tagged(TAG_ATT_ROOT, &data)))
+        let root = ht_parts(TAG_ATT_ROOT, peaks.iter().map(|peak| peak.as_ref()));
+        Some(Self(root))
     }
 
     fn peaks_from_ids<I>(ids: I) -> Vec<AttachmentNode>
