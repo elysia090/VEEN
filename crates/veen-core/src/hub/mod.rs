@@ -82,7 +82,7 @@ impl AsRef<[u8]> for HubId {
     }
 }
 
-crate::hexutil::impl_hex_fmt!(HubId);
+crate::impl_hex_fmt!(HubId);
 
 impl Serialize for HubId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -126,7 +126,7 @@ impl<'de> Deserialize<'de> for HubId {
     }
 }
 
-crate::hexutil::impl_fixed_hex_from_str!(HubId, HUB_ID_LEN);
+crate::impl_fixed_hex_from_str!(HubId, HUB_ID_LEN);
 
 #[cfg(test)]
 mod tests;

@@ -28,6 +28,7 @@ sha2.workspace = true
 hex.workspace = true
 thiserror.workspace = true
 veen-core = { path = "../veen-core" }
+veen-overlays = { path = "../veen-overlays" }
 serde_bytes.workspace = true
 rand.workspace = true
 bloomfilter.workspace = true

@@ -29,6 +29,7 @@ tokio-util = { workspace = true, features = ["compat"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 veen-core = { path = "../veen-core" }
+veen-overlays = { path = "../veen-overlays" }
 veen-hub = { path = "../veen-hub" }
 veen-selftest = { path = "../veen-selftest" }
 x25519-dalek.workspace = true

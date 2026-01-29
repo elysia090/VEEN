@@ -6,10 +6,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::{
-    hash::{h, ht},
     identity::{GroupId, PrincipalId},
-    label::{Label, StreamId},
     meta::SchemaId,
+};
+use veen_core::{
+    h, ht,
+    label::{Label, StreamId},
     wire::{
         types::{AuthRef, LeafHash, MmrRoot},
         AttachmentRoot,
@@ -103,7 +105,7 @@ impl AsRef<[u8]> for OperationId {
     }
 }
 
-crate::hexutil::impl_hex_fmt!(OperationId);
+veen_core::impl_hex_fmt!(OperationId);
 
 impl Serialize for OperationId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -216,7 +218,7 @@ impl AsRef<[u8]> for AccountId {
     }
 }
 
-crate::hexutil::impl_hex_fmt!(AccountId);
+veen_core::impl_hex_fmt!(AccountId);
 
 impl Serialize for AccountId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -329,7 +331,7 @@ impl AsRef<[u8]> for OpaqueId {
     }
 }
 
-crate::hexutil::impl_hex_fmt!(OpaqueId);
+veen_core::impl_hex_fmt!(OpaqueId);
 
 impl Serialize for OpaqueId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

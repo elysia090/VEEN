@@ -34,20 +34,10 @@ use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 use crate::kube::{handle_kube_command, KubeCommand};
 
-use veen_core::operation::{
-    schema_access_grant, schema_access_revoke, schema_agreement_confirmation,
-    schema_agreement_definition, schema_data_publication, schema_delegated_execution,
-    schema_federation_mirror, schema_paid_operation, schema_query_audit, schema_recovery_approval,
-    schema_recovery_execution, schema_recovery_request, schema_state_checkpoint, AccessGrant,
-    AccessRevoke, AccountId, AgreementConfirmation, AgreementDefinition, DelegatedExecution,
-    FederationMirror, OpaqueId, PaidOperation, QueryAuditLog, RecoveryApproval, RecoveryExecution,
-    RecoveryRequest, StateCheckpoint, ACCOUNT_ID_LEN, OPERATION_ID_LEN,
-};
 use veen_core::CAP_TOKEN_VERSION;
 use veen_core::{
     cap_stream_id_from_label,
     hub::{HubId, HUB_ID_LEN},
-    identity::{GroupId, PrincipalId},
     label::{Label, StreamId, STREAM_ID_LEN},
     wire::{
         checkpoint::CHECKPOINT_VERSION,
@@ -56,22 +46,34 @@ use veen_core::{
         types::{AuthRef, ClientId, LeafHash, MmrRoot},
         Checkpoint,
     },
-    AuthorityPolicy, AuthorityRecord, CapToken, CapTokenAllow, CapTokenRate, LabelClassRecord,
-    OperationId, PowCookie, Profile, RealmId, RevocationKind, RevocationRecord, RevocationTarget,
-    SchemaDescriptor, SchemaId, SchemaOwner, TransferId, WalletId, WalletTransferEvent,
+    CapToken, CapTokenAllow, CapTokenRate, Profile, RealmId, REALM_ID_LEN,
 };
 use veen_core::{h, ht};
-use veen_core::{
-    schema_fed_authority, schema_label_class, schema_meta_schema, schema_revocation,
-    schema_wallet_transfer, REALM_ID_LEN, REVOCATION_TARGET_LEN, SCHEMA_ID_LEN, TRANSFER_ID_LEN,
-    WALLET_ID_LEN,
-};
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::storage::{
     self, stream_index, ANCHORS_DIR, ATTACHMENTS_DIR, CHECKPOINTS_FILE, CRDT_DIR, HUB_KEY_FILE,
     HUB_PID_FILE, MESSAGES_DIR, PAYLOADS_FILE, RECEIPTS_FILE, REVOCATIONS_FILE, STATE_DIR,
     STREAMS_DIR, TLS_INFO_FILE,
+};
+use veen_overlays::operation::{
+    schema_access_grant, schema_access_revoke, schema_agreement_confirmation,
+    schema_agreement_definition, schema_data_publication, schema_delegated_execution,
+    schema_federation_mirror, schema_paid_operation, schema_query_audit, schema_recovery_approval,
+    schema_recovery_execution, schema_recovery_request, schema_state_checkpoint, AccessGrant,
+    AccessRevoke, AccountId, AgreementConfirmation, AgreementDefinition, DelegatedExecution,
+    FederationMirror, OpaqueId, PaidOperation, QueryAuditLog, RecoveryApproval, RecoveryExecution,
+    RecoveryRequest, StateCheckpoint, ACCOUNT_ID_LEN, OPERATION_ID_LEN,
+};
+use veen_overlays::{
+    identity::{GroupId, PrincipalId},
+    AuthorityPolicy, AuthorityRecord, LabelClassRecord, OperationId, PowCookie, RevocationKind,
+    RevocationRecord, RevocationTarget, SchemaDescriptor, SchemaId, SchemaOwner, TransferId,
+    WalletId, WalletTransferEvent,
+};
+use veen_overlays::{
+    schema_fed_authority, schema_label_class, schema_meta_schema, schema_revocation,
+    schema_wallet_transfer, REVOCATION_TARGET_LEN, SCHEMA_ID_LEN, TRANSFER_ID_LEN, WALLET_ID_LEN,
 };
 use veen_selftest::metrics::{HistogramSnapshot, HubMetricsSnapshot};
 

@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use crate::ht;
+use veen_core::ht;
 
 /// Returns the schema identifier for `veen.pow.cookie.v1`.
 #[must_use]
 pub fn schema_pow_cookie() -> [u8; 32] {
-    crate::h(b"veen.pow.cookie.v1")
+    veen_core::h(b"veen.pow.cookie.v1")
 }
 
 /// Proof-of-work cookie used as an optional admission prefilter.

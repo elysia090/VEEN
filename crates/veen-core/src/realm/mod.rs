@@ -107,7 +107,7 @@ impl AsRef<[u8]> for RealmId {
     }
 }
 
-crate::hexutil::impl_hex_fmt!(RealmId);
+crate::impl_hex_fmt!(RealmId);
 
 impl Serialize for RealmId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -151,7 +151,7 @@ impl<'de> Deserialize<'de> for RealmId {
     }
 }
 
-crate::hexutil::impl_fixed_hex_from_str!(RealmId, REALM_ID_LEN);
+crate::impl_fixed_hex_from_str!(RealmId, REALM_ID_LEN);
 
 #[cfg(test)]
 mod tests;

@@ -69,7 +69,7 @@ impl TryFrom<Vec<u8>> for ProfileId {
     }
 }
 
-crate::hexutil::impl_hex_fmt!(ProfileId);
+crate::impl_hex_fmt!(ProfileId);
 
 impl Serialize for ProfileId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -113,7 +113,7 @@ impl<'de> Deserialize<'de> for ProfileId {
     }
 }
 
-crate::hexutil::impl_fixed_hex_from_str!(ProfileId, 32);
+crate::impl_fixed_hex_from_str!(ProfileId, 32);
 
 /// The canonical VEEN cryptographic profile definition.
 #[derive(Debug, Clone, PartialEq, Eq)]

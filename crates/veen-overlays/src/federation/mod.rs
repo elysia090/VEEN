@@ -2,7 +2,7 @@ use std::{cmp::Ordering, collections::HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
+use veen_core::{
     h,
     hub::HubId,
     label::{Label, StreamId},

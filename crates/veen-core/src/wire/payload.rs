@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
     hash::h,
-    meta::SchemaId,
+    schema::SchemaId,
     wire::{
         derivation::{hash_tagged, TAG_ATT_NODE, TAG_ATT_ROOT},
         types::{AuthRef, LeafHash, HASH_LEN},
@@ -86,7 +86,7 @@ impl<'de> Visitor<'de> for PayloadHeaderVisitor {
                     if schema.is_some() {
                         return Err(DeError::duplicate_field("schema"));
                     }
-                    schema = Some(map.next_value()?);
+                    schema = Some(map.next_value::<SchemaId>()?);
                 }
                 2 => {
                     if parent_id.is_some() {
@@ -209,7 +209,7 @@ impl AsRef<[u8]> for AttachmentId {
     }
 }
 
-crate::hexutil::impl_hex_fmt!(AttachmentId);
+crate::impl_hex_fmt!(AttachmentId);
 
 impl Serialize for AttachmentId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -253,7 +253,7 @@ impl<'de> Deserialize<'de> for AttachmentId {
     }
 }
 
-crate::hexutil::impl_fixed_hex_from_str!(AttachmentId, HASH_LEN);
+crate::impl_fixed_hex_from_str!(AttachmentId, HASH_LEN);
 
 /// Canonical attachment Merkle root committed in `payload_hdr.att_root`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -386,7 +386,7 @@ impl AsRef<[u8]> for AttachmentRoot {
     }
 }
 
-crate::hexutil::impl_hex_fmt!(AttachmentRoot);
+crate::impl_hex_fmt!(AttachmentRoot);
 
 impl Serialize for AttachmentRoot {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -430,7 +430,7 @@ impl<'de> Deserialize<'de> for AttachmentRoot {
     }
 }
 
-crate::hexutil::impl_fixed_hex_from_str!(AttachmentRoot, HASH_LEN);
+crate::impl_fixed_hex_from_str!(AttachmentRoot, HASH_LEN);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AttachmentNode([u8; HASH_LEN]);

@@ -72,7 +72,7 @@ impl AsRef<[u8]> for StreamId {
     }
 }
 
-crate::hexutil::impl_hex_fmt!(StreamId);
+crate::impl_hex_fmt!(StreamId);
 
 impl Serialize for StreamId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -116,7 +116,7 @@ impl<'de> Deserialize<'de> for StreamId {
     }
 }
 
-crate::hexutil::impl_fixed_hex_from_str!(StreamId, STREAM_ID_LEN);
+crate::impl_fixed_hex_from_str!(StreamId, STREAM_ID_LEN);
 
 /// Result of the `label = Ht("veen/label", routing_key || stream_id ||
 /// u64be(epoch))` derivation described in the specification.
@@ -190,7 +190,7 @@ impl TryFrom<Vec<u8>> for Label {
     }
 }
 
-crate::hexutil::impl_hex_fmt!(Label);
+crate::impl_hex_fmt!(Label);
 
 impl Serialize for Label {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -234,7 +234,7 @@ impl<'de> Deserialize<'de> for Label {
     }
 }
 
-crate::hexutil::impl_fixed_hex_from_str!(Label, LABEL_LEN);
+crate::impl_fixed_hex_from_str!(Label, LABEL_LEN);
 
 #[cfg(test)]
 mod tests;
