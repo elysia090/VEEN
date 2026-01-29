@@ -97,8 +97,7 @@ impl Mmr {
             self.peaks_scratch.push(peak);
         }
         let peak_index = peak_index.expect("new peak must be recorded");
-        let root =
-            MmrRoot::from_peaks(&self.peaks_scratch).expect("peaks must be non-empty");
+        let root = MmrRoot::from_peaks(&self.peaks_scratch).expect("peaks must be non-empty");
 
         let proof = path.map(|path| MmrProof {
             ver: PROOF_VERSION,
