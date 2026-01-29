@@ -164,6 +164,40 @@ All limits MUST be enforced with deterministic error codes and MUST NOT depend o
 - **Overlays:** pure folds over logs. No access to hub internals.
 - **Operational tooling:** uses public APIs only.
 
+### 3.7 Crate boundaries (recommended workspace layout)
+To keep the architecture boundaries enforceable in code, implementations SHOULD map them to **crate-level
+dependency boundaries**. This section intentionally discards the current repo layout and defines a cleaner
+logical separation that can be implemented as crates or as strict module boundaries. The dependency direction
+is **one-way** from higher-level tooling to lower-level primitives; lower layers MUST NOT depend on higher
+layers.
+
+**Core primitives (no operational dependencies):**
+- **`veen-core`**: wire objects, deterministic CBOR, cryptographic profiles, error codes, and proof types. It
+  MUST NOT depend on hub orchestration, storage engines, overlays, or CLI code.
+
+**Storage and indexing (no overlay semantics):**
+- **`veen-storage`** (or an internal `storage` module if kept within `veen-hub`): append-only log abstraction,
+  MMR maintenance, indices, checkpoints, and retention primitives. It MUST depend only on `veen-core` and
+  storage backends. It MUST NOT implement overlay-specific shortcuts.
+
+**Hub orchestration (protocol enforcement):**
+- **`veen-hub`**: admission pipeline, receipt issuance, and API surface for submit/stream/proof/checkpoint. It
+  depends on `veen-core` + `veen-storage` only. It MUST expose public APIs that are overlay-agnostic.
+
+**Overlay execution (pure folds):**
+- **`veen-overlays`** (or overlay-specific crates): schema definitions, deterministic fold logic, summaries, and
+  validation. Overlays MUST depend only on public read/proof APIs from `veen-hub` or a stable read-only facade.
+
+**Operational tooling (public APIs only):**
+- **`veen-cli`**: user-facing commands; depends on public hub APIs and overlay APIs. It MUST NOT bypass them.
+- **`veen-bridge`**: mirroring/replay tooling; depends on public hub read/write APIs and `veen-core` types only.
+- **`veen-selftest`**: conformance and invariants; depends on public APIs and fixtures only.
+
+**Boundary enforcement:**
+- Cross-layer calls MUST go through explicit traits/interfaces defined in the lower layer.
+- Any shared utility between layers MUST live in the lower layer (or `veen-core`) and be imported upward.
+- No crate may rely on filesystem paths or storage details except `veen-storage`.
+
 ---
 
 ## 4. Core wire specification (v0.0.1)
