@@ -171,3 +171,57 @@ impl_schema_value!(
     SchemaOwnerVisitor,
     "a 32-byte schema owner key"
 );
+
+#[cfg(test)]
+mod tests {
+    use super::{SchemaId, SchemaOwner, SCHEMA_ID_LEN};
+    use crate::LengthError;
+    use serde_json::json;
+
+    #[test]
+    fn schema_id_from_slice_enforces_length() {
+        let bytes = [0x11; SCHEMA_ID_LEN];
+        let id = SchemaId::from_slice(&bytes).expect("valid schema id");
+        assert_eq!(id.as_bytes(), &bytes);
+
+        let err = SchemaId::from_slice(&bytes[..SCHEMA_ID_LEN - 1]).expect_err("length error");
+        assert_eq!(err, LengthError::new(SCHEMA_ID_LEN, SCHEMA_ID_LEN - 1));
+    }
+
+    #[test]
+    fn schema_owner_from_slice_enforces_length() {
+        let bytes = [0x22; SCHEMA_ID_LEN];
+        let owner = SchemaOwner::from_slice(&bytes).expect("valid owner");
+        assert_eq!(owner.as_bytes(), &bytes);
+
+        let err = SchemaOwner::from_slice(&bytes[..SCHEMA_ID_LEN - 2]).expect_err("length error");
+        assert_eq!(err, LengthError::new(SCHEMA_ID_LEN, SCHEMA_ID_LEN - 2));
+    }
+
+    #[test]
+    fn schema_id_round_trips_via_hex() {
+        let bytes = [0xab; SCHEMA_ID_LEN];
+        let hex = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let parsed: SchemaId = hex.parse().expect("parse schema id");
+        assert_eq!(parsed.as_bytes(), &bytes);
+        assert_eq!(parsed.to_string(), hex);
+    }
+
+    #[test]
+    fn schema_owner_deserializes_from_json_array() {
+        let bytes: Vec<u8> = (0..SCHEMA_ID_LEN as u8).collect();
+        let json_array = json!(bytes);
+        let encoded = serde_json::to_string(&json_array).expect("encode json");
+        let owner: SchemaOwner = serde_json::from_str(&encoded).expect("decode json");
+        assert_eq!(owner.as_bytes(), bytes.as_slice());
+    }
+
+    #[test]
+    fn schema_owner_rejects_invalid_json_length() {
+        let bytes: Vec<u8> = (0..(SCHEMA_ID_LEN as u8 - 1)).collect();
+        let json_array = json!(bytes);
+        let encoded = serde_json::to_string(&json_array).expect("encode json");
+        let err = serde_json::from_str::<SchemaOwner>(&encoded).expect_err("length error");
+        assert!(err.to_string().contains("invalid length"));
+    }
+}
