@@ -8,6 +8,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command as StdCommand, Stdio};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -9757,7 +9758,7 @@ impl RecoveryExecutionIndex {
 struct StreamMessageCache {
     reference: HubReference,
     cache: HashMap<String, Vec<StoredMessage>>,
-    audit_resource_classes: HashMap<String, HashSet<String>>,
+    audit_resource_classes: HashMap<String, Arc<HashSet<String>>>,
 }
 
 impl StreamMessageCache {
@@ -9780,9 +9781,9 @@ impl StreamMessageCache {
         Ok(messages.as_slice())
     }
 
-    async fn audit_resource_classes(&mut self, stream: &str) -> Result<&HashSet<String>> {
+    async fn audit_resource_classes(&mut self, stream: &str) -> Result<Arc<HashSet<String>>> {
         if let Some(classes) = self.audit_resource_classes.get(stream) {
-            return Ok(classes);
+            return Ok(Arc::clone(classes));
         }
 
         let messages = self.messages(stream).await?;
@@ -9794,13 +9795,11 @@ impl StreamMessageCache {
             let payload: QueryAuditLog = parse_message_payload(message)?;
             classes.insert(payload.resource_class);
         }
+        let classes = Arc::new(classes);
         self.audit_resource_classes
-            .insert(stream.to_string(), classes);
+            .insert(stream.to_string(), Arc::clone(&classes));
 
-        Ok(self
-            .audit_resource_classes
-            .get(stream)
-            .expect("just inserted stream audit resource classes"))
+        Ok(classes)
     }
 }
 
