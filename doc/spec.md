@@ -27,6 +27,17 @@ It targets the **intermediate space between CRUD, KV, and Queue**, while being *
 - **Replay:** Recompute overlay state from logs or checkpoints without hidden state.
 - **Interpret:** Apply new overlays to old logs without hub changes.
 
+**Design sophistication (SHOULD):**
+- **Control/data plane separation:** Admission, ordering, and proofs remain in the hub; overlay semantics and
+  policy live outside the hub, so operational changes do not mutate the core.
+- **Failure-domain clarity:** Every durable artifact (log chunk, checkpoint, receipt, index snapshot) has an
+  explicit producer and verifier so recovery is mechanical, not interpretive.
+- **Capability-first authority:** All mutations flow through scoped CapTokens; ambient authority is forbidden.
+- **Composable overlays:** Overlays are defined as pure folds with declared inputs/outputs, enabling safe
+  composition and deterministic replays across profiles.
+- **Observable determinism:** Every decision is derivable from log state + limits; telemetry may explain but
+  never alter outcomes.
+
 ---
 
 ## 1. Scope, versioning, and compatibility
