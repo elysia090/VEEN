@@ -40,7 +40,8 @@ pub use crate::profile::{Profile, ProfileId};
 pub use crate::realm::{RealmId, REALM_ID_LEN};
 pub use crate::schema::{SchemaId, SchemaOwner, SCHEMA_ID_LEN};
 pub use crate::wire::{
-    AttachmentId, AttachmentRoot, AuthRef, Checkpoint, CheckpointVerifyError, ClientId, CtHash,
-    Direction, LeafHash, Mmr, MmrNode, MmrPathNode, MmrProof, MmrRoot, Msg, MsgVerifyError,
-    PayloadHeader, Receipt, ReceiptVerifyError, Signature64, SignatureVerifyError, AEAD_NONCE_LEN,
+    AttachmentId, AttachmentRoot, AuthRef, Checkpoint, CheckpointVerifyError, CiphertextEnvelope,
+    CiphertextParseError, ClientId, CtHash, Direction, LeafHash, Mmr, MmrNode, MmrPathNode,
+    MmrProof, MmrRoot, Msg, MsgVerifyError, PayloadHeader, Receipt, ReceiptVerifyError,
+    Signature64, SignatureVerifyError, AEAD_NONCE_LEN, CIPHERTEXT_LEN_PREFIX, HPKE_ENC_LEN,
 };

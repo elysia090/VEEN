@@ -9,6 +9,9 @@ mod signing;
 pub mod types;
 
 pub use checkpoint::{Checkpoint, CheckpointVerifyError};
+pub use ciphertext::{
+    CiphertextEnvelope, CiphertextParseError, CIPHERTEXT_LEN_PREFIX, HPKE_ENC_LEN,
+};
 pub use message::{Msg, MsgVerifyError};
 pub use mmr::Mmr;
 pub use payload::{AttachmentId, AttachmentRoot, PayloadHeader};
@@ -20,3 +23,4 @@ pub use types::{
     AEAD_NONCE_LEN,
 };
 mod cbor;
+pub mod ciphertext;
