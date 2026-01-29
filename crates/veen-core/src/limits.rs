@@ -1,6 +1,6 @@
 //! Default protocol limits defined by the VEEN v0.0.1 specification.
 //!
-//! Section 19 of `doc/spec.md` establishes conservative upper bounds that
+//! Section 14 of `doc/spec.md` establishes conservative upper bounds that
 //! implementations must enforce when processing client traffic.  These values
 //! keep hub resource usage predictable while remaining configurable by higher
 //! level components when a deployment explicitly chooses different limits.
@@ -22,3 +22,6 @@ pub const MAX_CAP_CHAIN: usize = 8;
 
 /// Maximum number of attachments that may accompany a single message.
 pub const MAX_ATTACHMENTS_PER_MSG: usize = 1_024;
+
+/// Maximum size of a single attachment in bytes.
+pub const MAX_ATTACHMENT_BYTES: usize = MAX_BODY_BYTES;
