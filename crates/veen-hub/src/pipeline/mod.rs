@@ -34,7 +34,8 @@ use veen_core::wire::{
 };
 use veen_core::{
     cap_stream_id_from_label, cap_token_from_cbor, CapTokenRate, Label, RealmId, StreamId,
-    StreamIdParseError, CAP_TOKEN_VERSION, MAX_ATTACHMENTS_PER_MSG, MAX_BODY_BYTES, MAX_MSG_BYTES,
+    StreamIdParseError, CAP_TOKEN_VERSION, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MSG,
+    MAX_BODY_BYTES, MAX_MSG_BYTES,
 };
 use veen_overlays::meta::SchemaRegistry;
 use veen_overlays::revocation::{
@@ -2297,6 +2298,11 @@ pub enum CapabilityError {
     MessageTotalTooLarge { total_bytes: usize, limit: usize },
     #[error("E.SIZE attachment count {count} exceeds limit {limit}")]
     AttachmentCountExceeded { count: usize, limit: usize },
+    #[error("E.SIZE attachment size {attachment_bytes} bytes exceeds limit {limit} bytes")]
+    AttachmentTooLarge {
+        attachment_bytes: usize,
+        limit: usize,
+    },
 }
 
 impl CapabilityError {
@@ -2329,7 +2335,8 @@ impl CapabilityError {
             | Self::ProofOfWorkInvalid { .. } => "E.AUTH",
             Self::MessageBodyTooLarge { .. }
             | Self::MessageTotalTooLarge { .. }
-            | Self::AttachmentCountExceeded { .. } => "E.SIZE",
+            | Self::AttachmentCountExceeded { .. }
+            | Self::AttachmentTooLarge { .. } => "E.SIZE",
         }
     }
 }
@@ -3264,6 +3271,13 @@ fn prepare_attachments_for_storage(
         let data = BASE64_STANDARD
             .decode(&attachment.data)
             .with_context(|| format!("decoding attachment {} for stream {}", index, stream))?;
+        if data.len() > MAX_ATTACHMENT_BYTES {
+            return Err(CapabilityError::AttachmentTooLarge {
+                attachment_bytes: data.len(),
+                limit: MAX_ATTACHMENT_BYTES,
+            }
+            .into());
+        }
         let new_total = total_bytes.checked_add(data.len()).ok_or({
             CapabilityError::MessageTotalTooLarge {
                 total_bytes: usize::MAX,
@@ -4788,6 +4802,53 @@ mod tests {
             match capability_err {
                 CapabilityError::AttachmentCountExceeded { limit, .. } => {
                     assert_eq!(limit, MAX_ATTACHMENTS_PER_MSG);
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+            Ok::<(), anyhow::Error>(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn submit_rejects_attachment_size_over_limit() -> Result<()> {
+        let rt = Runtime::new()?;
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let overrides = HubConfigOverrides {
+                capability_gating_enabled: Some(false),
+                ..HubConfigOverrides::default()
+            };
+            let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
+            allow_stream_for_hub(&pipeline, "core/limit-attachment-size", "limit-attach-size")
+                .await?;
+
+            let attachment_bytes = MAX_ATTACHMENT_BYTES + 1;
+            let attachment = AttachmentUpload {
+                name: Some("oversize".into()),
+                data: BASE64_STANDARD.encode(vec![0u8; attachment_bytes]),
+            };
+
+            let request = SubmitRequest {
+                stream: "core/limit-attachment-size".to_string(),
+                client_id: hex::encode([0xDD; 32]),
+                payload: serde_json::json!({"ok": true}),
+                attachments: Some(vec![attachment]),
+                auth_ref: None,
+                expires_at: None,
+                schema: None,
+                idem: None,
+                pow_cookie: None,
+            };
+
+            let err = pipeline
+                .submit(request)
+                .await
+                .expect_err("submit should fail");
+            let capability_err = err.downcast::<CapabilityError>().expect("capability error");
+            match capability_err {
+                CapabilityError::AttachmentTooLarge { limit, .. } => {
+                    assert_eq!(limit, MAX_ATTACHMENT_BYTES);
                 }
                 other => panic!("unexpected error: {other:?}"),
             }
