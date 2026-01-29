@@ -157,6 +157,8 @@ All size and time limits are **explicit, configuration-bound, and deterministic*
 - Max rate and burst per CapToken.
 - Max clock skew for epoch validity.
 All limits MUST be enforced with deterministic error codes and MUST NOT depend on runtime state outside indexed metadata.
+v0.0.1 mandates conservative default maxima in §14, which deployments MAY lower but MUST NOT raise for
+wire compatibility.
 
 ### 3.6 Architecture boundaries
 - **Core protocol:** wire objects, ordering, proofs. Depends only on crypto, CBOR, append-only storage.
@@ -497,6 +499,49 @@ These behaviors are realized purely by overlays; hubs remain unchanged.
 - General-purpose compute or smart contracts
 - Consensus protocols or blockchain semantics
 - Deep packet inspection or payload routing
+
+---
+
+## 14. Protocol limits (normative)
+
+v0.0.1 defines conservative upper bounds for acceptance and verification. Implementations MUST enforce
+these maxima (or stricter limits) when processing client traffic.
+
+- **Max serialized MSG size:** 1,048,576 bytes (1 MiB)
+- **Max encrypted payload header size:** 16,384 bytes (16 KiB)
+- **Max decrypted payload body size:** 1,048,320 bytes (1 MiB minus header envelope)
+- **Max inclusion proof path length:** 64 sibling entries
+- **Max CapToken signature chain length:** 8 signatures
+- **Max attachments per MSG:** 1,024
+
+### 14.1 Limit registry (normative)
+Implementations MUST define a deterministic limit registry that is fixed for the lifetime of a hub
+process. The registry MUST include, at minimum:
+
+- `max_msg_bytes`
+- `max_hdr_bytes`
+- `max_body_bytes`
+- `max_attachments_per_msg`
+- `max_attachment_bytes`
+- `max_chunk_bytes`
+- `max_checkpoint_interval`
+- `max_cap_rate_per_sec`
+- `max_cap_rate_burst`
+- `max_epoch_skew_sec`
+
+The registry MUST be a deployment configuration artifact and MUST NOT be derived from runtime load,
+available memory, or other mutable hub state. Deployments MAY lower any maximums from §14 but MUST NOT
+raise them.
+
+### 14.2 Derived sizing rules (normative)
+To preserve deterministic admission behavior, hubs MUST apply the following derived sizing rules:
+
+- `len(ciphertext) <= max_msg_bytes` and `len(MSG) <= max_msg_bytes` MUST both hold for acceptance.
+- `hdr_len <= max_hdr_bytes` and `body_len <= max_body_bytes` are enforced from the ciphertext length
+  fields before any decryption.
+- If `pad_block > 0`, padding bytes count toward `max_msg_bytes` but do not reduce `max_body_bytes`.
+- Attachment count and each attachment size are enforced against `max_attachments_per_msg` and
+  `max_attachment_bytes` prior to computing `att_root`.
 
 ---
 
