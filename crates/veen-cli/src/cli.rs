@@ -9436,7 +9436,7 @@ async fn handle_audit_queries(args: AuditQueriesArgs) -> Result<()> {
     let messages = fetch_stream_messages(&reference, &args.stream).await?;
     let mut rows = Vec::new();
     for message in messages {
-        if !message_schema_matches(&message, schema_query_audit()) {
+        if !message_schema_matches_hex(&message, schema_query_audit_hex()) {
             continue;
         }
         let payload: QueryAuditLog = parse_message_payload(&message)?;
@@ -9770,37 +9770,33 @@ impl StreamMessageCache {
     }
 
     async fn messages(&mut self, stream: &str) -> Result<&[StoredMessage]> {
-        if let std::collections::hash_map::Entry::Vacant(entry) =
-            self.cache.entry(stream.to_string())
-        {
-            let messages = fetch_stream_messages(&self.reference, stream).await?;
-            entry.insert(messages);
-        }
-        Ok(self
-            .cache
-            .get(stream)
-            .map(|messages| messages.as_slice())
-            .expect("stream cache entry present"))
+        let messages = match self.cache.entry(stream.to_string()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let messages = fetch_stream_messages(&self.reference, stream).await?;
+                entry.insert(messages)
+            }
+        };
+        Ok(messages.as_slice())
     }
 
     async fn audit_resource_classes(&mut self, stream: &str) -> Result<&HashSet<String>> {
-        if !self.audit_resource_classes.contains_key(stream) {
-            let messages = self.messages(stream).await?;
-            let mut classes = HashSet::new();
-            for message in messages {
-                if !message_schema_matches(message, schema_query_audit()) {
-                    continue;
+        let classes = match self.audit_resource_classes.entry(stream.to_string()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let messages = self.messages(stream).await?;
+                let mut classes = HashSet::new();
+                for message in messages {
+                    if !message_schema_matches_hex(message, schema_query_audit_hex()) {
+                        continue;
+                    }
+                    let payload: QueryAuditLog = parse_message_payload(message)?;
+                    classes.insert(payload.resource_class);
                 }
-                let payload: QueryAuditLog = parse_message_payload(message)?;
-                classes.insert(payload.resource_class);
+                entry.insert(classes)
             }
-            self.audit_resource_classes
-                .insert(stream.to_string(), classes);
-        }
-        Ok(self
-            .audit_resource_classes
-            .get(stream)
-            .expect("audit cache entry present"))
+        };
+        Ok(classes)
     }
 }
 
@@ -9984,9 +9980,21 @@ fn schema_id_from_message(message: &StoredMessage) -> Option<[u8; 32]> {
     Some(id)
 }
 
-fn message_schema_matches(message: &StoredMessage, schema_id: [u8; 32]) -> bool {
-    schema_id_from_message(message)
-        .map(|id| id == schema_id)
+fn schema_query_audit_hex() -> &'static str {
+    static HEX: OnceLock<String> = OnceLock::new();
+    HEX.get_or_init(|| hex::encode(schema_query_audit()))
+}
+
+fn schema_recovery_execution_hex() -> &'static str {
+    static HEX: OnceLock<String> = OnceLock::new();
+    HEX.get_or_init(|| hex::encode(schema_recovery_execution()))
+}
+
+fn message_schema_matches_hex(message: &StoredMessage, expected_hex: &str) -> bool {
+    message
+        .schema
+        .as_deref()
+        .map(|schema_hex| schema_hex.eq_ignore_ascii_case(expected_hex))
         .unwrap_or(false)
 }
 
@@ -10093,7 +10101,7 @@ async fn collect_recovery_execution_index(
     for stream in streams {
         let messages = cache.messages(stream).await?;
         for message in messages {
-            if !message_schema_matches(message, schema_recovery_execution()) {
+            if !message_schema_matches_hex(message, schema_recovery_execution_hex()) {
                 continue;
             }
             let payload: RecoveryExecution = parse_message_payload(message)?;
