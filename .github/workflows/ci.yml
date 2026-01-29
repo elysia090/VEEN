@@ -15,51 +15,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          docker-images: true
-          large-packages: true
-
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
-      - name: Prepare cache directories
-        run: |
-          mkdir -p "$HOME/.cargo/registry"
-          mkdir -p "$HOME/.cargo/git"
-          mkdir -p target
-
-      - name: Cache cargo registry, git, and target
-        uses: actions/cache@v4
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Pre-fetch dependencies
-        run: cargo fetch --locked
+          cache-on-failure: true
 
       - name: Format check
-        env:
-          CARGO_NET_OFFLINE: "true"
         run: cargo fmt --all --check
 
       - name: Clippy
-        env:
-          CARGO_NET_OFFLINE: "true"
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Tests
-        env:
-          CARGO_NET_OFFLINE: "true"
         run: cargo test --workspace --locked
