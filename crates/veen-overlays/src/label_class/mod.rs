@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{h, label::Label};
+use veen_core::{h, label::Label};
 
 /// Returns the schema identifier for `veen.label.class.v1`.
 #[must_use]
@@ -29,7 +29,7 @@ impl LabelClassRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::label::{Label, StreamId};
+    use veen_core::label::{Label, StreamId};
 
     #[test]
     fn schema_matches_expected_digest() {

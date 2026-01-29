@@ -3427,6 +3427,7 @@ dependencies = [
  "tracing-subscriber",
  "veen-core",
  "veen-hub",
+ "veen-overlays",
  "veen-selftest",
  "x25519-dalek",
 ]
@@ -3479,6 +3480,25 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "veen-core",
+ "veen-overlays",
+]
+
+[[package]]
+name = "veen-overlays"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "getrandom 0.2.16",
+ "hex",
+ "rand",
+ "rand_core",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "time",
+ "veen-core",
 ]
 
 [[package]]
@@ -3506,6 +3526,7 @@ dependencies = [
  "veen-bridge",
  "veen-core",
  "veen-hub",
+ "veen-overlays",
 ]
 
 [[package]]

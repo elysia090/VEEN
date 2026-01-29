@@ -28,10 +28,11 @@ use veen_core::label::Label;
 use veen_core::wire::checkpoint::{Checkpoint, CHECKPOINT_VERSION};
 use veen_core::wire::mmr::Mmr;
 use veen_core::wire::types::{LeafHash, MmrRoot, Signature64};
-use veen_core::{h, ht, schema_meta_schema, PowCookie, SchemaDescriptor, SchemaId, SchemaOwner};
+use veen_core::{h, ht};
 use veen_hub::pipeline::{HubStreamState, StoredMessage, StreamMessageWithProof, SubmitRequest};
 use veen_hub::pipeline::{PowCookieEnvelope, SubmitResponse};
 use veen_hub::storage::{CHECKPOINTS_FILE, HUB_PID_FILE};
+use veen_overlays::{schema_meta_schema, PowCookie, SchemaDescriptor, SchemaId, SchemaOwner};
 
 #[cfg(unix)]
 use nix::sys::signal::{kill, Signal};

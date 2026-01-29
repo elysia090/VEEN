@@ -3,7 +3,7 @@ use std::{collections::HashMap, convert::TryFrom, fmt};
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{h, LengthError};
+use veen_core::{h, LengthError};
 
 /// Length in bytes of a revocation target value.
 pub const REVOCATION_TARGET_LEN: usize = 32;
@@ -83,7 +83,7 @@ impl AsRef<[u8]> for RevocationTarget {
     }
 }
 
-crate::hexutil::impl_hex_fmt!(RevocationTarget);
+veen_core::impl_hex_fmt!(RevocationTarget);
 
 impl Serialize for RevocationTarget {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

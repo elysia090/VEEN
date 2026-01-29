@@ -20,13 +20,14 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::fs;
 
-use veen_core::{cap_token_from_cbor, revocation::cap_token_hash, PowCookie};
+use veen_core::cap_token_from_cbor;
 use veen_hub::pipeline::{
     AnchorRequest, AttachmentUpload, AuthorizeResponse, PowCookieEnvelope, SubmitRequest,
     SubmitResponse,
 };
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
+use veen_overlays::{cap_token_hash, PowCookie};
 
 #[derive(Debug, Deserialize)]
 struct MetricsResponse {

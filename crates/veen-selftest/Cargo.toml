@@ -21,6 +21,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 veen-core = { path = "../veen-core" }
+veen-overlays = { path = "../veen-overlays" }
 ed25519-dalek.workspace = true
 rand.workspace = true
 reqwest.workspace = true

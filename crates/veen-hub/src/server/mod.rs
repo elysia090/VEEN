@@ -23,8 +23,8 @@ use crate::pipeline::{
 };
 use std::str::FromStr;
 use veen_core::label::{Label, StreamId};
-use veen_core::revocation::RevocationKind;
 use veen_core::RealmId;
+use veen_overlays::revocation::RevocationKind;
 
 pub struct HubServerHandle {
     shutdown: Option<oneshot::Sender<()>>,

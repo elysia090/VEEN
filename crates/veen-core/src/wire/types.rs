@@ -74,7 +74,7 @@ macro_rules! fixed_bytes_type {
             }
         }
 
-        crate::hexutil::impl_hex_fmt!($name);
+        crate::impl_hex_fmt!($name);
 
         impl Serialize for $name {
             fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -118,7 +118,7 @@ macro_rules! fixed_bytes_type {
             }
         }
 
-        crate::hexutil::impl_fixed_hex_from_str!($name, $len);
+        crate::impl_fixed_hex_from_str!($name, $len);
     };
 }
 

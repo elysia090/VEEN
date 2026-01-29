@@ -9,12 +9,15 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_bytes::ByteBuf;
 
-use veen_core::meta::SchemaRegistry;
 use veen_core::{
-    h, AttachmentRoot, ClientId, ClientObservationIndex, ClientUsage, ClientUsageConfig, ContextId,
-    Label, LabelClassRecord, LeafHash, Mmr, MmrRoot, Msg, PayloadHeader, RealmId, SchemaDescriptor,
-    SchemaId, SchemaOwner, TransferId, WalletDepositEvent, WalletId, WalletOpenEvent, WalletState,
-    WalletTransferEvent, REALM_ID_LEN, TRANSFER_ID_LEN, WALLET_ID_LEN,
+    h, AttachmentRoot, ClientId, ClientObservationIndex, ClientUsage, ClientUsageConfig, Label,
+    LeafHash, Mmr, MmrRoot, Msg, PayloadHeader, RealmId, REALM_ID_LEN,
+};
+use veen_overlays::meta::SchemaRegistry;
+use veen_overlays::{
+    ContextId, LabelClassRecord, SchemaDescriptor, SchemaId, SchemaOwner, TransferId,
+    WalletDepositEvent, WalletId, WalletOpenEvent, WalletState, WalletTransferEvent,
+    TRANSFER_ID_LEN, WALLET_ID_LEN,
 };
 
 pub mod metrics;
@@ -678,7 +681,7 @@ fn check_cbor_determinism_suite() -> Result<()> {
     let att_root = AttachmentRoot::from_ciphertexts(attachments.iter().map(Vec::as_slice))
         .ok_or_else(|| anyhow!("expected attachment root for determinism suite"))?;
     let payload_header = PayloadHeader {
-        schema: SchemaId::from(veen_core::schema_wallet_transfer()),
+        schema: SchemaId::from(veen_overlays::schema_wallet_transfer()),
         parent_id: Some(msg.leaf_hash()),
         att_root: Some(att_root),
         cap_ref: None,
@@ -726,7 +729,7 @@ fn check_cbor_determinism_suite() -> Result<()> {
     let schema_owner = SchemaOwner::from_slice(harness.hub_public())
         .context("constructing schema owner for determinism")?;
     let descriptor = SchemaDescriptor {
-        schema_id: SchemaId::from(veen_core::schema_wallet_transfer()),
+        schema_id: SchemaId::from(veen_overlays::schema_wallet_transfer()),
         name: "wallet.transfer".into(),
         version: "v1".into(),
         doc_url: Some("https://example.com/wallet-transfer".into()),
@@ -935,7 +938,7 @@ fn check_attachment_root_stability() -> Result<()> {
 fn check_schema_registry_precedence() -> Result<()> {
     let mut rng = OsRng;
     let owner_key = SigningKey::generate(&mut rng);
-    let schema_id = SchemaId::from(veen_core::schema_wallet_transfer());
+    let schema_id = SchemaId::from(veen_overlays::schema_wallet_transfer());
     let owner = SchemaOwner::from_slice(owner_key.verifying_key().as_bytes())
         .context("constructing schema owner")?;
 
@@ -975,14 +978,13 @@ fn check_schema_registry_precedence() -> Result<()> {
 
 fn run_overlay_scenario() -> Result<()> {
     let mut rng = OsRng;
-    let realm = veen_core::RealmId::derive("selftest-realm");
+    let realm = RealmId::derive("selftest-realm");
     let primary_principal = SigningKey::generate(&mut rng);
     let peer_principal = SigningKey::generate(&mut rng);
 
-    let ctx_primary =
-        veen_core::ContextId::derive(primary_principal.verifying_key().as_bytes(), realm)
-            .context("deriving primary context identifier")?;
-    let ctx_peer = veen_core::ContextId::derive(peer_principal.verifying_key().as_bytes(), realm)
+    let ctx_primary = ContextId::derive(primary_principal.verifying_key().as_bytes(), realm)
+        .context("deriving primary context identifier")?;
+    let ctx_peer = ContextId::derive(peer_principal.verifying_key().as_bytes(), realm)
         .context("deriving peer context identifier")?;
 
     let wallet_primary = WalletId::derive(realm, ctx_primary, "USD")
@@ -1103,7 +1105,7 @@ fn run_overlay_scenario() -> Result<()> {
     let schema_owner = SchemaOwner::from_slice(primary_principal.verifying_key().as_bytes())
         .context("constructing schema owner")?;
     let descriptor = SchemaDescriptor {
-        schema_id: SchemaId::from(veen_core::schema_wallet_transfer()),
+        schema_id: SchemaId::from(veen_overlays::schema_wallet_transfer()),
         name: "wallet.transfer.v1".into(),
         version: "v1".into(),
         doc_url: Some("https://example.com/wallet-transfer".into()),

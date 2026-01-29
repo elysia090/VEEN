@@ -1,0 +1,24 @@
+[package]
+name = "veen-overlays"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+veen-core = { path = "../veen-core" }
+ciborium = { workspace = true }
+getrandom = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }
+rand_core = { workspace = true }

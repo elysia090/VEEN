@@ -26,11 +26,6 @@ use tokio::sync::{Mutex, RwLock, RwLockWriteGuard};
 use tracing::Instrument;
 
 use veen_core::hub::HubId;
-use veen_core::meta::SchemaRegistry;
-use veen_core::revocation::{
-    cap_token_hash, schema_revocation, RevocationKind, RevocationRecord, RevocationTarget,
-    RevocationView,
-};
 use veen_core::wire::checkpoint::Checkpoint;
 use veen_core::wire::{
     mmr::Mmr,
@@ -38,10 +33,17 @@ use veen_core::wire::{
     types::{AuthRef, ClientId, LeafHash, MmrNode},
 };
 use veen_core::{
-    cap_stream_id_from_label, cap_token_from_cbor, schema_fed_authority, schema_label_class,
-    schema_meta_schema, AuthorityPolicy, AuthorityRecord, AuthorityView, CapTokenRate, Label,
-    LabelClassRecord, LabelPolicy, PowCookie, RealmId, SchemaDescriptor, StreamId,
+    cap_stream_id_from_label, cap_token_from_cbor, CapTokenRate, Label, RealmId, StreamId,
     StreamIdParseError, CAP_TOKEN_VERSION, MAX_ATTACHMENTS_PER_MSG, MAX_BODY_BYTES, MAX_MSG_BYTES,
+};
+use veen_overlays::meta::SchemaRegistry;
+use veen_overlays::revocation::{
+    cap_token_hash, schema_revocation, RevocationKind, RevocationRecord, RevocationTarget,
+    RevocationView,
+};
+use veen_overlays::{
+    schema_fed_authority, schema_label_class, schema_meta_schema, AuthorityPolicy, AuthorityRecord,
+    AuthorityView, LabelClassRecord, LabelPolicy, PowCookie, SchemaDescriptor,
 };
 
 use thiserror::Error;
@@ -3979,13 +3981,13 @@ mod tests {
     use tokio::fs;
     use tokio::runtime::Runtime;
     use veen_core::cap_stream_id_from_label;
-    use veen_core::federation::AuthorityPolicy;
     use veen_core::label::Label;
-    use veen_core::meta::SchemaId;
     use veen_core::realm::RealmId;
-    use veen_core::revocation::{RevocationKind, RevocationRecord, RevocationTarget};
     use veen_core::HubId;
-    use veen_core::REVOCATION_TARGET_LEN;
+    use veen_overlays::federation::AuthorityPolicy;
+    use veen_overlays::meta::SchemaId;
+    use veen_overlays::revocation::{RevocationKind, RevocationRecord, RevocationTarget};
+    use veen_overlays::REVOCATION_TARGET_LEN;
 
     async fn write_test_hub_key(data_dir: &Path) -> Result<()> {
         let path = data_dir.join(crate::storage::HUB_KEY_FILE);

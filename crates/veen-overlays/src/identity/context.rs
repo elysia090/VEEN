@@ -3,7 +3,7 @@ use std::{convert::TryFrom, fmt};
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{ht, realm::RealmId, LengthError};
+use veen_core::{ht, realm::RealmId, LengthError};
 
 use super::{ensure_ed25519_public_key_len, ID_LEN};
 
@@ -74,7 +74,7 @@ impl AsRef<[u8]> for ContextId {
     }
 }
 
-crate::hexutil::impl_hex_fmt!(ContextId);
+veen_core::impl_hex_fmt!(ContextId);
 
 impl Serialize for ContextId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

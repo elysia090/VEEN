@@ -5,7 +5,7 @@ use ciborium::value::Value;
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{h, realm::RealmId};
+use veen_core::{h, realm::RealmId};
 
 use super::{ContextId, OrgId};
 

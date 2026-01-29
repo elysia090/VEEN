@@ -51,7 +51,7 @@ impl Error for ParseHexError {}
 ///
 /// Returns a [`ParseHexError`] when the string is the wrong length or contains
 /// non-hexadecimal characters.
-pub(crate) fn decode_hex_array<const N: usize>(input: &str) -> Result<[u8; N], ParseHexError> {
+pub fn decode_hex_array<const N: usize>(input: &str) -> Result<[u8; N], ParseHexError> {
     let expected = N * 2;
     if input.len() != expected {
         return Err(ParseHexError::InvalidLength {
@@ -77,6 +77,7 @@ pub(crate) fn decode_hex_array<const N: usize>(input: &str) -> Result<[u8; N], P
     Ok(buf)
 }
 
+#[macro_export]
 macro_rules! impl_hex_fmt {
     ($name:ty) => {
         impl ::core::fmt::LowerHex for $name {
@@ -105,6 +106,7 @@ macro_rules! impl_hex_fmt {
     };
 }
 
+#[macro_export]
 macro_rules! impl_fixed_hex_from_str {
     ($name:ty, $len:expr) => {
         impl ::core::str::FromStr for $name {
@@ -116,8 +118,6 @@ macro_rules! impl_fixed_hex_from_str {
         }
     };
 }
-
-pub(crate) use {impl_fixed_hex_from_str, impl_hex_fmt};
 
 #[cfg(test)]
 mod tests {
@@ -216,7 +216,7 @@ mod tests {
             }
         }
 
-        crate::hexutil::impl_hex_fmt!(Dummy);
+        crate::impl_hex_fmt!(Dummy);
 
         let value = Dummy([0xde, 0xad]);
         assert_eq!(format!("{value}"), "dead");
@@ -235,7 +235,7 @@ mod tests {
             }
         }
 
-        crate::hexutil::impl_hex_fmt!(Dummy);
+        crate::impl_hex_fmt!(Dummy);
 
         let value = Dummy([0x00, 0x0f]);
         assert_eq!(format!("{value}"), "000f");
@@ -253,7 +253,7 @@ mod tests {
             }
         }
 
-        crate::hexutil::impl_hex_fmt!(Empty);
+        crate::impl_hex_fmt!(Empty);
 
         let value = Empty([]);
         assert_eq!(format!("{value}"), "");
@@ -286,7 +286,7 @@ mod tests {
             }
         }
 
-        crate::hexutil::impl_fixed_hex_from_str!(Token, 2);
+        crate::impl_fixed_hex_from_str!(Token, 2);
 
         let value = Token::from_str("0a0b").expect("parse token");
         assert_eq!(value, Token([0x0a, 0x0b]));
@@ -312,7 +312,7 @@ mod tests {
             }
         }
 
-        crate::hexutil::impl_fixed_hex_from_str!(Token, 1);
+        crate::impl_fixed_hex_from_str!(Token, 1);
 
         let err = Token::from_str("0g").expect_err("invalid character");
         assert_eq!(
@@ -335,7 +335,7 @@ mod tests {
             }
         }
 
-        crate::hexutil::impl_fixed_hex_from_str!(Token, 1);
+        crate::impl_fixed_hex_from_str!(Token, 1);
 
         let value = Token::from_str("FF").expect("uppercase hex");
         assert_eq!(value, Token([0xff]));

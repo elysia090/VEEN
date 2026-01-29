@@ -3,14 +3,14 @@ use std::{convert::TryFrom, fmt};
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{ht, realm::RealmId, LengthError};
+use veen_core::{ht, LengthError};
 
-use super::{org::OrgId, ID_LEN};
+use super::{ensure_ed25519_public_key_len, ID_LEN};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ScopedOrgId([u8; ID_LEN]);
+pub struct PrincipalId([u8; ID_LEN]);
 
-impl ScopedOrgId {
+impl PrincipalId {
     #[must_use]
     pub const fn new(bytes: [u8; ID_LEN]) -> Self {
         Self(bytes)
@@ -30,28 +30,26 @@ impl ScopedOrgId {
         Ok(Self::new(out))
     }
 
-    #[must_use]
-    pub fn derive(org_id: OrgId, realm_id: RealmId) -> Self {
-        let mut data = Vec::with_capacity(ID_LEN * 2);
-        data.extend_from_slice(org_id.as_ref());
-        data.extend_from_slice(realm_id.as_ref());
-        Self::from(ht("id/org/realm", &data))
+    pub fn derive(principal_pk: impl AsRef<[u8]>) -> Result<Self, LengthError> {
+        let principal_pk = principal_pk.as_ref();
+        ensure_ed25519_public_key_len(principal_pk)?;
+        Ok(Self::from(ht("id/principal", principal_pk)))
     }
 }
 
-impl From<[u8; ID_LEN]> for ScopedOrgId {
+impl From<[u8; ID_LEN]> for PrincipalId {
     fn from(value: [u8; ID_LEN]) -> Self {
         Self::new(value)
     }
 }
 
-impl From<&[u8; ID_LEN]> for ScopedOrgId {
+impl From<&[u8; ID_LEN]> for PrincipalId {
     fn from(value: &[u8; ID_LEN]) -> Self {
         Self::new(*value)
     }
 }
 
-impl TryFrom<&[u8]> for ScopedOrgId {
+impl TryFrom<&[u8]> for PrincipalId {
     type Error = LengthError;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
@@ -59,7 +57,7 @@ impl TryFrom<&[u8]> for ScopedOrgId {
     }
 }
 
-impl TryFrom<Vec<u8>> for ScopedOrgId {
+impl TryFrom<Vec<u8>> for PrincipalId {
     type Error = LengthError;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
@@ -67,15 +65,15 @@ impl TryFrom<Vec<u8>> for ScopedOrgId {
     }
 }
 
-impl AsRef<[u8]> for ScopedOrgId {
+impl AsRef<[u8]> for PrincipalId {
     fn as_ref(&self) -> &[u8] {
         self.as_bytes()
     }
 }
 
-crate::hexutil::impl_hex_fmt!(ScopedOrgId);
+veen_core::impl_hex_fmt!(PrincipalId);
 
-impl Serialize for ScopedOrgId {
+impl Serialize for PrincipalId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -84,20 +82,20 @@ impl Serialize for ScopedOrgId {
     }
 }
 
-struct ScopedOrgIdVisitor;
+struct PrincipalIdVisitor;
 
-impl<'de> Visitor<'de> for ScopedOrgIdVisitor {
-    type Value = ScopedOrgId;
+impl<'de> Visitor<'de> for PrincipalIdVisitor {
+    type Value = PrincipalId;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a 32-byte VEEN scoped-organization identifier")
+        formatter.write_str("a 32-byte VEEN principal identifier")
     }
 
     fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
     where
         E: DeError,
     {
-        ScopedOrgId::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
+        PrincipalId::from_slice(v).map_err(|err| E::invalid_length(err.actual(), &self))
     }
 
     fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
@@ -108,11 +106,11 @@ impl<'de> Visitor<'de> for ScopedOrgIdVisitor {
     }
 }
 
-impl<'de> Deserialize<'de> for ScopedOrgId {
+impl<'de> Deserialize<'de> for PrincipalId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_bytes(ScopedOrgIdVisitor)
+        deserializer.deserialize_bytes(PrincipalIdVisitor)
     }
 }

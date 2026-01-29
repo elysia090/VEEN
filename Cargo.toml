@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/veen-core",
+    "crates/veen-overlays",
     "crates/veen-hub",
     "crates/veen-cli",
     "crates/veen-selftest",

@@ -3,9 +3,9 @@ use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 
 use veen_core::{
-    h, AttachmentRoot, ClientId, Label, Msg, PayloadHeader, Profile, ProfileId, Receipt, SchemaId,
-    StreamId,
+    h, AttachmentRoot, ClientId, Label, Msg, PayloadHeader, Profile, ProfileId, Receipt, StreamId,
 };
+use veen_overlays::SchemaId;
 
 pub(crate) struct SampleData {
     pub(crate) msg: Msg,
@@ -63,7 +63,7 @@ impl SampleData {
             .ok_or_else(|| anyhow!("expected non-empty attachment set"))?;
 
         let payload_header = PayloadHeader {
-            schema: SchemaId::from(veen_core::schema_wallet_transfer()),
+            schema: SchemaId::from(veen_overlays::schema_wallet_transfer()),
             parent_id: None,
             att_root: Some(att_root),
             cap_ref: None,

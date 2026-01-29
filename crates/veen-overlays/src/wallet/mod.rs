@@ -6,14 +6,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_bytes::ByteBuf;
 use thiserror::Error;
 
-use crate::{
-    hash::{h, ht},
-    identity::ContextId,
-    label::StreamId,
-    realm::RealmId,
-    wire::types::LeafHash,
-    LengthError,
-};
+use crate::identity::ContextId;
+use veen_core::{h, ht, label::StreamId, realm::RealmId, wire::types::LeafHash, LengthError};
 
 /// Length in bytes of a VEEN wallet identifier.
 pub const WALLET_ID_LEN: usize = 32;
@@ -154,7 +148,7 @@ impl AsRef<[u8]> for TransferId {
     }
 }
 
-crate::hexutil::impl_hex_fmt!(TransferId);
+veen_core::impl_hex_fmt!(TransferId);
 
 impl Serialize for TransferId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -198,7 +192,7 @@ impl<'de> Deserialize<'de> for TransferId {
     }
 }
 
-crate::hexutil::impl_fixed_hex_from_str!(TransferId, TRANSFER_ID_LEN);
+veen_core::impl_fixed_hex_from_str!(TransferId, TRANSFER_ID_LEN);
 
 impl From<[u8; WALLET_ID_LEN]> for WalletId {
     fn from(value: [u8; WALLET_ID_LEN]) -> Self {
@@ -234,7 +228,7 @@ impl AsRef<[u8]> for WalletId {
     }
 }
 
-crate::hexutil::impl_hex_fmt!(WalletId);
+veen_core::impl_hex_fmt!(WalletId);
 
 impl Serialize for WalletId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -278,7 +272,7 @@ impl<'de> Deserialize<'de> for WalletId {
     }
 }
 
-crate::hexutil::impl_fixed_hex_from_str!(WalletId, WALLET_ID_LEN);
+veen_core::impl_fixed_hex_from_str!(WalletId, WALLET_ID_LEN);
 
 /// Error returned when wallet-specific derivations violate the specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -1089,7 +1083,7 @@ pub fn schema_wallet_unfreeze() -> [u8; 32] {
 mod tests {
     use super::*;
 
-    use crate::wire::types::LeafHash;
+    use veen_core::wire::types::LeafHash;
 
     fn sample_key(prefix: u8) -> [u8; WALLET_ID_LEN] {
         let mut out = [0u8; WALLET_ID_LEN];

@@ -25,6 +25,7 @@ use veen_hub::pipeline::{
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::storage::HUB_KEY_FILE;
+use veen_overlays::{schema_fed_authority, schema_label_class, schema_revocation};
 
 use crate::{query, SelftestGoalReport, SelftestReporter};
 
@@ -516,17 +517,16 @@ async fn run_kex1_overlay() -> Result<KexOverlayResult> {
     let stream_id = veen_core::label::StreamId::from(veen_core::h(b"selftest/kex1/stream"));
     let primary_hub = veen_core::hub::HubId::from(veen_core::h(b"selftest/kex1/hub"));
 
-    let authority = veen_core::federation::AuthorityRecord {
+    let authority = veen_overlays::federation::AuthorityRecord {
         realm_id,
         stream_id,
         primary_hub,
         replica_hubs: Vec::new(),
-        policy: veen_core::federation::AuthorityPolicy::SinglePrimary,
+        policy: veen_overlays::federation::AuthorityPolicy::SinglePrimary,
         ts: current_unix_timestamp(),
         ttl: 900,
     };
-    let authority_body =
-        encode_signed_envelope(veen_core::schema_fed_authority(), &authority, &signing_key)?;
+    let authority_body = encode_signed_envelope(schema_fed_authority(), &authority, &signing_key)?;
     http.post(format!("{hub_base}/authority"))
         .header("content-type", "application/cbor")
         .body(authority_body)
@@ -535,17 +535,16 @@ async fn run_kex1_overlay() -> Result<KexOverlayResult> {
         .error_for_status()
         .context("publishing authority record")?;
 
-    let revocation = veen_core::revocation::RevocationRecord {
-        kind: veen_core::revocation::RevocationKind::ClientId,
-        target: veen_core::revocation::RevocationTarget::from(veen_core::h(
+    let revocation = veen_overlays::revocation::RevocationRecord {
+        kind: veen_overlays::revocation::RevocationKind::ClientId,
+        target: veen_overlays::revocation::RevocationTarget::from(veen_core::h(
             b"selftest/kex1/revocation",
         )),
         reason: Some("overlay lifecycle".into()),
         ts: current_unix_timestamp(),
         ttl: Some(300),
     };
-    let revocation_body =
-        encode_signed_envelope(veen_core::schema_revocation(), &revocation, &signing_key)?;
+    let revocation_body = encode_signed_envelope(schema_revocation(), &revocation, &signing_key)?;
     http.post(format!("{hub_base}/revoke"))
         .header("content-type", "application/cbor")
         .body(revocation_body)
@@ -624,13 +623,13 @@ async fn run_label_class_overlay() -> Result<LabelClassOverlayResult> {
 
     let stream_id = veen_core::label::StreamId::from(veen_core::h(b"selftest/lclass/stream"));
     let label = veen_core::label::Label::derive([], stream_id, 0);
-    let record = veen_core::label_class::LabelClassRecord {
+    let record = veen_overlays::label_class::LabelClassRecord {
         label,
         class: "selftest".into(),
         sensitivity: Some("internal".into()),
         retention_hint: Some(86_400),
     };
-    let payload = encode_signed_envelope(veen_core::schema_label_class(), &record, &signing_key)?;
+    let payload = encode_signed_envelope(schema_label_class(), &record, &signing_key)?;
     http.post(format!("{hub_base}/label-class"))
         .header("content-type", "application/cbor")
         .body(payload)

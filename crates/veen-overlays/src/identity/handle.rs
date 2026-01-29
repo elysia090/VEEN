@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{h, realm::RealmId};
+use veen_core::{h, realm::RealmId};
 
 use super::{ContextId, OrgId};
 
@@ -259,7 +259,7 @@ impl HandleNamespace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::realm::RealmId;
+    use veen_core::realm::RealmId;
 
     #[test]
     fn schema_matches_expected_digest() {

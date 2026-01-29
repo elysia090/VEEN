@@ -4,7 +4,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use veen_core::query::{
+use veen_overlays::query::{
     EvidenceMode, EvidencePolicy, QueryDescriptor, QueryError, QueryFilter, ResultContext,
     ResultDigest,
 };
@@ -312,7 +312,7 @@ async fn exercise_descriptor_validation(
         filter: QueryFilter {
             subject_id: None,
             event_type: None,
-            time: veen_core::query::TimeFilter {
+            time: veen_overlays::query::TimeFilter {
                 from: Some("2025-01-02T00:00:00Z".into()),
                 to: Some("2025-01-01T00:00:00Z".into()),
             },
