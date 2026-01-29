@@ -25,6 +25,11 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Warm cargo caches
+        run: |
+          cargo fetch --locked
+          cargo build --workspace --locked
+
       - name: Format check
         run: cargo fmt --all --check
 
