@@ -124,7 +124,15 @@ impl<'de> Visitor<'de> for CheckpointVisitor {
         let mmr_root = seq_next_required(&mut seq, 4, expecting)?;
         let epoch = seq_next_required(&mut seq, 5, expecting)?;
         let hub_sig = seq_next_required(&mut seq, 6, expecting)?;
-        let witness_sigs = seq.next_element::<Vec<Signature64>>()?;
+        let witness_sigs = match seq.next_element::<Option<Vec<Signature64>>>()? {
+            Some(Some(witness_sigs)) => Some(witness_sigs),
+            Some(None) => {
+                return Err(serde::de::Error::custom(
+                    "witness_sigs must be omitted or an array; null is not allowed",
+                ))
+            }
+            None => None,
+        };
         seq_no_trailing(&mut seq, 8, expecting)?;
 
         Ok(Checkpoint {
