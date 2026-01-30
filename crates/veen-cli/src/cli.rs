@@ -329,6 +329,7 @@ static DEFAULT_GLOBAL_OPTIONS: GlobalOptions = GlobalOptions {
     timeout_ms: None,
 };
 static GLOBAL_OPTIONS: OnceLock<GlobalOptions> = OnceLock::new();
+static CLI_BINARY_NAME: OnceLock<String> = OnceLock::new();
 
 fn set_global_options(options: GlobalOptions) {
     let _ = GLOBAL_OPTIONS.set(options);
@@ -368,13 +369,9 @@ fn stdout_output_enabled(use_json: bool) -> bool {
 }
 
 fn cli_binary_name() -> String {
-    env::args_os()
-        .next()
-        .and_then(|arg| {
-            let path = Path::new(&arg);
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
+    CLI_BINARY_NAME
+        .get()
+        .cloned()
         .unwrap_or_else(|| "veen-cli".to_string())
 }
 
@@ -3108,6 +3105,13 @@ struct RenderedRevocation {
 
 pub async fn cli_main() {
     let args: Vec<_> = env::args_os().collect();
+    if let Some(binary) = args.first().and_then(|arg| {
+        let path = Path::new(arg);
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    }) {
+        let _ = CLI_BINARY_NAME.set(binary);
+    }
     let exit_code = match Cli::try_parse_from(&args) {
         Ok(cli) => match run_cli(cli).await {
             Ok(()) => 0,
