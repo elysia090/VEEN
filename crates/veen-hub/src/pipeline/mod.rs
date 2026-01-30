@@ -34,7 +34,7 @@ use veen_core::wire::{
 };
 use veen_core::{
     cap_stream_id_from_label, cap_token_from_cbor, CapTokenRate, Label, RealmId, StreamId,
-    StreamIdParseError, CAP_TOKEN_VERSION, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MSG,
+    StreamIdParseError, CAP_TOKEN_VERSION, MAX_ATTACHMENTS_PER_MSG, MAX_ATTACHMENT_BYTES,
     MAX_BODY_BYTES, MAX_MSG_BYTES,
 };
 use veen_overlays::meta::SchemaRegistry;
@@ -4869,10 +4869,14 @@ mod tests {
             let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
             allow_stream_for_hub(&pipeline, "core/limit-total", "limit-total").await?;
 
-            // Body well below limit so that attachments trigger the overflow.
-            let body = serde_json::json!({"text": "small"});
+            // Body large enough to push the total over the limit alongside a max-sized attachment.
+            let body = serde_json::json!({"text": "a".repeat(300)});
             let body_len = body.to_string().len();
-            let attachment_bytes = MAX_MSG_BYTES - body_len + 1; // forces total > limit
+            let attachment_bytes = MAX_ATTACHMENT_BYTES;
+            assert!(
+                body_len > (MAX_MSG_BYTES - MAX_ATTACHMENT_BYTES),
+                "body should exceed the remaining bytes needed to overflow total size"
+            );
             let attachment = AttachmentUpload {
                 name: Some("large".into()),
                 data: BASE64_STANDARD.encode(vec![0u8; attachment_bytes]),

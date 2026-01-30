@@ -55,14 +55,14 @@ impl<'a> CiphertextEnvelope<'a> {
 
         let hdr_len_bytes = &ciphertext[HPKE_ENC_LEN..HPKE_ENC_LEN + 4];
         let body_len_bytes = &ciphertext[HPKE_ENC_LEN + 4..HPKE_ENC_LEN + 8];
-        let hdr_len = u32::from_be_bytes(
-            <[u8; 4]>::try_from(hdr_len_bytes).expect("slice length validated"),
-        );
+        let hdr_len =
+            u32::from_be_bytes(<[u8; 4]>::try_from(hdr_len_bytes).expect("slice length validated"));
         let body_len = u32::from_be_bytes(
             <[u8; 4]>::try_from(body_len_bytes).expect("slice length validated"),
         );
 
-        let hdr_len_usize = usize::try_from(hdr_len).map_err(|_| CiphertextParseError::LengthOverflow)?;
+        let hdr_len_usize =
+            usize::try_from(hdr_len).map_err(|_| CiphertextParseError::LengthOverflow)?;
         let body_len_usize =
             usize::try_from(body_len).map_err(|_| CiphertextParseError::LengthOverflow)?;
 
@@ -111,7 +111,7 @@ impl<'a> CiphertextEnvelope<'a> {
         if pad_block > 0 {
             let pad_block_usize =
                 usize::try_from(pad_block).map_err(|_| CiphertextParseError::LengthOverflow)?;
-            if pad_block_usize == 0 || ciphertext.len() % pad_block_usize != 0 {
+            if pad_block_usize == 0 || !ciphertext.len().is_multiple_of(pad_block_usize) {
                 return Err(CiphertextParseError::PadBlockMismatch {
                     pad_block,
                     length: ciphertext.len(),
@@ -158,7 +158,7 @@ impl<'a> CiphertextEnvelope<'a> {
         if pad_block > 0 {
             let pad_block_usize =
                 usize::try_from(pad_block).map_err(|_| CiphertextParseError::LengthOverflow)?;
-            if pad_block_usize == 0 || ciphertext.len() % pad_block_usize != 0 {
+            if pad_block_usize == 0 || !ciphertext.len().is_multiple_of(pad_block_usize) {
                 return Err(CiphertextParseError::PadBlockMismatch {
                     pad_block,
                     length: ciphertext.len(),
@@ -248,26 +248,17 @@ mod tests {
 
         let err = CiphertextEnvelope::parse_with_limits(&ciphertext, 0, 8, 16, 16)
             .expect_err("expected max msg size error");
-        assert!(matches!(err, CiphertextParseError::CiphertextTooLarge { .. }));
+        assert!(matches!(
+            err,
+            CiphertextParseError::CiphertextTooLarge { .. }
+        ));
 
-        let err = CiphertextEnvelope::parse_with_limits(
-            &ciphertext,
-            0,
-            ciphertext.len(),
-            1,
-            16,
-        )
-        .expect_err("expected max header size error");
+        let err = CiphertextEnvelope::parse_with_limits(&ciphertext, 0, ciphertext.len(), 1, 16)
+            .expect_err("expected max header size error");
         assert!(matches!(err, CiphertextParseError::HeaderTooLarge { .. }));
 
-        let err = CiphertextEnvelope::parse_with_limits(
-            &ciphertext,
-            0,
-            ciphertext.len(),
-            16,
-            1,
-        )
-        .expect_err("expected max body size error");
+        let err = CiphertextEnvelope::parse_with_limits(&ciphertext, 0, ciphertext.len(), 16, 1)
+            .expect_err("expected max body size error");
         assert!(matches!(err, CiphertextParseError::BodyTooLarge { .. }));
     }
 }
