@@ -33,7 +33,7 @@ pub use crate::kex::{
 pub use crate::label::{Label, StreamId};
 pub use crate::length::LengthError;
 pub use crate::limits::{
-    MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MSG, MAX_BODY_BYTES, MAX_CAP_CHAIN, MAX_HDR_BYTES,
+    MAX_ATTACHMENTS_PER_MSG, MAX_ATTACHMENT_BYTES, MAX_BODY_BYTES, MAX_CAP_CHAIN, MAX_HDR_BYTES,
     MAX_MSG_BYTES, MAX_PROOF_LEN,
 };
 pub use crate::profile::{Profile, ProfileId};
