@@ -24,8 +24,14 @@ pub struct CiphertextEnvelope<'a> {
 pub enum CiphertextParseError {
     #[error("ciphertext is too short: expected at least {expected} bytes, got {actual}")]
     Truncated { expected: usize, actual: usize },
+    #[error("ciphertext length {length} exceeds limit {limit}")]
+    CiphertextTooLarge { length: usize, limit: usize },
     #[error("ciphertext length overflow while computing envelope bounds")]
     LengthOverflow,
+    #[error("payload header length {hdr_len} exceeds limit {limit}")]
+    HeaderTooLarge { hdr_len: usize, limit: usize },
+    #[error("payload body length {body_len} exceeds limit {limit}")]
+    BodyTooLarge { body_len: usize, limit: usize },
     #[error("ciphertext contains non-zero padding byte at offset {offset}")]
     NonZeroPadding { offset: usize },
     #[error("ciphertext length is not aligned to pad_block {pad_block}")]
@@ -114,6 +120,54 @@ impl<'a> CiphertextEnvelope<'a> {
         }
         Ok(envelope)
     }
+
+    /// Parses a ciphertext envelope and enforces spec-defined size limits
+    /// before any decryption occurs.
+    pub fn parse_with_limits(
+        ciphertext: &'a [u8],
+        pad_block: u64,
+        max_msg_bytes: usize,
+        max_hdr_bytes: usize,
+        max_body_bytes: usize,
+    ) -> Result<Self, CiphertextParseError> {
+        if ciphertext.len() > max_msg_bytes {
+            return Err(CiphertextParseError::CiphertextTooLarge {
+                length: ciphertext.len(),
+                limit: max_msg_bytes,
+            });
+        }
+
+        let envelope = Self::parse(ciphertext)?;
+        if usize::try_from(envelope.hdr_len).map_err(|_| CiphertextParseError::LengthOverflow)?
+            > max_hdr_bytes
+        {
+            return Err(CiphertextParseError::HeaderTooLarge {
+                hdr_len: envelope.hdr_len as usize,
+                limit: max_hdr_bytes,
+            });
+        }
+        if usize::try_from(envelope.body_len).map_err(|_| CiphertextParseError::LengthOverflow)?
+            > max_body_bytes
+        {
+            return Err(CiphertextParseError::BodyTooLarge {
+                body_len: envelope.body_len as usize,
+                limit: max_body_bytes,
+            });
+        }
+
+        if pad_block > 0 {
+            let pad_block_usize =
+                usize::try_from(pad_block).map_err(|_| CiphertextParseError::LengthOverflow)?;
+            if pad_block_usize == 0 || ciphertext.len() % pad_block_usize != 0 {
+                return Err(CiphertextParseError::PadBlockMismatch {
+                    pad_block,
+                    length: ciphertext.len(),
+                });
+            }
+        }
+
+        Ok(envelope)
+    }
 }
 
 #[cfg(test)]
@@ -184,5 +238,36 @@ mod tests {
         let err =
             CiphertextEnvelope::parse_with_pad_block(&ciphertext, 4).expect_err("pad mismatch");
         assert!(matches!(err, CiphertextParseError::PadBlockMismatch { .. }));
+    }
+
+    #[test]
+    fn rejects_ciphertext_exceeding_limits() {
+        let hdr = [0x11, 0x12];
+        let body = [0x22, 0x23, 0x24];
+        let ciphertext = build_ciphertext(&hdr, &body, &[0u8; 1]);
+
+        let err = CiphertextEnvelope::parse_with_limits(&ciphertext, 0, 8, 16, 16)
+            .expect_err("expected max msg size error");
+        assert!(matches!(err, CiphertextParseError::CiphertextTooLarge { .. }));
+
+        let err = CiphertextEnvelope::parse_with_limits(
+            &ciphertext,
+            0,
+            ciphertext.len(),
+            1,
+            16,
+        )
+        .expect_err("expected max header size error");
+        assert!(matches!(err, CiphertextParseError::HeaderTooLarge { .. }));
+
+        let err = CiphertextEnvelope::parse_with_limits(
+            &ciphertext,
+            0,
+            ciphertext.len(),
+            16,
+            1,
+        )
+        .expect_err("expected max body size error");
+        assert!(matches!(err, CiphertextParseError::BodyTooLarge { .. }));
     }
 }
