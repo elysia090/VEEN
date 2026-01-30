@@ -65,6 +65,8 @@ pub enum CapTokenDecodeError {
 /// Errors produced when verifying capability token signature chains.
 #[derive(Debug, Error)]
 pub enum CapTokenVerifyError {
+    #[error("capability token version {version} is unsupported")]
+    InvalidVersion { version: u64 },
     #[error("capability token signature chain is empty")]
     EmptyChain,
     #[error("capability token signature chain exceeds limit ({len} > {max})")]
@@ -141,6 +143,9 @@ impl CapToken {
 
     /// Verifies the capability token signature chain using the embedded issuer key.
     pub fn verify(&self) -> Result<(), CapTokenVerifyError> {
+        if self.ver != CAP_TOKEN_VERSION {
+            return Err(CapTokenVerifyError::InvalidVersion { version: self.ver });
+        }
         if !stream_ids_sorted(&self.allow.stream_ids) {
             return Err(CapTokenVerifyError::InvalidStreamIds);
         }
@@ -608,6 +613,22 @@ mod tests {
         match CapToken::issue(&issuer, subject, allow) {
             Err(CapTokenIssueError::InvalidStreamIds) => {}
             other => panic!("unexpected issuance result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_rejects_unsupported_version() {
+        let issuer = sample_signing_key(0x50);
+        let subject = ClientId::from([0x66u8; HASH_LEN]);
+        let allow = CapTokenAllow::new(vec![sample_stream_id(0x99)], 1200);
+        let mut token = CapToken::issue(&issuer, subject, allow).expect("cap token");
+        token.ver = 2;
+
+        match token.verify() {
+            Err(CapTokenVerifyError::InvalidVersion { version }) => {
+                assert_eq!(version, 2);
+            }
+            other => panic!("unexpected verification result: {other:?}"),
         }
     }
 
