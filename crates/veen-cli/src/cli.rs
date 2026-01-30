@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command as StdCommand, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::{OnceLock, RwLock};
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -323,28 +323,19 @@ struct Cli {
     command: Command,
 }
 
-static GLOBAL_OPTIONS: OnceLock<RwLock<GlobalOptions>> = OnceLock::new();
-
-fn global_options_lock() -> &'static RwLock<GlobalOptions> {
-    GLOBAL_OPTIONS.get_or_init(|| RwLock::new(GlobalOptions::default()))
-}
+static DEFAULT_GLOBAL_OPTIONS: GlobalOptions = GlobalOptions {
+    json: false,
+    quiet: false,
+    timeout_ms: None,
+};
+static GLOBAL_OPTIONS: OnceLock<GlobalOptions> = OnceLock::new();
 
 fn set_global_options(options: GlobalOptions) {
-    match global_options_lock().write() {
-        Ok(mut guard) => {
-            *guard = options;
-        }
-        Err(poisoned) => {
-            *poisoned.into_inner() = options;
-        }
-    }
+    let _ = GLOBAL_OPTIONS.set(options);
 }
 
-fn global_options() -> GlobalOptions {
-    match global_options_lock().read() {
-        Ok(guard) => guard.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    }
+fn global_options() -> &'static GlobalOptions {
+    GLOBAL_OPTIONS.get().unwrap_or(&DEFAULT_GLOBAL_OPTIONS)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,7 +356,7 @@ fn output_preference_from(explicit_json: bool, global: &GlobalOptions) -> Output
 }
 
 fn output_preference(explicit_json: bool) -> OutputPreference {
-    output_preference_from(explicit_json, &global_options())
+    output_preference_from(explicit_json, global_options())
 }
 
 fn json_output_enabled(explicit: bool) -> bool {
