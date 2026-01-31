@@ -390,6 +390,7 @@ If compression is disabled, chunk files are stored verbatim and decoded by direc
 
 ### 5.1 MMR update (per label)
 - Append `leaf_hash` in stream order, update peaks.
+- Internal node hashes are `Ht("veen/mmr-node", left || right)` where `left` and `right` are 32-byte child hashes.
 - `mmr_root` is either the single peak or `Ht("veen/mmr-root", concat(peaks))`.
 - `peaks` is an array of 32-byte hashes ordered by increasing height (left-to-right within the same height). `concat(peaks)` is the raw 32-byte concatenation in that order.
 
@@ -411,6 +412,70 @@ Verification MUST reproduce the `mmr_root` recorded in a RECEIPT or CHECKPOINT.
 - Proofs MUST be minimal with no redundant siblings.
 - Peaks are ordered by increasing height.
 - Any proof with unknown keys or invalid ordering is rejected.
+
+### 5.4 Proof verification (normative)
+The verifier MUST treat `mmr_proof` as evidence that `leaf_hash` is included at a specific leaf position in
+the per-label MMR, and MUST recompute the same `mmr_root` recorded in the corresponding RECEIPT or
+CHECKPOINT. The procedure below applies to §5.2–§5.3 and is mandatory for deterministic validation.
+
+**Required inputs:**
+- `mmr_proof` (per §5.2).
+- `expected_root`: the `mmr_root` from the RECEIPT or CHECKPOINT being verified.
+- `stream_seq`: the 1-based stream sequence number for the entry being proved.
+- `label` and `profile_id` (to recompute `leaf_hash` when validating a receipt/message pair).
+- `ct_hash`, `client_id`, `client_seq` (from MSG/RECEIPT) to recompute `leaf_hash` as `Ht("veen/leaf", ...)`.
+
+**Deriving `stream_seq` and leaf position:**
+- For RECEIPT verification, `stream_seq` is the `RECEIPT.stream_seq` field and MUST match the caller’s
+  referenced entry. For CHECKPOINT verification, `stream_seq` is the checkpoint’s `upto_seq`.
+- The leaf position is the 0-based index `pos = stream_seq - 1`. Verifiers MUST reject `stream_seq = 0` or
+  any `pos` that is inconsistent with `peaks_after` (see rejection conditions).
+- If the verifier is validating a stream page (`/stream`), `stream_seq` MUST equal the last item’s
+  `stream_seq` when `mmr_proof` is included (see §10.4.2).
+
+**Verification algorithm (pseudocode):**
+```
+verify_mmr_proof(mmr_proof, expected_root, stream_seq, leaf_hash):
+  require mmr_proof.ver == 1
+  require stream_seq >= 1
+  require mmr_proof.leaf_hash == leaf_hash
+
+  acc = leaf_hash
+  for step in mmr_proof.path:        # ordered leaf → peak
+    require step.dir in {0,1}
+    require len(step.sib) == 32
+    if step.dir == 0:
+      acc = Ht("veen/mmr-node", acc || step.sib)
+    else:
+      acc = Ht("veen/mmr-node", step.sib || acc)
+
+  # acc is the peak hash for the leaf's tree.
+  # peaks_after are in increasing height order and represent the full MMR after stream_seq.
+  peaks = integrate_peak(acc, mmr_proof.peaks_after, stream_seq)
+  computed_root = (len(peaks) == 1)
+    ? peaks[0]
+    : Ht("veen/mmr-root", concat(peaks))
+
+  require computed_root == expected_root
+```
+
+`integrate_peak(acc, peaks_after, stream_seq)` MUST place `acc` at the correct height for the leaf’s
+tree and validate that the remaining `peaks_after` are consistent with the implied MMR size. A conforming
+implementation MUST derive the peak heights from `stream_seq` (i.e., the binary decomposition of
+`stream_seq`) and MUST NOT accept `peaks_after` that cannot match those heights.
+
+**Explicit rejection conditions (non-exhaustive):**
+- Any unknown keys, out-of-order keys, or non-canonical CBOR in `mmr_proof` or its `path` entries.
+- `ver != 1`, missing required fields, or wrong types/lengths (`leaf_hash`/`sib` not 32 bytes, `path` not an
+  array, `peaks_after` not an array of bstr32).
+- `stream_seq = 0`, or `stream_seq` inconsistent with the proof context (e.g., not the requested receipt
+  sequence or not the last item in a `stream` page).
+- Any `dir` value other than `0` or `1`.
+- `mmr_proof.leaf_hash` mismatches the recomputed `leaf_hash` from the MSG/RECEIPT data.
+- `path` ordering not strictly leaf-to-peak (ascending height) or any redundant sibling (violates §5.3).
+- `peaks_after` ordering not strictly increasing height, duplicates, or peak count inconsistent with the
+  expected MMR size derived from `stream_seq`.
+- Final `computed_root` does not equal the `expected_root`.
 
 ---
 
