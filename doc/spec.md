@@ -298,6 +298,7 @@ Optional fields are omitted when absent; `null` is not permitted in `payload_hdr
 `expires_at` is overlay-only and MUST NOT affect hub admission.
 
 ### 4.6 Attachments
+- Attachment count and per-attachment sizes are defined by the **encrypted body schema** for the selected `schema`; they are not encoded in `payload_hdr`.
 - Attachment `i` uses `k_att = HPKE.Export(ctx, "veen/att-k" || u64be(i), 32)`.
 - Nonce `n_att = Trunc_24(Ht("veen/att-nonce", msg_id || u64be(i)))`.
 - `coid = H(AEAD_Encrypt(k_att, n_att, "", attachment))`.
@@ -305,6 +306,9 @@ Optional fields are omitted when absent; `null` is not permitted in `payload_hdr
 - Internal nodes are `Ht("veen/att-node", left || right)`.
 - Peaks are combined as `Ht("veen/att-root", concat(peaks))` with the same peak ordering and fold rules as section 5.1.
 - `att_root` is the resulting root.
+- For zero attachments, `att_root = Ht("veen/att-root", "")` (the empty-peak root). If no attachments are present, `att_root` SHOULD be omitted from `payload_hdr`; if provided it MUST equal this empty root constant.
+- Attachment sizes are authenticated by the encrypted body (AEAD) and the attachment AEADs themselves; `payload_hdr` does not carry sizes.
+- Implementations MUST reject messages when the attachment list length or any declared attachment size in the decrypted body schema does not match the supplied attachment array, or when `att_root` does not match the computed root.
 
 ---
 
