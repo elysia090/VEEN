@@ -588,6 +588,42 @@ Any violation MUST be rejected with a deterministic error code.
 Return deterministic error codes:
 - `E.FORMAT`, `E.SIZE`, `E.SIG`, `E.CAP`, `E.AUTH`, `E.RATE`, `E.SEQ`, `E.TIME`.
 
+**Required error response fields (admission):**
+- `code` (canonical error code; see table below).
+- `stage` (one of `prefilter`, `structural`, `auth`, `commit`).
+- Optional stable `detail_enum` (implementation-defined, stable across releases).
+
+Admission errors MUST use the error envelope in §10.6. The `stage` and optional `detail_enum` MUST be carried in
+`detail` as `detail.stage` and `detail.detail_enum` respectively.
+
+**Tie-breaking (deterministic):**
+- **First-failure wins** by pipeline order in §8.1: `prefilter` → `structural` → `auth` → `commit`.
+- Within a stage, checks MUST be evaluated in a deterministic order. The table below is the normative ordering for
+  failures listed here; any additional optional checks MUST be inserted deterministically and documented.
+
+**Admission error mapping (stage + validation failure → code):**
+
+| Stage | Validation failure (ordered) | Code | Optional detail enum |
+| --- | --- | --- | --- |
+| prefilter | Size caps exceeded | `E.SIZE` | `SIZE_PREFILTER` |
+| prefilter | Stateless policy reject (e.g., PoW missing/invalid) | `E.AUTH` | `PREFILTER_REJECT` |
+| structural | Non-canonical/invalid CBOR, unknown fields | `E.FORMAT` | `CBOR_INVALID` |
+| structural | Field length/size invalid | `E.SIZE` | `FIELD_SIZE` |
+| structural | `ver` unsupported | `E.FORMAT` | `VERSION` |
+| structural | `profile_id` unsupported | `E.FORMAT` | `PROFILE` |
+| structural | `ct_hash` mismatch (`H(ciphertext) != ct_hash`) | `E.FORMAT` | `CT_HASH` |
+| structural | `att_root` mismatch (if present) | `E.FORMAT` | `ATT_ROOT` |
+| auth | `MSG.sig` invalid | `E.SIG` | `SIG_INVALID` |
+| auth | CapToken missing/unknown | `E.CAP` | `CAP_MISSING` |
+| auth | CapToken signature chain invalid | `E.CAP` | `CAP_INVALID` |
+| auth | `auth_ref` binding invalid | `E.AUTH` | `AUTH_REF` |
+| auth | CapToken TTL expired | `E.TIME` | `CAP_TTL` |
+| auth | Rate limit exceeded | `E.RATE` | `CAP_RATE` |
+| commit | `prev_ack` regression | `E.SEQ` | `PREV_ACK` |
+| commit | Duplicate `(label, client_id, client_seq)` | `E.SEQ` | `DUPLICATE` |
+| commit | `client_seq` not +1 | `E.SEQ` | `CLIENT_SEQ` |
+| commit | Epoch skew invalid | `E.TIME` | `EPOCH` |
+
 ### 8.3 Disallowed behaviors
 - Inspecting decrypted payload to make admission decisions.
 - Linear scans or sequential replays on any external operation path.
