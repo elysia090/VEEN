@@ -53,6 +53,25 @@ use crate::storage::{
 use rand::rngs::OsRng;
 use rand::RngCore;
 
+#[derive(Debug, Clone, Copy)]
+pub enum AdmissionStage {
+    Prefilter,
+    Structural,
+    Auth,
+    Commit,
+}
+
+impl AdmissionStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prefilter => "prefilter",
+            Self::Structural => "structural",
+            Self::Auth => "auth",
+            Self::Commit => "commit",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct HubPipeline {
     storage: HubStorage,
@@ -442,21 +461,19 @@ impl HubPipeline {
             let submit_msg = decode_submit_msg(&submit_msg_bytes).map_err(|err| {
                 anyhow::Error::new(CapabilityError::InvalidMessage {
                     reason: err.to_string(),
+                    detail_enum: "CBOR_INVALID",
                 })
             })?;
             if !submit_msg.has_valid_version() {
                 return Err(anyhow::Error::new(CapabilityError::InvalidMessage {
                     reason: format!("unsupported msg version {}", submit_msg.ver),
+                    detail_enum: "VERSION",
                 }));
             }
-            submit_msg.verify_signature().map_err(|err| {
-                anyhow::Error::new(CapabilityError::InvalidMessage {
-                    reason: format!("invalid msg signature: {err}"),
-                })
-            })?;
             if !submit_msg.ct_hash_matches() {
                 return Err(anyhow::Error::new(CapabilityError::InvalidMessage {
                     reason: "ciphertext hash mismatch in submit msg".to_string(),
+                    detail_enum: "CT_HASH",
                 }));
             }
             let label = submit_msg.label;
@@ -464,12 +481,14 @@ impl HubPipeline {
             if label != expected_label {
                 return Err(anyhow::Error::new(CapabilityError::InvalidMessage {
                     reason: "msg label does not match stream".to_string(),
+                    detail_enum: "LABEL",
                 }));
             }
             let client_id_hex = hex::encode(submit_msg.client_id.as_ref());
             if client_id_hex != client_id {
                 return Err(anyhow::Error::new(CapabilityError::InvalidMessage {
                     reason: "msg client_id does not match request client_id".to_string(),
+                    detail_enum: "CLIENT_ID",
                 }));
             }
             if let Some(ref auth_hex) = auth_ref {
@@ -480,6 +499,7 @@ impl HubPipeline {
                 if msg_auth.as_deref() != Some(auth_hex.as_str()) {
                     return Err(anyhow::Error::new(CapabilityError::InvalidMessage {
                         reason: "msg auth_ref does not match request auth_ref".to_string(),
+                        detail_enum: "AUTH_REF",
                     }));
                 }
             }
@@ -492,6 +512,11 @@ impl HubPipeline {
             ) {
                 return Err(anyhow::Error::new(map_ciphertext_error(err)));
             }
+            submit_msg.verify_signature().map_err(|err| {
+                anyhow::Error::new(CapabilityError::SignatureInvalid {
+                    reason: format!("{err}"),
+                })
+            })?;
             let stream_id = cap_stream_id_from_label(&stream).map_err(|err| {
                 anyhow::Error::new(CapabilityError::StreamInvalid {
                     stream: stream.clone(),
@@ -652,8 +677,8 @@ impl HubPipeline {
                 "dropping duplicate message by leaf hash"
             );
             drop(guard);
-            self.observability.record_submit_err("E.DUP");
-            self.record_admission_failure(&stream, &client_id, "E.DUP", "duplicate leaf hash")
+            self.observability.record_submit_err("E.SEQ");
+            self.record_admission_failure(&stream, &client_id, "E.SEQ", "duplicate leaf hash")
                 .await?;
             return Err(anyhow::Error::new(SubmitError::Duplicate {
                 leaf_hash: leaf_hex,
@@ -2417,9 +2442,9 @@ impl CapabilityRecord {
 
 #[derive(Debug, Error)]
 pub enum CapabilityError {
-    #[error("E.AUTH capability {auth_ref} is not authorised")]
+    #[error("E.CAP capability {auth_ref} is not authorised")]
     Unauthorized { auth_ref: String },
-    #[error("E.CAP capability {auth_ref} subject mismatch")]
+    #[error("E.AUTH capability {auth_ref} subject mismatch")]
     SubjectMismatch { auth_ref: String },
     #[error("E.CAP capability {auth_ref} stream derivation failed: {source}")]
     StreamMismatch {
@@ -2427,7 +2452,7 @@ pub enum CapabilityError {
         #[source]
         source: StreamIdParseError,
     },
-    #[error("E.AUTH invalid stream identifier {stream}: {source}")]
+    #[error("E.FORMAT invalid stream identifier {stream}: {source}")]
     StreamInvalid {
         stream: String,
         #[source]
@@ -2435,9 +2460,9 @@ pub enum CapabilityError {
     },
     #[error("E.CAP capability {auth_ref} does not permit stream {stream}")]
     StreamDenied { auth_ref: String, stream: String },
-    #[error("E.CAP capability {auth_ref} has expired")]
+    #[error("E.TIME capability {auth_ref} has expired")]
     Expired { auth_ref: String },
-    #[error("E.AUTH client_id {client_id} lifetime exceeded ({lifetime}s limit)")]
+    #[error("E.TIME client_id {client_id} lifetime exceeded ({lifetime}s limit)")]
     ClientLifetimeExceeded { client_id: String, lifetime: u64 },
     #[error("E.AUTH client_id {client_id} exceeded quota for stream {stream} (limit {limit})")]
     ClientQuotaExceeded {
@@ -2470,8 +2495,13 @@ pub enum CapabilityError {
         attachment_bytes: usize,
         limit: usize,
     },
-    #[error("E.MSG invalid submit message: {reason}")]
-    InvalidMessage { reason: String },
+    #[error("E.SIG invalid message signature: {reason}")]
+    SignatureInvalid { reason: String },
+    #[error("E.FORMAT invalid submit message: {reason}")]
+    InvalidMessage {
+        reason: String,
+        detail_enum: &'static str,
+    },
 }
 
 impl CapabilityError {
@@ -2487,14 +2517,12 @@ impl CapabilityError {
         match self {
             Self::RateLimited { .. } => "E.RATE",
             Self::Unauthorized { .. }
-            | Self::ClientLifetimeExceeded { .. }
-            | Self::ClientQuotaExceeded { .. }
-            | Self::ClientUsageOverflow { .. }
-            | Self::StreamInvalid { .. } => "E.AUTH",
-            Self::SubjectMismatch { .. }
             | Self::StreamMismatch { .. }
-            | Self::StreamDenied { .. }
-            | Self::Expired { .. } => "E.CAP",
+            | Self::StreamDenied { .. } => "E.CAP",
+            Self::SubjectMismatch { .. }
+            | Self::ClientQuotaExceeded { .. }
+            | Self::ClientUsageOverflow { .. } => "E.AUTH",
+            Self::Expired { .. } | Self::ClientLifetimeExceeded { .. } => "E.TIME",
             Self::ProofOfWorkRequired { .. }
             | Self::ProofOfWorkInsufficient { .. }
             | Self::ProofOfWorkInvalid { .. } => "E.AUTH",
@@ -2503,21 +2531,83 @@ impl CapabilityError {
             | Self::MessageTotalTooLarge { .. }
             | Self::AttachmentCountExceeded { .. }
             | Self::AttachmentTooLarge { .. } => "E.SIZE",
-            Self::InvalidMessage { .. } => "E.MSG",
+            Self::SignatureInvalid { .. } => "E.SIG",
+            Self::StreamInvalid { .. } | Self::InvalidMessage { .. } => "E.FORMAT",
+        }
+    }
+
+    pub fn admission_stage(&self) -> AdmissionStage {
+        match self {
+            Self::ProofOfWorkRequired { .. }
+            | Self::ProofOfWorkInsufficient { .. }
+            | Self::ProofOfWorkInvalid { .. }
+            | Self::MessageTotalTooLarge { .. }
+            | Self::AttachmentCountExceeded { .. }
+            | Self::AttachmentTooLarge { .. } => AdmissionStage::Prefilter,
+            Self::MessageBodyTooLarge { .. }
+            | Self::MessageHeaderTooLarge { .. }
+            | Self::StreamInvalid { .. }
+            | Self::InvalidMessage { .. } => AdmissionStage::Structural,
+            Self::SignatureInvalid { .. }
+            | Self::Unauthorized { .. }
+            | Self::SubjectMismatch { .. }
+            | Self::StreamMismatch { .. }
+            | Self::StreamDenied { .. }
+            | Self::Expired { .. }
+            | Self::ClientLifetimeExceeded { .. }
+            | Self::ClientQuotaExceeded { .. }
+            | Self::ClientUsageOverflow { .. }
+            | Self::RateLimited { .. } => AdmissionStage::Auth,
+        }
+    }
+
+    pub fn detail_enum(&self) -> Option<&'static str> {
+        match self {
+            Self::ProofOfWorkRequired { .. }
+            | Self::ProofOfWorkInsufficient { .. }
+            | Self::ProofOfWorkInvalid { .. } => Some("PREFILTER_REJECT"),
+            Self::MessageTotalTooLarge { .. }
+            | Self::AttachmentCountExceeded { .. }
+            | Self::AttachmentTooLarge { .. } => Some("SIZE_PREFILTER"),
+            Self::MessageBodyTooLarge { .. } | Self::MessageHeaderTooLarge { .. } => {
+                Some("FIELD_SIZE")
+            }
+            Self::StreamInvalid { .. } => Some("STREAM_ID"),
+            Self::SignatureInvalid { .. } => Some("SIG_INVALID"),
+            Self::Unauthorized { .. } => Some("CAP_MISSING"),
+            Self::SubjectMismatch { .. } => Some("AUTH_REF"),
+            Self::StreamMismatch { .. } => Some("CAP_INVALID"),
+            Self::StreamDenied { .. } => Some("CAP_DENIED"),
+            Self::Expired { .. } => Some("CAP_TTL"),
+            Self::ClientLifetimeExceeded { .. } => Some("CLIENT_LIFETIME"),
+            Self::ClientQuotaExceeded { .. } => Some("CLIENT_QUOTA"),
+            Self::ClientUsageOverflow { .. } => Some("CLIENT_OVERFLOW"),
+            Self::RateLimited { .. } => Some("CAP_RATE"),
+            Self::InvalidMessage { detail_enum, .. } => Some(detail_enum),
         }
     }
 }
 
 #[derive(Debug, Error)]
 pub enum SubmitError {
-    #[error("E.DUP duplicate leaf hash {leaf_hash}")]
+    #[error("E.SEQ duplicate leaf hash {leaf_hash}")]
     Duplicate { leaf_hash: String },
 }
 
 impl SubmitError {
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Duplicate { .. } => "E.DUP",
+            Self::Duplicate { .. } => "E.SEQ",
+        }
+    }
+
+    pub fn admission_stage(&self) -> AdmissionStage {
+        AdmissionStage::Commit
+    }
+
+    pub fn detail_enum(&self) -> Option<&'static str> {
+        match self {
+            Self::Duplicate { .. } => Some("DUPLICATE"),
         }
     }
 }
@@ -3918,6 +4008,7 @@ fn map_ciphertext_error(error: CiphertextParseError) -> CapabilityError {
         }
         other => CapabilityError::InvalidMessage {
             reason: other.to_string(),
+            detail_enum: "CBOR_INVALID",
         },
     }
 }
@@ -4465,7 +4556,7 @@ mod tests {
                 .expect_err("submit should fail");
             let capability_err = err.downcast::<CapabilityError>().expect("capability error");
             match capability_err {
-                CapabilityError::InvalidMessage { reason } => {
+                CapabilityError::InvalidMessage { reason, .. } => {
                     assert!(reason.contains("trailing bytes"));
                 }
                 other => panic!("unexpected error: {other:?}"),

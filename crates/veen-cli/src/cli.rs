@@ -4161,7 +4161,7 @@ async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
 
     if !ok {
         emit_cli_error(
-            "E.PROFILE",
+            "E.FORMAT",
             Some("hub declined to provide a capability profile"),
             use_json,
         );
@@ -4172,7 +4172,7 @@ async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
         Some(value) => value,
         None => {
             emit_cli_error(
-                "E.PROFILE",
+                "E.FORMAT",
                 Some("hub did not provide a profile identifier"),
                 use_json,
             );
@@ -4239,7 +4239,7 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
 
     if !ok {
         emit_cli_error(
-            "E.PROFILE",
+            "E.FORMAT",
             Some("hub declined to provide role information"),
             use_json,
         );
@@ -4248,7 +4248,7 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
 
     if stream_id.is_some() && stream_info.is_none() {
         emit_cli_error(
-            "E.PROFILE",
+            "E.FORMAT",
             Some("hub did not return role information for the requested stream"),
             use_json,
         );
@@ -4327,7 +4327,7 @@ async fn fetch_remote_kex_policy_descriptor(
 fn render_kex_policy(descriptor: &RemoteKexPolicyDescriptor, use_json: bool) {
     if !descriptor.ok {
         emit_cli_error(
-            "E.PROFILE",
+            "E.FORMAT",
             Some("hub declined to provide key lifecycle policy information"),
             use_json,
         );
@@ -4386,7 +4386,7 @@ fn render_kex_policy(descriptor: &RemoteKexPolicyDescriptor, use_json: bool) {
 fn render_admission_report(report: &RemoteAdmissionReport, use_json: bool) {
     if !report.ok {
         emit_cli_error(
-            "E.PROFILE",
+            "E.FORMAT",
             Some("hub declined to provide admission data"),
             use_json,
         );
@@ -4435,7 +4435,7 @@ fn render_admission_report(report: &RemoteAdmissionReport, use_json: bool) {
 fn render_admission_log(response: &RemoteAdmissionLogResponse, use_json: bool) {
     if !response.ok {
         emit_cli_error(
-            "E.PROFILE",
+            "E.FORMAT",
             Some("hub declined to provide admission log data"),
             use_json,
         );
@@ -5875,7 +5875,7 @@ async fn handle_cap_revocations_remote(
     let response: RemoteRevocationList = client.get_json("/revocations", &query).await?;
     if !response.ok {
         emit_cli_error(
-            "E.PROFILE",
+            "E.FORMAT",
             Some("hub declined to provide revocation records"),
             json_output_enabled(json),
         );
@@ -5947,7 +5947,7 @@ async fn handle_cap_revocations_local(data_dir: PathBuf, args: CapRevocationsArg
 fn render_cap_status(response: &RemoteCapStatusResponse, auth_ref_hex: &str, use_json: bool) {
     if !response.ok {
         emit_cli_error(
-            "E.PROFILE",
+            "E.FORMAT",
             Some("hub declined to provide capability status"),
             use_json,
         );
@@ -6042,7 +6042,7 @@ async fn handle_pow_solve(args: PowSolveArgs) -> Result<()> {
 fn render_pow_challenge(descriptor: &RemotePowChallenge, use_json: bool) {
     if !descriptor.ok {
         emit_cli_error(
-            "E.PROFILE",
+            "E.FORMAT",
             Some("hub declined to provide a proof-of-work challenge"),
             use_json,
         );
@@ -6751,7 +6751,7 @@ async fn fetch_label_class_list(
 fn render_authority_record(descriptor: &RemoteAuthorityRecordDescriptor, use_json: bool) {
     if !descriptor.ok {
         emit_cli_error(
-            "E.PROFILE",
+            "E.FORMAT",
             Some("hub declined to provide authority information"),
             use_json,
         );
@@ -6769,7 +6769,7 @@ fn render_authority_record(descriptor: &RemoteAuthorityRecordDescriptor, use_jso
 fn render_label_authority(descriptor: &RemoteLabelAuthorityDescriptor, use_json: bool) {
     if !descriptor.ok {
         emit_cli_error(
-            "E.PROFILE",
+            "E.FORMAT",
             Some("hub declined to provide label authority information"),
             use_json,
         );
@@ -6787,7 +6787,7 @@ fn render_label_authority(descriptor: &RemoteLabelAuthorityDescriptor, use_json:
 fn render_label_class_descriptor(descriptor: &RemoteLabelClassDescriptor, use_json: bool) {
     if !descriptor.ok {
         emit_cli_error(
-            "E.PROFILE",
+            "E.FORMAT",
             Some("hub declined to provide label classification"),
             use_json,
         );
@@ -6805,7 +6805,7 @@ fn render_label_class_descriptor(descriptor: &RemoteLabelClassDescriptor, use_js
 fn render_label_class_list(list: &RemoteLabelClassList, use_json: bool) {
     if !list.ok {
         emit_cli_error(
-            "E.PROFILE",
+            "E.FORMAT",
             Some("hub declined to provide label classifications"),
             use_json,
         );
@@ -6823,7 +6823,7 @@ fn render_label_class_list(list: &RemoteLabelClassList, use_json: bool) {
 fn render_schema_descriptor(response: &RemoteSchemaRegistryEntry, use_json: bool) {
     if !response.ok {
         emit_cli_error(
-            "E.PROFILE",
+            "E.FORMAT",
             Some("hub declined to provide schema descriptor"),
             use_json,
         );
@@ -9109,12 +9109,11 @@ async fn handle_explain_error(args: ExplainErrorArgs) -> Result<()> {
     let description = match code.as_str() {
         "E.SIG" => "signature failure (including hub_sig or MSG.sig)",
         "E.SIZE" => "bounds violation (including MAX_* limits)",
-        "E.SEQ" => "sequence invariant violation (including I6, I8, I9, I12)",
+        "E.SEQ" => "sequence invariant violation (including duplicates and regressions)",
         "E.CAP" => "capability failure (including invalid sig_chain, expired ttl)",
         "E.AUTH" => "missing or invalid authorization record",
         "E.RATE" => "rate limit exceeded",
-        "E.PROFILE" => "unsupported profile_id",
-        "E.DUP" => "duplicate leaf or message",
+        "E.FORMAT" => "format/structural violation (invalid CBOR, version/profile mismatch)",
         "E.TIME" => "epoch or time-related failure",
         other => {
             bail_usage!("unknown VEEN error code `{other}`");
