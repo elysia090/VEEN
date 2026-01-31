@@ -41,6 +41,7 @@ async fn goals_k8s_disposable_mesh() -> Result<()> {
             None,
             HubRole::Primary,
             HubConfigOverrides {
+                tooling_enabled: Some(true),
                 capability_gating_enabled: Some(false),
                 ..HubConfigOverrides::default()
             },

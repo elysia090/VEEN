@@ -42,6 +42,7 @@ async fn goals_dr_cutover() -> Result<()> {
             None,
             HubRole::Primary,
             HubConfigOverrides {
+                tooling_enabled: Some(true),
                 capability_gating_enabled: Some(false),
                 ..HubConfigOverrides::default()
             },
@@ -57,6 +58,7 @@ async fn goals_dr_cutover() -> Result<()> {
             None,
             HubRole::Replica,
             HubConfigOverrides {
+                tooling_enabled: Some(true),
                 capability_gating_enabled: Some(false),
                 replica_targets: Some(vec![format!("http://{}", primary_addr)]),
                 ..HubConfigOverrides::default()
@@ -128,7 +130,7 @@ async fn goals_dr_cutover() -> Result<()> {
 
     for message in proven {
         let ingest: BridgeIngestResponse = http
-            .post(format!("{}/bridge", replica_base))
+            .post(format!("{}/tooling/bridge", replica_base))
             .json(&BridgeIngestRequest {
                 message: message.message.clone(),
                 expected_mmr_root: message.receipt.mmr_root.clone(),
@@ -149,7 +151,7 @@ async fn goals_dr_cutover() -> Result<()> {
     }
 
     let primary_metrics: ObservabilitySnapshot = http
-        .get(format!("{}/metrics", primary_base))
+        .get(format!("{}/tooling/metrics", primary_base))
         .send()
         .await
         .context("fetching primary metrics")?
@@ -159,7 +161,7 @@ async fn goals_dr_cutover() -> Result<()> {
         .await
         .context("decoding primary metrics")?;
     let replica_metrics: ObservabilitySnapshot = http
-        .get(format!("{}/metrics", replica_base))
+        .get(format!("{}/tooling/metrics", replica_base))
         .send()
         .await
         .context("fetching replica metrics")?
@@ -194,6 +196,7 @@ async fn goals_dr_cutover() -> Result<()> {
             None,
             HubRole::Primary,
             HubConfigOverrides {
+                tooling_enabled: Some(true),
                 capability_gating_enabled: Some(false),
                 ..HubConfigOverrides::default()
             },
@@ -237,7 +240,7 @@ async fn goals_dr_cutover() -> Result<()> {
     );
 
     let promoted_metrics: ObservabilitySnapshot = http
-        .get(format!("{}/metrics", promoted_base))
+        .get(format!("{}/tooling/metrics", promoted_base))
         .send()
         .await
         .context("fetching promoted hub metrics")?

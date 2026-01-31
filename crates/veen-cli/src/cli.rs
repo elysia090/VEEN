@@ -808,7 +808,7 @@ fn json_output_enabled_with(explicit: bool, global: &GlobalOptions) -> bool {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Hub lifecycle and observability commands.
+    /// Hub lifecycle and tooling commands (non-core endpoints).
     #[command(subcommand)]
     Hub(HubCommand),
     /// Show help for a command or subcommand.
@@ -820,7 +820,7 @@ enum Command {
     Id(IdCommand),
     /// Send a message to a stream.
     Send(SendArgs),
-    /// Authorize a capability token with the hub.
+    /// Authorize a capability token with the hub (non-core tooling endpoint).
     Authorize(CapAuthorizeArgs),
     /// Stream messages from the hub.
     Stream(StreamArgs),
@@ -866,7 +866,7 @@ enum Command {
     /// Revocation helpers.
     #[command(subcommand)]
     Revoke(RevokeCommand),
-    /// Resynchronise durable state from the hub.
+    /// Resynchronise durable state from the hub (non-core tooling endpoint).
     Resync(ResyncArgs),
     /// Verify local state against hub checkpoints.
     #[command(name = "verify-state")]
@@ -940,36 +940,36 @@ enum HubCommand {
     Start(HubStartArgs),
     /// Stop a running VEEN hub instance.
     Stop(HubStopArgs),
-    /// Fetch high level status from a hub.
+    /// Fetch high level status from a hub (non-core tooling endpoints).
     Status(HubStatusArgs),
     /// Fetch the hub's public key information.
     Key(HubKeyArgs),
     /// Verify rotation witnesses between hub keys.
     #[command(name = "verify-rotation")]
     VerifyRotation(HubVerifyRotationArgs),
-    /// Fetch hub health information.
+    /// Fetch hub health information (non-core tooling endpoint).
     Health(HubHealthArgs),
-    /// Fetch hub metrics.
+    /// Fetch hub metrics (non-core tooling endpoint).
     Metrics(HubMetricsArgs),
-    /// Fetch hub capability profile details.
+    /// Fetch hub capability profile details (non-core tooling endpoint).
     Profile(HubProfileArgs),
-    /// Inspect hub role information.
+    /// Inspect hub role information (non-core tooling endpoint).
     Role(HubRoleArgs),
-    /// Inspect hub key and capability lifecycle policy.
+    /// Inspect hub key and capability lifecycle policy (non-core tooling endpoint).
     #[command(name = "kex-policy")]
     KexPolicy(HubKexPolicyArgs),
-    /// Inspect TLS configuration for a hub endpoint.
+    /// Inspect TLS configuration for a hub endpoint (non-core tooling endpoint).
     #[command(name = "tls-info")]
     TlsInfo(HubTlsInfoArgs),
-    /// Inspect admission pipeline configuration and metrics.
+    /// Inspect admission pipeline configuration and metrics (non-core tooling endpoint).
     Admission(HubAdmissionArgs),
-    /// Inspect recent admission failures.
+    /// Inspect recent admission failures (non-core tooling endpoint).
     #[command(name = "admission-log")]
     AdmissionLog(HubAdmissionLogArgs),
-    /// Fetch the latest checkpoint from a hub.
+    /// Fetch the latest checkpoint from a hub (non-core tooling endpoint).
     #[command(name = "checkpoint-latest")]
     CheckpointLatest(HubCheckpointLatestArgs),
-    /// Fetch checkpoints within an epoch range from a hub.
+    /// Fetch checkpoints within an epoch range from a hub (non-core tooling endpoint).
     #[command(name = "checkpoint-range")]
     CheckpointRange(HubCheckpointRangeArgs),
 }
@@ -1001,9 +1001,9 @@ enum AttachmentCommand {
 enum CapCommand {
     /// Issue a capability token.
     Issue(CapIssueArgs),
-    /// Authorise a capability token with the hub.
+    /// Authorise a capability token with the hub (non-core tooling endpoint).
     Authorize(CapAuthorizeArgs),
-    /// Inspect hub view for a capability token.
+    /// Inspect hub view for a capability token (non-core tooling endpoint).
     Status(CapStatusArgs),
     /// Publish a revocation record via the capability surface.
     Revoke(RevokePublishArgs),
@@ -1148,7 +1148,7 @@ enum RevokeCommand {
 
 #[derive(Subcommand)]
 enum PowCommand {
-    /// Request a proof-of-work challenge from a hub.
+    /// Request a proof-of-work challenge from a hub (non-core tooling endpoint).
     Request(PowRequestArgs),
     /// Solve a proof-of-work challenge locally.
     Solve(PowSolveArgs),
@@ -1302,6 +1302,9 @@ struct HubStartArgs {
     /// Require proof-of-work from clients before accepting submissions.
     #[arg(long, value_name = "BITS")]
     pow_difficulty: Option<u8>,
+    /// Enable non-core tooling endpoints (health, metrics, admission helpers).
+    #[arg(long = "enable-tooling")]
+    enable_tooling: bool,
 }
 
 #[derive(Args)]
@@ -1642,6 +1645,8 @@ struct StreamArgs {
     stream: String,
     #[arg(long, default_value_t = 0)]
     from: u64,
+    #[arg(long)]
+    to: Option<u64>,
     #[arg(long)]
     with_proof: bool,
 }
@@ -3446,12 +3451,17 @@ fn validate_pow_difficulty(pow_difficulty: Option<u8>) -> Result<()> {
     Ok(())
 }
 
-fn hub_start_overrides(profile_id: &str, pow_difficulty: Option<u8>) -> Result<HubConfigOverrides> {
+fn hub_start_overrides(
+    profile_id: &str,
+    pow_difficulty: Option<u8>,
+    enable_tooling: bool,
+) -> Result<HubConfigOverrides> {
     validate_pow_difficulty(pow_difficulty)?;
 
     Ok(HubConfigOverrides {
         profile_id: Some(profile_id.to_string()),
         pow_difficulty,
+        tooling_enabled: enable_tooling.then_some(true),
         ..HubConfigOverrides::default()
     })
 }
@@ -3487,12 +3497,13 @@ async fn run_hub_foreground(args: HubStartArgs) -> Result<()> {
         foreground,
         log_level,
         pow_difficulty,
+        enable_tooling,
     } = args;
 
     let profile_id = resolve_profile_id(profile_id)?;
     let log_level_str = log_level.as_ref().map(ToString::to_string);
 
-    let overrides = hub_start_overrides(&profile_id, pow_difficulty)?;
+    let overrides = hub_start_overrides(&profile_id, pow_difficulty, enable_tooling)?;
 
     let key_info = ensure_hub_key_material(&data_dir).await?;
 
@@ -3584,6 +3595,9 @@ async fn spawn_background_hub(args: &HubStartArgs) -> Result<()> {
         command
             .arg("--pow-difficulty")
             .arg(pow_difficulty.to_string());
+    }
+    if args.enable_tooling {
+        command.arg("--enable-tooling");
     }
     command.arg("--foreground");
     command.env("VEEN_CLI_BACKGROUND", "1");
@@ -3768,7 +3782,8 @@ async fn handle_hub_status(args: HubStatusArgs) -> Result<()> {
             Ok(())
         }
         HubReference::Remote(client) => {
-            let report: RemoteObservabilityReport = client.get_json("/metrics", &[]).await?;
+            let report: RemoteObservabilityReport =
+                client.get_json("/tooling/metrics", &[]).await?;
 
             println!("role: {}", report.role);
             if let Some(profile_id) = report.profile_id.as_deref() {
@@ -3816,7 +3831,8 @@ async fn handle_hub_key(args: HubKeyArgs) -> Result<()> {
             Ok(())
         }
         HubReference::Remote(client) => {
-            let report: RemoteObservabilityReport = client.get_json("/metrics", &[]).await?;
+            let report: RemoteObservabilityReport =
+                client.get_json("/tooling/metrics", &[]).await?;
             let hub_pk = report
                 .hub_public_key
                 .as_deref()
@@ -3927,7 +3943,7 @@ async fn handle_hub_health(args: HubHealthArgs) -> Result<()> {
             }
         }
         HubReference::Remote(client) => {
-            let health: RemoteHealthStatus = client.get_json("/healthz", &[]).await?;
+            let health: RemoteHealthStatus = client.get_json("/tooling/healthz", &[]).await?;
             if stdout_enabled {
                 if use_json {
                     let rendered = render_remote_health_json(&health)?;
@@ -4108,7 +4124,8 @@ async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
             }
         }
         HubReference::Remote(client) => {
-            let report: RemoteObservabilityReport = client.get_json("/metrics", &[]).await?;
+            let report: RemoteObservabilityReport =
+                client.get_json("/tooling/metrics", &[]).await?;
             let metrics = hub_metrics_from_remote(&report);
             if args.raw {
                 print_metrics_raw(&metrics);
@@ -4132,7 +4149,7 @@ async fn handle_hub_profile(args: HubProfileArgs) -> Result<()> {
     };
 
     let use_json = json_output_enabled(args.json);
-    let descriptor: RemoteHubProfileDescriptor = client.get_json("/profile", &[]).await?;
+    let descriptor: RemoteHubProfileDescriptor = client.get_json("/tooling/profile", &[]).await?;
     let RemoteHubProfileDescriptor {
         ok,
         version,
@@ -4211,7 +4228,7 @@ async fn handle_hub_role(args: HubRoleArgs) -> Result<()> {
 
     let use_json = json_output_enabled(json);
 
-    let response: RemoteHubRoleDescriptor = client.get_json("/role", &query).await?;
+    let response: RemoteHubRoleDescriptor = client.get_json("/tooling/role", &query).await?;
     let RemoteHubRoleDescriptor {
         ok,
         hub_id,
@@ -4270,7 +4287,7 @@ async fn handle_hub_admission(args: HubAdmissionArgs) -> Result<()> {
         }
     };
 
-    let report: RemoteAdmissionReport = client.get_json("/admission", &[]).await?;
+    let report: RemoteAdmissionReport = client.get_json("/tooling/admission", &[]).await?;
     render_admission_report(&report, json_output_enabled(args.json));
     log_cli_goal("CLI.SH1_PLUS.ADMISSION");
     Ok(())
@@ -4293,7 +4310,8 @@ async fn handle_hub_admission_log(args: HubAdmissionLogArgs) -> Result<()> {
         query.push(("codes", codes));
     }
 
-    let response: RemoteAdmissionLogResponse = client.get_json("/admission_log", &query).await?;
+    let response: RemoteAdmissionLogResponse =
+        client.get_json("/tooling/admission_log", &query).await?;
     render_admission_log(&response, json_output_enabled(args.json));
     log_cli_goal("CLI.SH1_PLUS.ADMISSION_LOG");
     Ok(())
@@ -4302,7 +4320,7 @@ async fn handle_hub_admission_log(args: HubAdmissionLogArgs) -> Result<()> {
 async fn fetch_remote_kex_policy_descriptor(
     client: &HubHttpClient,
 ) -> Result<RemoteKexPolicyDescriptor> {
-    client.get_json("/kex_policy", &[]).await
+    client.get_json("/tooling/kex_policy", &[]).await
 }
 
 fn render_kex_policy(descriptor: &RemoteKexPolicyDescriptor, use_json: bool) {
@@ -4465,7 +4483,7 @@ async fn handle_hub_checkpoint_latest(args: HubCheckpointLatestArgs) -> Result<C
         HubReference::Remote(client) => client,
     };
 
-    let checkpoint: Checkpoint = client.get_cbor("/checkpoint_latest", &[]).await?;
+    let checkpoint: Checkpoint = client.get_cbor("/tooling/checkpoint_latest", &[]).await?;
     print_checkpoint_summary(&checkpoint);
     log_cli_goal("CLI.RESYNC0.CHECKPOINT_LATEST");
     Ok(checkpoint)
@@ -4488,7 +4506,7 @@ async fn handle_hub_checkpoint_range(args: HubCheckpointRangeArgs) -> Result<Vec
         query.push(("to_epoch", to.to_string()));
     }
 
-    let checkpoints: Vec<Checkpoint> = client.get_cbor("/checkpoint_range", &query).await?;
+    let checkpoints: Vec<Checkpoint> = client.get_cbor("/tooling/checkpoint_range", &query).await?;
     if checkpoints.is_empty() {
         println!("no checkpoints returned");
     } else {
@@ -5490,6 +5508,11 @@ async fn handle_stream(args: StreamArgs) -> Result<()> {
                 let mut emitted = false;
                 let mut mmr = Mmr::new();
                 for message in &stream_state.messages {
+                    if let Some(to) = args.to {
+                        if message.seq > to {
+                            break;
+                        }
+                    }
                     let leaf = compute_message_leaf_hash(message)?;
                     let (_, root, mmr_proof) = mmr.append_with_proof(leaf);
                     if message.seq >= args.from {
@@ -5520,6 +5543,11 @@ async fn handle_stream(args: StreamArgs) -> Result<()> {
             } else {
                 let mut emitted = false;
                 for message in stream_state.messages.iter().filter(|m| m.seq >= args.from) {
+                    if let Some(to) = args.to {
+                        if message.seq > to {
+                            break;
+                        }
+                    }
                     emitted = true;
                     print_stream_message(message);
                     println!("---");
@@ -5549,6 +5577,9 @@ async fn handle_stream_remote(client: HubHttpClient, args: StreamArgs) -> Result
     let mut query: Vec<(&str, String)> = vec![("stream", args.stream.clone())];
     if args.from > 0 {
         query.push(("from", args.from.to_string()));
+    }
+    if let Some(to) = args.to {
+        query.push(("to", to.to_string()));
     }
 
     if args.with_proof {
@@ -5719,7 +5750,7 @@ async fn handle_cap_authorize_remote(client: HubHttpClient, args: CapAuthorizeAr
         .context("serializing capability token for submission")?;
 
     let response: RemoteAuthorizeResponse = client
-        .post_cbor("/authorize", &encoded)
+        .post_cbor("/tooling/authorize", &encoded)
         .await
         .context("authorizing capability with hub")?;
 
@@ -5769,7 +5800,7 @@ async fn handle_cap_status(args: CapStatusArgs) -> Result<()> {
     };
 
     let response: RemoteCapStatusResponse = client
-        .post_json("/cap_status", &request)
+        .post_json("/tooling/cap_status", &request)
         .await
         .context("requesting capability status from hub")?;
     render_cap_status(&response, &auth_ref_hex, json_output_enabled(args.json));
@@ -5961,7 +5992,7 @@ async fn handle_pow_request(args: PowRequestArgs) -> Result<()> {
         query.push(("difficulty", difficulty.to_string()));
     }
 
-    let descriptor: RemotePowChallenge = client.get_json("/pow_request", &query).await?;
+    let descriptor: RemotePowChallenge = client.get_json("/tooling/pow_request", &query).await?;
     render_pow_challenge(&descriptor, json_output_enabled(args.json));
     log_cli_goal("CLI.SH1_PLUS.POW_REQUEST");
     Ok(())
@@ -6392,7 +6423,7 @@ async fn fetch_mirror_endpoint_plan(
     label: &str,
 ) -> Result<FederateMirrorEndpointPlan> {
     let report: RemoteObservabilityReport = client
-        .get_json("/metrics", &[])
+        .get_json("/tooling/metrics", &[])
         .await
         .context("fetching hub metrics for mirror plan")?;
     let last_seq = report.last_stream_seq.get(label).copied().unwrap_or(0);
@@ -8661,7 +8692,7 @@ async fn handle_resync_remote(client: HubHttpClient, args: ResyncArgs) -> Result
     };
 
     let remote_state: RemoteHubStreamState = client
-        .post_json("/resync", &payload)
+        .post_json("/tooling/resync", &payload)
         .await
         .context("requesting resync from hub")?;
 
@@ -9009,7 +9040,8 @@ async fn handle_verify_state(args: VerifyStateArgs) -> Result<()> {
             }
         }
         HubReference::Remote(client) => {
-            let report: RemoteObservabilityReport = client.get_json("/metrics", &[]).await?;
+            let report: RemoteObservabilityReport =
+                client.get_json("/tooling/metrics", &[]).await?;
             report
                 .last_stream_seq
                 .get(&args.stream)
@@ -9267,7 +9299,8 @@ async fn handle_anchor_publish(args: AnchorPublishArgs) -> Result<()> {
             );
         }
         HubReference::Remote(client) => {
-            let report: RemoteObservabilityReport = client.get_json("/metrics", &[]).await?;
+            let report: RemoteObservabilityReport =
+                client.get_json("/tooling/metrics", &[]).await?;
             let mmr_root = report.mmr_roots.get(&args.stream).cloned().ok_or_else(|| {
                 anyhow!(
                     "remote hub does not report an mmr_root for stream {}",
@@ -9279,7 +9312,7 @@ async fn handle_anchor_publish(args: AnchorPublishArgs) -> Result<()> {
                 mmr_root: mmr_root.clone(),
                 backend: None,
             };
-            client.post_json_unit("/anchor", &request).await?;
+            client.post_json_unit("/tooling/anchor", &request).await?;
             println!(
                 "requested anchor publication for stream {} mmr_root {}",
                 args.stream, mmr_root
@@ -10110,7 +10143,8 @@ async fn gather_stream_inventory(reference: &HubReference) -> Result<BTreeMap<St
             Ok(state.last_stream_seq)
         }
         HubReference::Remote(client) => {
-            let report: RemoteObservabilityReport = client.get_json("/metrics", &[]).await?;
+            let report: RemoteObservabilityReport =
+                client.get_json("/tooling/metrics", &[]).await?;
             Ok(report.last_stream_seq)
         }
     }
@@ -11235,7 +11269,7 @@ mod tests {
 
     #[test]
     fn hub_start_rejects_zero_pow_difficulty() {
-        let err = super::hub_start_overrides("profile", Some(0)).unwrap_err();
+        let err = super::hub_start_overrides("profile", Some(0), false).unwrap_err();
         assert!(err
             .to_string()
             .contains("pow-difficulty must be greater than zero"));

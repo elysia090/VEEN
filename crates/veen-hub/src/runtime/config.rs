@@ -12,6 +12,7 @@ pub struct HubRuntimeConfig {
     pub data_dir: PathBuf,
     pub role: HubRole,
     pub profile_id: Option<String>,
+    pub tooling_enabled: bool,
     pub anchors: AnchorConfig,
     pub observability: ObservabilityConfig,
     pub dedup: DedupConfig,
@@ -86,6 +87,7 @@ pub struct HubConfigOverrides {
     pub anchor_backend: Option<String>,
     pub enable_metrics: Option<bool>,
     pub enable_logs: Option<bool>,
+    pub tooling_enabled: Option<bool>,
     pub bloom_capacity: Option<usize>,
     pub bloom_false_positive_rate: Option<f64>,
     pub lru_capacity: Option<usize>,
@@ -100,6 +102,8 @@ pub struct HubConfigOverrides {
 struct FileConfig {
     listen: Option<SocketAddr>,
     profile_id: Option<String>,
+    #[serde(default)]
+    tooling: ToolingSection,
     #[serde(default)]
     anchor: AnchorSection,
     #[serde(default)]
@@ -116,6 +120,11 @@ struct FileConfig {
 struct AnchorSection {
     enabled: Option<bool>,
     backend: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ToolingSection {
+    enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -163,6 +172,9 @@ impl HubRuntimeConfig {
 
         let resolved_listen = file_cfg.listen.unwrap_or(listen);
         let profile_id = overrides.profile_id.or(file_cfg.profile_id);
+        let tooling_enabled = overrides
+            .tooling_enabled
+            .unwrap_or_else(|| file_cfg.tooling.enabled.unwrap_or(false));
         let anchors = AnchorConfig {
             enabled: overrides
                 .anchors_enabled
@@ -221,6 +233,7 @@ impl HubRuntimeConfig {
             data_dir,
             role,
             profile_id,
+            tooling_enabled,
             anchors,
             observability,
             dedup,

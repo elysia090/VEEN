@@ -113,7 +113,7 @@ impl PerfHarness {
         let (server, http) = match mode {
             PerfMode::InProcess => (None, None),
             PerfMode::Http => {
-                let server = HubServerHandle::spawn(listen, pipeline.clone()).await?;
+                let server = HubServerHandle::spawn(listen, pipeline.clone(), true).await?;
                 let url = format!("http://{}:{}", listen.ip(), listen.port());
                 let client = ClientBuilder::new()
                     .build()
@@ -259,6 +259,7 @@ fn build_runtime_config(listen: SocketAddr, data_dir: PathBuf) -> Result<HubRunt
         data_dir,
         role: HubRole::Primary,
         profile_id: Some(Profile::default().id()?.to_string()),
+        tooling_enabled: true,
         anchors: AnchorConfig::default(),
         observability: ObservabilityConfig::default(),
         dedup: DedupConfig::default(),
@@ -388,7 +389,7 @@ impl PerfDriver {
                     .as_ref()
                     .ok_or_else(|| anyhow!("missing HTTP context for perf run"))?;
                 let url = format!(
-                    "{}/commit_wait?stream={}&seq={}",
+                    "{}/tooling/commit_wait?stream={}&seq={}",
                     http.base_url, self.stream_label, response.seq
                 );
                 let response = http.client.get(url).send().await?;

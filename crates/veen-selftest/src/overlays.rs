@@ -932,7 +932,7 @@ async fn import_bundle(client: &Client, hub_base: &str, bundle: &ExportedBundle)
     };
 
     client
-        .post(format!("{hub_base}/bridge"))
+        .post(format!("{hub_base}/tooling/bridge"))
         .json(&request)
         .send()
         .await
@@ -953,7 +953,7 @@ async fn expect_import_error(
     };
 
     let response = client
-        .post(format!("{hub_base}/bridge"))
+        .post(format!("{hub_base}/tooling/bridge"))
         .json(&request)
         .send()
         .await
@@ -1035,7 +1035,7 @@ async fn record_offline_audit(
     };
 
     client
-        .post(format!("{hub_base}/bridge"))
+        .post(format!("{hub_base}/tooling/bridge"))
         .json(&request)
         .send()
         .await
@@ -1213,7 +1213,7 @@ async fn fetch_stream_state(
     stream: &str,
 ) -> Result<HubStreamState> {
     let response = client
-        .post(format!("{hub_base}/resync"))
+        .post(format!("{hub_base}/tooling/resync"))
         .json(&serde_json::json!({ "stream": stream }))
         .send()
         .await
@@ -1232,7 +1232,7 @@ async fn fetch_stream_state(
 
 async fn fetch_metrics(client: &Client, base: &str) -> Result<MetricsSnapshot> {
     client
-        .get(format!("{base}/metrics"))
+        .get(format!("{base}/tooling/metrics"))
         .send()
         .await
         .context("fetching hub metrics")?

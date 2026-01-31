@@ -161,9 +161,13 @@ impl StreamRuntime {
             .and_then(|index| self.state.messages.get(*index))
     }
 
-    fn messages_from(&self, from: u64) -> Vec<StoredMessage> {
+    fn messages_range(&self, from: u64, to: u64) -> Vec<StoredMessage> {
+        if from > to {
+            return Vec::new();
+        }
         let start = self.state.messages.partition_point(|msg| msg.seq < from);
-        self.state.messages[start..].to_vec()
+        let end = self.state.messages.partition_point(|msg| msg.seq <= to);
+        self.state.messages[start..end].to_vec()
     }
 
     fn leaf_hash_at(&self, index: usize) -> Option<&LeafHash> {
@@ -891,20 +895,9 @@ impl HubPipeline {
         &self,
         stream: &str,
         from: u64,
+        to: Option<u64>,
         with_proof: bool,
     ) -> Result<StreamResponse> {
-        if !with_proof {
-            let messages = {
-                let guard = self.inner.read().await;
-                let runtime = guard
-                    .streams
-                    .get(stream)
-                    .ok_or_else(|| anyhow!("stream {stream} has no stored messages"))?;
-                runtime.messages_from(from)
-            };
-            return Ok(StreamResponse::Messages(messages));
-        }
-
         let (window_start, last_seq, proven_tail) = {
             let guard = self.inner.read().await;
             let runtime = guard
@@ -924,22 +917,92 @@ impl HubPipeline {
             let proven_tail = runtime.proven_messages_from(from);
             (window_start, last_seq, proven_tail)
         };
+
+        let to = to.unwrap_or(last_seq);
+        if to == 0 || from > to {
+            return Ok(if with_proof {
+                StreamResponse::Proven(Vec::new())
+            } else {
+                StreamResponse::Messages(Vec::new())
+            });
+        }
+
+        if !with_proof {
+            let messages = {
+                let guard = self.inner.read().await;
+                let runtime = guard
+                    .streams
+                    .get(stream)
+                    .ok_or_else(|| anyhow!("stream {stream} has no stored messages"))?;
+                runtime.messages_range(from, to)
+            };
+            return Ok(StreamResponse::Messages(messages));
+        }
+
         let mut proven = Vec::new();
         if let Some(window_start) = window_start {
             if from < window_start {
                 let end = window_start.saturating_sub(1);
+                let end = end.min(to);
                 if from <= end {
                     proven.extend(
                         load_proven_messages_range(&self.storage, stream, from, end).await?,
                     );
                 }
             }
-            proven.extend(proven_tail);
+            let mut tail = proven_tail;
+            if to < u64::MAX {
+                tail.retain(|entry| entry.message.seq <= to);
+            }
+            proven.extend(tail);
         } else if from <= last_seq {
-            proven.extend(load_proven_messages_range(&self.storage, stream, from, last_seq).await?);
+            let end = to.min(last_seq);
+            proven.extend(load_proven_messages_range(&self.storage, stream, from, end).await?);
         }
 
         Ok(StreamResponse::Proven(proven))
+    }
+
+    pub async fn receipt(&self, stream: &str, seq: u64) -> Result<StreamReceipt> {
+        let entry = self.load_proven_entry(stream, seq).await?;
+        Ok(entry.receipt)
+    }
+
+    pub async fn proof(&self, stream: &str, seq: u64) -> Result<StreamProof> {
+        let entry = self.load_proven_entry(stream, seq).await?;
+        Ok(entry.proof)
+    }
+
+    pub async fn checkpoint(&self, stream: &str, upto_seq: u64) -> Result<Option<Checkpoint>> {
+        let label = derive_label_for_stream(stream)?;
+        let checkpoints = read_checkpoints(&self.storage).await?;
+        Ok(checkpoints
+            .into_iter()
+            .find(|checkpoint| checkpoint.upto_seq == upto_seq && checkpoint.label_curr == label))
+    }
+
+    async fn load_proven_entry(&self, stream: &str, seq: u64) -> Result<StreamMessageWithProof> {
+        let cached = {
+            let guard = self.inner.read().await;
+            guard
+                .streams
+                .get(stream)
+                .and_then(|runtime| {
+                    runtime
+                        .proven_messages
+                        .iter()
+                        .find(|entry| entry.message.seq == seq)
+                })
+                .cloned()
+        };
+        if let Some(entry) = cached {
+            return Ok(entry);
+        }
+
+        let mut proven = load_proven_messages_range(&self.storage, stream, seq, seq).await?;
+        proven
+            .pop()
+            .ok_or_else(|| anyhow!("stream {stream} has no stored receipt at seq {seq}"))
     }
 
     pub async fn resync(&self, stream: &str) -> Result<HubStreamState> {
