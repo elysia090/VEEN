@@ -1064,6 +1064,7 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_submit_request(
     stream: &str,
     client_signing: &SigningKey,

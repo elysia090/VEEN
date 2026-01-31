@@ -991,6 +991,15 @@ impl HubPipeline {
         );
 
         let mut guard = self.inner.write().await;
+        let (issued_at, should_log_receipt) = match guard
+            .capabilities
+            .records
+            .get(&auth_ref_hex)
+            .and_then(|record| record.issued_at)
+        {
+            Some(timestamp) => (timestamp, false),
+            None => (current_unix_timestamp()?, true),
+        };
         let bucket_state = match token.allow.rate.as_ref() {
             Some(rate) => Some(TokenBucketState::new(
                 rate.burst,
@@ -1002,8 +1011,8 @@ impl HubPipeline {
             subject: subject_hex,
             stream_ids,
             stream_id_set,
-            issued_at: None,
-            expires_at: None,
+            issued_at: Some(issued_at),
+            expires_at: Some(issued_at.saturating_add(token.allow.ttl)),
             ttl: token.allow.ttl,
             rate: token.allow.rate.clone(),
             bucket_state,
@@ -1013,11 +1022,16 @@ impl HubPipeline {
             .capabilities
             .records
             .insert(auth_ref_hex.clone(), record);
-        update_capability_store(&self.storage, &guard.capabilities).await?;
+        let snapshot = guard.capabilities.clone();
+        drop(guard);
+        if should_log_receipt {
+            append_capability_receipt(&self.storage, &auth_ref_hex, issued_at).await?;
+        }
+        update_capability_store(&self.storage, &snapshot).await?;
 
         Ok(AuthorizeResponse {
             auth_ref,
-            expires_at: None,
+            expires_at: Some(issued_at.saturating_add(token.allow.ttl)),
         })
     }
 
@@ -1645,16 +1659,6 @@ impl CapabilityStore {
         for record in self.records.values_mut() {
             if let Some(state) = record.bucket_state.as_mut() {
                 state.normalise_units();
-            }
-        }
-    }
-
-    fn normalise_expiry(&mut self) {
-        for record in self.records.values_mut() {
-            if let Some(issued_at) = record.issued_at {
-                record.expires_at = Some(issued_at.saturating_add(record.ttl));
-            } else {
-                record.expires_at = None;
             }
         }
     }
@@ -2592,12 +2596,13 @@ async fn persist_message_bundle(
 
 async fn append_receipt(storage: &HubStorage, entry: &StreamMessageWithProof) -> Result<()> {
     let receipt = ReceiptRecord {
-        stream: entry.message.stream.clone(),
-        seq: entry.message.seq,
-        leaf_hash: entry.receipt.leaf_hash.clone(),
-        mmr_root: entry.receipt.mmr_root.clone(),
+        stream: Some(entry.message.stream.clone()),
+        seq: Some(entry.message.seq),
+        leaf_hash: Some(entry.receipt.leaf_hash.clone()),
+        mmr_root: Some(entry.receipt.mmr_root.clone()),
         hub_ts: entry.receipt.hub_ts,
         proof: Some(entry.proof.clone()),
+        auth_ref: entry.message.auth_ref.clone(),
     };
     let mut encoded = Vec::new();
     ciborium::ser::into_writer(&receipt, &mut encoded).context("serialising receipt record")?;
@@ -2614,15 +2619,50 @@ async fn append_receipt(storage: &HubStorage, entry: &StreamMessageWithProof) ->
     Ok(())
 }
 
-#[derive(Serialize)]
+async fn append_capability_receipt(
+    storage: &HubStorage,
+    auth_ref: &str,
+    hub_ts: u64,
+) -> Result<()> {
+    let receipt = ReceiptRecord {
+        stream: None,
+        seq: None,
+        leaf_hash: None,
+        mmr_root: None,
+        hub_ts,
+        proof: None,
+        auth_ref: Some(auth_ref.to_string()),
+    };
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&receipt, &mut encoded).context("serialising receipt record")?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(storage.receipts_path())
+        .await
+        .context("opening receipt sequence for append")?;
+    use tokio::io::AsyncWriteExt;
+    file.write_all(&encoded)
+        .await
+        .context("appending receipt")?;
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
 struct ReceiptRecord {
-    stream: String,
-    seq: u64,
-    leaf_hash: String,
-    mmr_root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stream: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    leaf_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mmr_root: Option<String>,
     hub_ts: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     proof: Option<StreamProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth_ref: Option<String>,
 }
 
 async fn read_checkpoints(storage: &HubStorage) -> Result<Vec<Checkpoint>> {
@@ -3058,9 +3098,75 @@ async fn load_capabilities(storage: &HubStorage) -> Result<CapabilityStore> {
     let mut store: CapabilityStore = serde_json::from_slice(&data)
         .with_context(|| format!("parsing capability store from {}", path.display()))?;
     store.normalise_bucket_state();
-    store.normalise_expiry();
     store.rebuild_stream_indexes();
+    let issued_at = derive_capability_issued_at(storage).await?;
+    apply_issued_at_from_receipts(&mut store, &issued_at);
     Ok(store)
+}
+
+fn apply_issued_at_from_receipts(
+    store: &mut CapabilityStore,
+    issued_at: &HashMap<String, u64>,
+) {
+    for (auth_ref, record) in store.records.iter_mut() {
+        record.issued_at = issued_at.get(auth_ref).copied();
+        record.expires_at = record
+            .issued_at
+            .map(|issued_at| issued_at.saturating_add(record.ttl));
+    }
+}
+
+async fn derive_capability_issued_at(storage: &HubStorage) -> Result<HashMap<String, u64>> {
+    let path = storage.receipts_path();
+    if !fs::try_exists(&path)
+        .await
+        .with_context(|| format!("checking receipt log {}", path.display()))?
+    {
+        return Ok(HashMap::new());
+    }
+    let data = fs::read(&path)
+        .await
+        .with_context(|| format!("reading receipt log from {}", path.display()))?;
+    if data.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut cursor = Cursor::new(&data);
+    let mut issued_at = HashMap::new();
+    while (cursor.position() as usize) < data.len() {
+        let offset = cursor.position();
+        let receipt: ReceiptRecord = ciborium::de::from_reader(&mut cursor)
+            .with_context(|| format!("decoding receipt at offset {}", offset))?;
+        let auth_ref = match receipt.auth_ref {
+            Some(auth_ref) => Some(auth_ref),
+            None => match (receipt.stream.as_ref(), receipt.seq) {
+                (Some(stream), Some(seq)) => {
+                    let bundle_path = storage.message_bundle_path(stream, seq);
+                    match read_message_bundle(&bundle_path).await {
+                        Ok(bundle) => bundle.message.auth_ref,
+                        Err(err) => {
+                            tracing::warn!(
+                                error = ?err,
+                                stream = %stream,
+                                seq,
+                                "failed to resolve auth_ref for receipt"
+                            );
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            },
+        };
+        if let Some(auth_ref) = auth_ref {
+            let entry = issued_at.entry(auth_ref).or_insert(receipt.hub_ts);
+            if receipt.hub_ts < *entry {
+                *entry = receipt.hub_ts;
+            }
+        }
+    }
+
+    Ok(issued_at)
 }
 
 async fn load_anchor_log(storage: &HubStorage) -> Result<AnchorLog> {
@@ -3319,6 +3425,7 @@ mod tests {
         init_pipeline_with_overrides(data_dir, HubConfigOverrides::default()).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_submit_request(
         stream: &str,
         client_signing: &SigningKey,
@@ -3436,7 +3543,7 @@ mod tests {
             let remainder = ciphertext.len() % pad_block;
             if remainder != 0 {
                 let padding = pad_block - remainder;
-                ciphertext.extend(std::iter::repeat(0u8).take(padding));
+                ciphertext.extend(std::iter::repeat_n(0u8, padding));
             }
         }
         Ok(ciphertext)
