@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Query, State};
 use axum::http::{
     header::{CONTENT_TYPE, RETRY_AFTER},
     HeaderValue, StatusCode,
@@ -15,16 +15,14 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use hex;
 
 use crate::pipeline::{
     AnchorRequest, BridgeIngestRequest, CapabilityError, HubPipeline, HubProfileDescriptor,
     ObservabilityReport, SubmitError, SubmitRequest,
 };
 use std::str::FromStr;
-use veen_core::label::{Label, StreamId};
+use veen_core::label::StreamId;
 use veen_core::RealmId;
-use veen_overlays::revocation::RevocationKind;
 
 pub struct HubServerHandle {
     shutdown: Option<oneshot::Sender<()>>,
@@ -44,18 +42,8 @@ impl HubServerHandle {
             .route("/commit_wait", get(handle_commit_wait))
             .route("/resync", post(handle_resync))
             .route("/authorize", post(handle_authorize))
-            .route("/authority", post(handle_authority))
-            .route("/authority_view", get(handle_authority_view))
-            .route(
-                "/label-class",
-                post(handle_label_class).get(handle_label_class_list),
-            )
-            .route("/label-class/:label", get(handle_label_class_show))
-            .route("/label_authority", get(handle_label_authority))
-            .route("/schema", post(handle_schema_descriptor))
             .route("/anchor", post(handle_anchor))
             .route("/bridge", post(handle_bridge))
-            .route("/revoke", post(handle_revoke))
             .route("/healthz", get(handle_health))
             .route("/readyz", get(handle_ready))
             .route("/metrics", get(handle_metrics))
@@ -65,7 +53,6 @@ impl HubServerHandle {
             .route("/admission", get(handle_admission))
             .route("/admission_log", get(handle_admission_log))
             .route("/cap_status", post(handle_cap_status))
-            .route("/revocations", get(handle_revocations))
             .route("/pow_request", get(handle_pow_request))
             .route("/checkpoint_latest", get(handle_checkpoint_latest))
             .route("/checkpoint_range", get(handle_checkpoint_range))
@@ -120,22 +107,6 @@ struct CheckpointRangeQuery {
 }
 
 #[derive(Debug, Deserialize)]
-struct AuthorityViewQuery {
-    realm_id: String,
-    stream_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct LabelAuthorityQuery {
-    label: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct LabelClassListQuery {
-    class: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct AdmissionLogQuery {
     limit: Option<usize>,
     codes: Option<String>,
@@ -144,14 +115,6 @@ struct AdmissionLogQuery {
 #[derive(Debug, Deserialize)]
 struct CapStatusRequest {
     auth_ref: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct RevocationListQuery {
-    kind: Option<String>,
-    since: Option<u64>,
-    active_only: Option<bool>,
-    limit: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -337,30 +300,6 @@ async fn handle_cap_status(
     }
 }
 
-async fn handle_revocations(
-    State(pipeline): State<HubPipeline>,
-    Query(query): Query<RevocationListQuery>,
-) -> impl IntoResponse {
-    let kind = match query.kind {
-        Some(ref value) => match parse_revocation_kind(value) {
-            Ok(kind) => Some(kind),
-            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
-        },
-        None => None,
-    };
-    let limit = query.limit.map(|value| value as usize);
-    match pipeline
-        .revocation_list(kind, query.since, query.active_only.unwrap_or(false), limit)
-        .await
-    {
-        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-        Err(err) => {
-            tracing::warn!(error = ?err, "revocation list failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
-        }
-    }
-}
-
 async fn handle_pow_request(
     State(pipeline): State<HubPipeline>,
     Query(query): Query<PowRequestQuery>,
@@ -395,112 +334,6 @@ async fn handle_bridge(
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "bridge ingest failed");
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
-        }
-    }
-}
-
-async fn handle_revoke(State(pipeline): State<HubPipeline>, body: Bytes) -> impl IntoResponse {
-    match pipeline.publish_revocation(&body).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(err) => {
-            tracing::warn!(error = ?err, "revocation publish failed");
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
-        }
-    }
-}
-
-async fn handle_authority(State(pipeline): State<HubPipeline>, body: Bytes) -> impl IntoResponse {
-    match pipeline.publish_authority(&body).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(err) => {
-            tracing::warn!(error = ?err, "authority publish failed");
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
-        }
-    }
-}
-
-async fn handle_authority_view(
-    State(pipeline): State<HubPipeline>,
-    Query(query): Query<AuthorityViewQuery>,
-) -> impl IntoResponse {
-    let realm_id = match parse_realm_id_hex(&query.realm_id) {
-        Ok(value) => value,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
-    };
-    let stream_id = match parse_stream_id_hex(&query.stream_id) {
-        Ok(value) => value,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
-    };
-
-    match pipeline
-        .authority_view_descriptor(realm_id, stream_id)
-        .await
-    {
-        Ok(descriptor) => (StatusCode::OK, Json(descriptor)).into_response(),
-        Err(err) => {
-            tracing::warn!(error = ?err, "authority view failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
-        }
-    }
-}
-
-async fn handle_label_class(State(pipeline): State<HubPipeline>, body: Bytes) -> impl IntoResponse {
-    match pipeline.publish_label_class(&body).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(err) => {
-            tracing::warn!(error = ?err, "label class publish failed");
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
-        }
-    }
-}
-
-async fn handle_label_authority(
-    State(pipeline): State<HubPipeline>,
-    Query(query): Query<LabelAuthorityQuery>,
-) -> impl IntoResponse {
-    let stream_id = match parse_stream_id_hex(&query.label) {
-        Ok(value) => value,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
-    };
-
-    match pipeline.label_authority_descriptor(stream_id).await {
-        Ok(descriptor) => (StatusCode::OK, Json(descriptor)).into_response(),
-        Err(err) => {
-            tracing::warn!(error = ?err, "label authority failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
-        }
-    }
-}
-
-async fn handle_label_class_show(
-    State(pipeline): State<HubPipeline>,
-    Path(label): Path<String>,
-) -> impl IntoResponse {
-    let label = match parse_label_hex(&label) {
-        Ok(value) => value,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
-    };
-    let descriptor = pipeline.label_class_descriptor(label).await;
-    (StatusCode::OK, Json(descriptor)).into_response()
-}
-
-async fn handle_label_class_list(
-    State(pipeline): State<HubPipeline>,
-    Query(query): Query<LabelClassListQuery>,
-) -> impl IntoResponse {
-    let descriptor = pipeline.label_class_list(query.class.clone()).await;
-    (StatusCode::OK, Json(descriptor)).into_response()
-}
-
-async fn handle_schema_descriptor(
-    State(pipeline): State<HubPipeline>,
-    body: Bytes,
-) -> impl IntoResponse {
-    match pipeline.register_schema_descriptor(&body).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(err) => {
-            tracing::warn!(error = ?err, "schema descriptor publish failed");
             (StatusCode::BAD_REQUEST, err.to_string()).into_response()
         }
     }
@@ -652,30 +485,6 @@ async fn handle_checkpoint_range(
             tracing::warn!(error = ?err, "fetching checkpoint range failed");
             (StatusCode::BAD_REQUEST, err.to_string()).into_response()
         }
-    }
-}
-
-fn parse_realm_id_hex(input: &str) -> Result<RealmId, String> {
-    let bytes = hex::decode(input).map_err(|err| format!("invalid realm_id: {err}"))?;
-    RealmId::from_slice(&bytes).map_err(|err| format!("invalid realm_id length: {err}"))
-}
-
-fn parse_stream_id_hex(input: &str) -> Result<StreamId, String> {
-    let bytes = hex::decode(input).map_err(|err| format!("invalid stream identifier: {err}"))?;
-    StreamId::from_slice(&bytes).map_err(|err| format!("invalid stream identifier length: {err}"))
-}
-
-fn parse_label_hex(input: &str) -> Result<Label, String> {
-    let bytes = hex::decode(input).map_err(|err| format!("invalid label identifier: {err}"))?;
-    Label::from_slice(&bytes).map_err(|err| format!("invalid label identifier length: {err}"))
-}
-
-fn parse_revocation_kind(value: &str) -> Result<RevocationKind, String> {
-    match value.to_ascii_lowercase().as_str() {
-        "client-id" => Ok(RevocationKind::ClientId),
-        "auth-ref" => Ok(RevocationKind::AuthRef),
-        "cap-token" => Ok(RevocationKind::CapToken),
-        other => Err(format!("invalid revocation kind: {other}")),
     }
 }
 
