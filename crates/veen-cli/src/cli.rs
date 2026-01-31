@@ -11997,6 +11997,7 @@ mod tests {
             client: client_dir.path().to_path_buf(),
             stream: "test".to_string(),
             from: 0,
+            to: None,
             with_proof: false,
         })
         .await?;
@@ -12207,11 +12208,12 @@ mod tests {
             client: client_dir.path().to_path_buf(),
             stream: "proofs".to_string(),
             from: 0,
+            to: None,
             with_proof: true,
         })
         .await?;
 
-        let mut proven = match runtime.pipeline().stream("proofs", 0, true).await? {
+        let mut proven = match runtime.pipeline().stream("proofs", 0, None, true).await? {
             StreamResponse::Proven(items) => items,
             StreamResponse::Messages(_) => bail!("expected proofs in stream response"),
         };
