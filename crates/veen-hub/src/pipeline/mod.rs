@@ -3104,10 +3104,7 @@ async fn load_capabilities(storage: &HubStorage) -> Result<CapabilityStore> {
     Ok(store)
 }
 
-fn apply_issued_at_from_receipts(
-    store: &mut CapabilityStore,
-    issued_at: &HashMap<String, u64>,
-) {
+fn apply_issued_at_from_receipts(store: &mut CapabilityStore, issued_at: &HashMap<String, u64>) {
     for (auth_ref, record) in store.records.iter_mut() {
         record.issued_at = issued_at.get(auth_ref).copied();
         record.expires_at = record
