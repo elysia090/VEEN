@@ -316,6 +316,76 @@ Optional fields are omitted when absent; `null` is not permitted in `payload_hdr
 
 ---
 
+## 4.8 Log framing, chunking, and recovery artifacts (normative)
+This section defines the **on-disk log framing and recovery artifacts** that bind the wire objects in §4 to
+the operational requirements in §12. These rules are mandatory for deterministic recovery and reproducible
+replay.
+
+### 4.8.1 Log entry framing (per entry)
+Each append to the hub log is a **paired record** consisting of a `MSG` (§4.1) and its corresponding
+`RECEIPT` (§4.3). The pair is stored as a single framed log entry with the following fixed header:
+
+1. `entry_ver` (u8 = 1)
+2. `flags` (u8, bitfield; all unused bits MUST be zero)
+3. `label` (bstr32)
+4. `stream_seq` (u64be)
+5. `msg_len` (u32be)
+6. `receipt_len` (u32be)
+7. `entry_hash` (bstr32) = `H("veen/entry" || msg_bytes || receipt_bytes)`
+
+`msg_bytes` and `receipt_bytes` are the canonical CBOR encodings of `MSG` and `RECEIPT`. The log entry body
+is `msg_bytes || receipt_bytes` in that order. Implementations MUST reject entries where:
+- `msg_len` or `receipt_len` do not match the actual byte lengths.
+- `entry_hash` does not match `msg_bytes || receipt_bytes`.
+- `RECEIPT.label`/`stream_seq` do not match the header `label`/`stream_seq`.
+- The `MSG` and `RECEIPT` violate invariants in §7.
+
+The `entry_hash` is a durable integrity check for storage and is distinct from `ct_hash` and `leaf_hash`.
+Entries are append-only and MUST NOT be rewritten in place.
+
+### 4.8.2 Chunking rules
+Logs are stored as **chunks** with deterministic rolling and alignment:
+- Each chunk file contains a contiguous sequence of framed entries.
+- Chunks MUST roll when either `max_chunk_bytes` would be exceeded by the next entry or
+  `max_checkpoint_interval` entries have been appended since the last checkpoint (see §14.1).
+- Each chunk boundary MUST align to the end of a framed entry; partial entries are forbidden.
+- Chunk sizes MAY be smaller than `max_chunk_bytes` but MUST NOT exceed it.
+- The rolling criteria and resulting chunk boundaries MUST be deterministic given the same log prefix and
+  limit registry.
+
+### 4.8.3 Checkpoint artifacts on disk
+To satisfy §12 repairability and deterministic recovery, the data directory MUST include:
+
+- **Chunk files:** `log/chunk-<label_hex>-<start_seq>-<end_seq>.log`
+  - `label_hex` is the hex encoding of `label`.
+  - `start_seq` and `end_seq` are inclusive, zero-padded decimal (width 20) for stable ordering.
+- **Chunk summaries:** `log/chunk-<label_hex>-<start_seq>-<end_seq>.summary`
+  - Contains `(label, start_seq, end_seq, mmr_root_end, entry_count, total_bytes, entry_hashes_root)`.
+  - `entry_hashes_root` is the MMR root over `entry_hash` values for the chunk in entry order.
+- **Peak snapshots:** `log/peaks-<label_hex>-<upto_seq>.cbor`
+  - Contains the deterministic MMR peak array after `upto_seq` for `label`.
+- **Checkpoint files:** `log/checkpoint-<label_hex>-<upto_seq>.cbor`
+  - The CBOR encoding of `CHECKPOINT` (§4.4).
+- **Checkpoint index:** `log/checkpoint-index-<label_hex>.cbor`
+  - Summary map of `(upto_seq -> mmr_root, chunk_range, peaks_ref)`.
+
+These artifacts MUST be sufficient to reconstruct the exact MMR state and append cursors without reading
+any payload bytes beyond the logged entries. Filenames and index summaries MUST be derived solely from
+log contents and limit registry values; no external mutable state is permitted.
+
+### 4.8.4 Compression and deterministic decoding
+v0.0.1 does not mandate compression. If compression is enabled by a deployment, it MUST satisfy:
+- Compression applies **only** to chunk files; summaries, peaks, and checkpoints MUST remain uncompressed.
+- The compression algorithm and parameters MUST be fixed in the limit registry and treated as part of the
+  deterministic configuration.
+- Decompression MUST be deterministic and byte-exact; any decoding error invalidates the entire chunk.
+- Compression MUST NOT alter entry boundaries; the decoded byte stream MUST match the concatenated framed
+  entries exactly.
+
+If compression is disabled, chunk files are stored verbatim and decoded by direct framing.
+
+---
+
 ## 5. MMR and proofs
 
 ### 5.1 MMR update (per label)
