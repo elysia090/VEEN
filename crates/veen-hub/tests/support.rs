@@ -15,11 +15,13 @@ use veen_core::{
 };
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ClientSecretBundle {
     #[serde(with = "serde_bytes")]
     signing_key: ByteBuf,
 }
 
+#[allow(dead_code)]
 pub fn read_signing_key(client_dir: &Path) -> Result<SigningKey> {
     let path = client_dir.join("keystore.enc");
     let file = std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
@@ -131,7 +133,7 @@ fn build_ciphertext_envelope(header: &[u8], body: &[u8], pad_block: u64) -> Resu
         let remainder = ciphertext.len() % pad_block;
         if remainder != 0 {
             let padding = pad_block - remainder;
-            ciphertext.extend(std::iter::repeat(0u8).take(padding));
+            ciphertext.extend(std::iter::repeat_n(0u8, padding));
         }
     }
     Ok(ciphertext)

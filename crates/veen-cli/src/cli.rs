@@ -5373,7 +5373,7 @@ fn build_ciphertext_envelope(header: &[u8], body: &[u8], pad_block: u64) -> Resu
         let remainder = ciphertext.len() % pad_block;
         if remainder != 0 {
             let padding = pad_block - remainder;
-            ciphertext.extend(std::iter::repeat(0u8).take(padding));
+            ciphertext.extend(std::iter::repeat_n(0u8, padding));
         }
     }
     Ok(ciphertext)
