@@ -47,7 +47,7 @@ use veen_core::{
         mmr::Mmr,
         proof::MmrProof,
         types::{AuthRef, ClientId, CtHash, LeafHash, MmrRoot, Signature64},
-        Checkpoint, Msg,
+        Checkpoint, Msg, Receipt,
     },
     CapToken, CapTokenAllow, CapTokenRate, Profile, ProfileId, RealmId, CIPHERTEXT_LEN_PREFIX,
     HPKE_ENC_LEN, MAX_MSG_BYTES, REALM_ID_LEN,
@@ -95,7 +95,6 @@ use veen_hub::pipeline::{
     AnchorRequest, AttachmentUpload, AuthorizeResponse as RemoteAuthorizeResponse,
     HubStreamState as RemoteHubStreamState, PowCookieEnvelope,
     StoredAttachment as RemoteStoredAttachment, StoredMessage as RemoteStoredMessage,
-    StreamProof as RemoteStreamProof, StreamReceipt as RemoteStreamReceipt,
     StreamResponse as RemoteStreamResponse, SubmitRequest as RemoteSubmitRequest,
     SubmitResponse as RemoteSubmitResponse,
 };
@@ -2974,7 +2973,7 @@ struct StoredAttachment {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StreamReceipt {
-    seq: u64,
+    stream_seq: u64,
     leaf_hash: String,
     mmr_root: String,
     hub_ts: u64,
@@ -2991,12 +2990,12 @@ impl From<RemoteStoredAttachment> for StoredAttachment {
     }
 }
 
-impl From<RemoteStreamReceipt> for StreamReceipt {
-    fn from(remote: RemoteStreamReceipt) -> Self {
+impl From<Receipt> for StreamReceipt {
+    fn from(remote: Receipt) -> Self {
         Self {
-            seq: remote.seq,
-            leaf_hash: remote.leaf_hash,
-            mmr_root: remote.mmr_root,
+            stream_seq: remote.stream_seq,
+            leaf_hash: hex::encode(remote.leaf_hash.as_bytes()),
+            mmr_root: hex::encode(remote.mmr_root.as_bytes()),
             hub_ts: remote.hub_ts,
         }
     }
@@ -3030,6 +3029,34 @@ impl From<RemoteStoredMessage> for StoredMessage {
             auth_ref: remote.auth_ref,
             idem: remote.idem,
         }
+    }
+}
+
+fn stored_message_from_wire(stream: &str, stream_seq: u64, msg: &Msg) -> StoredMessage {
+    StoredMessage {
+        stream: stream.to_string(),
+        seq: stream_seq,
+        sent_at: 0,
+        client_id: hex::encode(msg.client_id.as_bytes()),
+        ver: Some(msg.ver),
+        profile_id: Some(hex::encode(msg.profile_id.as_ref())),
+        label: Some(hex::encode(msg.label.as_ref())),
+        client_seq: Some(msg.client_seq),
+        prev_ack: Some(msg.prev_ack),
+        ct_hash: Some(hex::encode(msg.ct_hash.as_bytes())),
+        ciphertext: Some(BASE64_STANDARD.encode(&msg.ciphertext)),
+        sig: Some(hex::encode(msg.sig.as_ref())),
+        schema: None,
+        expires_at: None,
+        parent: None,
+        body: None,
+        body_digest: None,
+        attachments: Vec::new(),
+        auth_ref: msg
+            .auth_ref
+            .as_ref()
+            .map(|value| hex::encode(value.as_ref())),
+        idem: None,
     }
 }
 
@@ -4900,7 +4927,7 @@ struct SendOutcome {
 #[derive(Debug)]
 enum SendOutcomeDetail {
     Local(Box<LocalSendDetail>),
-    Remote(RemoteSendDetail),
+    Remote(Box<RemoteSendDetail>),
 }
 
 #[derive(Debug)]
@@ -4940,7 +4967,7 @@ fn render_send_outcome(outcome: &SendOutcome) {
                 "sent message seq={} stream={} client_id={}",
                 outcome.seq, outcome.stream, outcome.client_id_hex
             );
-            if let Some(ref server_version) = detail.response.server_version {
+            if let Some(ref server_version) = detail.as_ref().response.server_version {
                 println!("hub_version: {server_version}");
             }
         }
@@ -5113,7 +5140,7 @@ fn compute_local_stream_receipt(stream_state: &HubStreamState, seq: u64) -> Resu
         let (_, root) = mmr.append(leaf);
         if message.seq == seq {
             receipt = Some(StreamReceipt {
-                seq,
+                stream_seq: seq,
                 leaf_hash: hex::encode(leaf.as_bytes()),
                 mmr_root: hex::encode(root.as_bytes()),
                 hub_ts: message.sent_at,
@@ -5293,14 +5320,19 @@ async fn send_message_remote(client: HubHttpClient, args: SendArgs) -> Result<Se
     }
 
     let send_ts = current_unix_timestamp()?;
-    update_client_label_send_state(&args.client, &args.stream, response.receipt.seq, send_ts)
-        .await?;
+    update_client_label_send_state(
+        &args.client,
+        &args.stream,
+        response.receipt.stream_seq,
+        send_ts,
+    )
+    .await?;
 
     Ok(SendOutcome {
         stream: args.stream,
-        seq: response.receipt.seq,
+        seq: response.receipt.stream_seq,
         client_id_hex,
-        detail: SendOutcomeDetail::Remote(RemoteSendDetail { response }),
+        detail: SendOutcomeDetail::Remote(Box::new(RemoteSendDetail { response })),
     })
 }
 
@@ -5529,15 +5561,14 @@ async fn handle_stream(args: StreamArgs) -> Result<()> {
                         emitted = true;
                         print_stream_message(message);
                         let receipt = StreamReceipt {
-                            seq: message.seq,
+                            stream_seq: message.seq,
                             leaf_hash: hex::encode(leaf.as_bytes()),
                             mmr_root: hex::encode(root.as_bytes()),
                             hub_ts: message.sent_at,
                         };
                         validate_stream_proof(message, &receipt, &mmr_proof)?;
                         print_stream_receipt(&receipt);
-                        let proof_wire = RemoteStreamProof::from(mmr_proof.clone());
-                        print_stream_proof(&proof_wire)?;
+                        print_stream_proof(&mmr_proof)?;
                         println!("---");
                     }
                 }
@@ -5600,22 +5631,17 @@ async fn handle_stream_remote(client: HubHttpClient, args: StreamArgs) -> Result
             .mmr_proof
             .clone()
             .ok_or_else(|| anyhow!("hub response missing mmr proof"))?;
-        let proof = proof_wire
-            .clone()
-            .try_into_mmr()
-            .context("decoding stream proof")?;
+        let proof = proof_wire.clone();
         let last_index = response.items.len().saturating_sub(1);
         for (index, item) in response.items.into_iter().enumerate() {
-            let message = StoredMessage::from(item.msg);
-            let receipt = StreamReceipt::from(
-                item.receipt
-                    .ok_or_else(|| anyhow!("hub response missing receipt"))?,
-            );
-            print_stream_message(&message);
+            let receipt = item
+                .receipt
+                .ok_or_else(|| anyhow!("hub response missing receipt"))?;
+            print_stream_message_wire(item.stream_seq, &item.msg);
             if index == last_index {
-                validate_stream_proof(&message, &receipt, &proof)?;
+                validate_stream_proof_wire(&item.msg, &receipt, &proof)?;
             }
-            print_stream_receipt(&receipt);
+            print_wire_receipt(&receipt);
             if index == last_index {
                 print_stream_proof(&proof_wire)?;
             }
@@ -5625,8 +5651,7 @@ async fn handle_stream_remote(client: HubHttpClient, args: StreamArgs) -> Result
     }
 
     for item in response.items {
-        let message = StoredMessage::from(item.msg);
-        print_stream_message(&message);
+        print_stream_message_wire(item.stream_seq, &item.msg);
         println!("---");
     }
 
@@ -6508,48 +6533,39 @@ async fn execute_federate_mirror_run(
         let mut progressed = false;
         let last_index = response.items.len().saturating_sub(1);
         let proof_wire = response.mmr_proof.clone();
-        let proof = match proof_wire.as_ref() {
-            Some(proof_wire) => Some(
-                proof_wire
-                    .clone()
-                    .try_into_mmr()
-                    .context("decoding stream proof")?,
-            ),
-            None => None,
-        };
+        let proof = proof_wire.as_ref().cloned();
         for (index, item) in response.items.into_iter().enumerate() {
-            let message = StoredMessage::from(item.msg);
-            if message.seq < next_seq {
+            let stream_seq = item.stream_seq;
+            if stream_seq < next_seq {
                 continue;
             }
-            if message.seq > upto_seq {
+            if stream_seq > upto_seq {
                 return Ok(mirrored);
             }
-            if message.seq != next_seq {
+            if stream_seq != next_seq {
                 bail_protocol!(
                     "expected source seq {} but received {} while mirroring {}",
                     next_seq,
-                    message.seq,
+                    stream_seq,
                     source_label
                 );
             }
 
-            let receipt = StreamReceipt::from(
-                item.receipt
-                    .ok_or_else(|| anyhow!("hub response missing receipt"))?,
-            );
+            let receipt = item
+                .receipt
+                .ok_or_else(|| anyhow!("hub response missing receipt"))?;
             if index == last_index {
                 let proof = proof
                     .as_ref()
                     .ok_or_else(|| anyhow!("hub response missing mmr proof"))?;
-                validate_stream_proof(&message, &receipt, proof)?;
+                validate_stream_proof_wire(&item.msg, &receipt, proof)?;
             }
 
             let payload = encode_federation_mirror_payload(
                 &source_identifier,
                 &source_label,
                 &target_label,
-                message.seq,
+                stream_seq,
                 &receipt,
             )?;
 
@@ -6579,7 +6595,7 @@ async fn execute_federate_mirror_run(
             .await?;
 
             let entry = FederateMirrorRunEntry {
-                source_seq: message.seq,
+                source_seq: stream_seq,
                 target_seq: submission.seq,
                 operation_id: hex::encode(submission.operation_id.as_bytes()),
             };
@@ -6630,17 +6646,6 @@ fn parse_label_map_entries(entries: &[String]) -> Result<BTreeMap<String, String
     Ok(map)
 }
 
-fn parse_leaf_hash_hex(value: &str) -> Result<LeafHash> {
-    let bytes =
-        hex::decode(value).with_context(|| format!("decoding receipt leaf hash {value}"))?;
-    LeafHash::try_from(bytes.as_slice()).map_err(|err| anyhow!("invalid leaf hash: {err}"))
-}
-
-fn parse_mmr_root_hex(value: &str) -> Result<MmrRoot> {
-    let bytes = hex::decode(value).with_context(|| format!("decoding receipt mmr root {value}"))?;
-    MmrRoot::try_from(bytes.as_slice()).map_err(|err| anyhow!("invalid mmr root: {err}"))
-}
-
 fn derive_label_from_name(label: &str) -> Result<Label> {
     let stream_id = cap_stream_id_from_label(label)
         .with_context(|| format!("deriving stream identifier for {label}"))?;
@@ -6652,16 +6657,14 @@ fn encode_federation_mirror_payload(
     source_label: &str,
     target_label: &str,
     source_seq: u64,
-    receipt: &StreamReceipt,
+    receipt: &Receipt,
 ) -> Result<EncodedOperationPayload> {
-    let leaf_hash = parse_leaf_hash_hex(&receipt.leaf_hash)?;
-    let mmr_root = parse_mmr_root_hex(&receipt.mmr_root)?;
     let payload = FederationMirror {
         source_hub_identifier: source_identifier.to_string(),
         source_label: derive_label_from_name(source_label)?,
         source_stream_seq: source_seq,
-        source_leaf_hash: leaf_hash,
-        source_receipt_root: mmr_root,
+        source_leaf_hash: receipt.leaf_hash,
+        source_receipt_root: receipt.mmr_root,
         target_label: derive_label_from_name(target_label)?,
         mirror_time: Some(current_unix_timestamp()?),
         metadata: None,
@@ -7900,7 +7903,7 @@ async fn load_stream_messages(
             let messages: Vec<StoredMessage> = response
                 .items
                 .into_iter()
-                .map(|item| StoredMessage::from(item.msg))
+                .map(|item| stored_message_from_wire(stream, item.stream_seq, &item.msg))
                 .collect();
             let tip = messages
                 .last()
@@ -8203,24 +8206,18 @@ async fn fetch_remote_operation_receipt(
         .mmr_proof
         .clone()
         .ok_or_else(|| anyhow!("hub response missing proof"))?;
-    let proof = proof_wire
-        .clone()
-        .try_into_mmr()
-        .context("decoding stream proof")?;
+    let proof = proof_wire.clone();
     let entry = response
         .items
         .into_iter()
-        .find(|entry| entry.msg.seq == seq)
+        .find(|entry| entry.stream_seq == seq)
         .ok_or_else(|| anyhow!("hub did not return receipt for {}#{}", stream, seq))?;
 
-    let stored_message = StoredMessage::from(entry.msg);
-    let receipt = StreamReceipt::from(
-        entry
-            .receipt
-            .ok_or_else(|| anyhow!("hub response missing receipt"))?,
-    );
-    validate_stream_proof(&stored_message, &receipt, &proof)?;
-    Ok(receipt)
+    let receipt = entry
+        .receipt
+        .ok_or_else(|| anyhow!("hub response missing receipt"))?;
+    validate_stream_proof_wire(&entry.msg, &receipt, &proof)?;
+    Ok(StreamReceipt::from(receipt))
 }
 
 fn operation_id_from_receipt(receipt: &StreamReceipt) -> Result<OperationId> {
@@ -10155,7 +10152,7 @@ async fn fetch_stream_messages(
                 Ok(response) => Ok(response
                     .items
                     .into_iter()
-                    .map(|item| StoredMessage::from(item.msg))
+                    .map(|item| stored_message_from_wire(stream, item.stream_seq, &item.msg))
                     .collect()),
                 Err(err) => {
                     if let Some(response_err) = err.downcast_ref::<HubResponseError>() {
@@ -10985,16 +10982,46 @@ fn print_stream_message(message: &StoredMessage) {
 }
 
 fn print_stream_receipt(receipt: &StreamReceipt) {
-    println!("receipt.seq: {}", receipt.seq);
+    println!("receipt.stream_seq: {}", receipt.stream_seq);
     println!("receipt.hub_ts: {}", receipt.hub_ts);
     println!("receipt.leaf_hash: {}", receipt.leaf_hash);
     println!("receipt.mmr_root: {}", receipt.mmr_root);
 }
 
-fn print_stream_proof(proof: &RemoteStreamProof) -> Result<()> {
+fn print_stream_proof(proof: &MmrProof) -> Result<()> {
     let proof_json = serde_json::to_string(proof).context("serializing proof for display")?;
     println!("proof: {proof_json}");
     Ok(())
+}
+
+fn print_wire_receipt(receipt: &Receipt) {
+    println!("receipt.stream_seq: {}", receipt.stream_seq);
+    println!("receipt.hub_ts: {}", receipt.hub_ts);
+    println!(
+        "receipt.leaf_hash: {}",
+        hex::encode(receipt.leaf_hash.as_bytes())
+    );
+    println!(
+        "receipt.mmr_root: {}",
+        hex::encode(receipt.mmr_root.as_bytes())
+    );
+    println!("receipt.label: {}", hex::encode(receipt.label.as_ref()));
+}
+
+fn print_stream_message_wire(stream_seq: u64, message: &Msg) {
+    println!("stream_seq: {}", stream_seq);
+    println!("client_id: {}", hex::encode(message.client_id.as_bytes()));
+    println!("client_seq: {}", message.client_seq);
+    println!("prev_ack: {}", message.prev_ack);
+    println!("label: {}", hex::encode(message.label.as_ref()));
+    println!("profile_id: {}", hex::encode(message.profile_id.as_ref()));
+    if let Some(auth_ref) = &message.auth_ref {
+        println!("auth_ref: {}", hex::encode(auth_ref.as_ref()));
+    } else {
+        println!("auth_ref: (none)");
+    }
+    println!("ct_hash: {}", hex::encode(message.ct_hash.as_bytes()));
+    println!("ciphertext_bytes: {}", message.ciphertext.len());
 }
 
 fn validate_stream_proof(
@@ -11036,6 +11063,45 @@ fn validate_stream_proof(
     }
 
     Ok(mmr_root)
+}
+
+fn validate_stream_proof_wire(
+    message: &Msg,
+    receipt: &Receipt,
+    proof: &MmrProof,
+) -> Result<MmrRoot> {
+    let computed_leaf = LeafHash::derive(
+        &message.label,
+        &message.profile_id,
+        &message.ct_hash,
+        &message.client_id,
+        message.client_seq,
+    );
+
+    if receipt.leaf_hash != computed_leaf {
+        bail_protocol!(
+            "receipt leaf hash mismatch for stream_seq {}: expected {}, got {}",
+            receipt.stream_seq,
+            hex::encode(computed_leaf.as_bytes()),
+            hex::encode(receipt.leaf_hash.as_bytes())
+        );
+    }
+
+    if proof.leaf_hash != computed_leaf {
+        bail_protocol!(
+            "proof leaf hash mismatch for stream_seq {}",
+            receipt.stream_seq
+        );
+    }
+
+    if !proof.verify(&receipt.mmr_root) {
+        bail_protocol!(
+            "mmr proof verification failed for stream_seq {}",
+            receipt.stream_seq
+        );
+    }
+
+    Ok(receipt.mmr_root)
 }
 
 fn parse_cap_rate(input: &str) -> Result<CapTokenRate> {
@@ -11220,6 +11286,18 @@ mod tests {
     use veen_core::wire::types::{MmrRoot, Signature64};
     use veen_hub::runtime::HubRuntime;
     use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
+
+    fn dummy_receipt(stream_seq: u64) -> Receipt {
+        Receipt {
+            ver: 1,
+            label: Label::from_slice(&[0u8; 32]).expect("label bytes"),
+            stream_seq,
+            leaf_hash: LeafHash::new([0u8; 32]),
+            mmr_root: MmrRoot::new([0u8; 32]),
+            hub_ts: 0,
+            hub_sig: Signature64::new([0u8; 64]),
+        }
+    }
 
     #[test]
     fn parse_label_map_entries_parses_pairs() -> anyhow::Result<()> {
@@ -12094,12 +12172,7 @@ mod tests {
 
         let response = RemoteSubmitResponse {
             ver: DATA_PLANE_VERSION,
-            receipt: RemoteStreamReceipt {
-                seq: 1,
-                leaf_hash: "leaf".to_string(),
-                mmr_root: "root".to_string(),
-                hub_ts: 0,
-            },
+            receipt: dummy_receipt(1),
             server_version: None,
         };
         let (url, mut body_rx, server) = spawn_submit_capture_server(response).await?;
@@ -12145,12 +12218,7 @@ mod tests {
 
         let response = RemoteSubmitResponse {
             ver: DATA_PLANE_VERSION,
-            receipt: RemoteStreamReceipt {
-                seq: 7,
-                leaf_hash: "leaf".to_string(),
-                mmr_root: "root".to_string(),
-                hub_ts: 0,
-            },
+            receipt: dummy_receipt(7),
             server_version: None,
         };
         let (url, mut body_rx, server) = spawn_submit_capture_server(response).await?;
@@ -12294,20 +12362,16 @@ mod tests {
         let proof_wire = response
             .mmr_proof
             .ok_or_else(|| anyhow!("missing mmr proof"))?;
-        let proof = proof_wire
-            .clone()
-            .try_into_mmr()
-            .context("decoding stream proof")?;
+        let proof = proof_wire.clone();
 
         let mut tampered_receipt = original.receipt.ok_or_else(|| anyhow!("missing receipt"))?;
-        let mut root_bytes = hex::decode(&tampered_receipt.mmr_root)?;
+        let mut root_bytes = tampered_receipt.mmr_root.as_bytes().to_vec();
         root_bytes[0] ^= 0xFF;
-        tampered_receipt.mmr_root = hex::encode(root_bytes);
+        tampered_receipt.mmr_root =
+            MmrRoot::from_slice(&root_bytes).context("rebuilding tampered MMR root")?;
 
-        let message: StoredMessage = original.msg.into();
-        let receipt: StreamReceipt = tampered_receipt.into();
-        let err =
-            validate_stream_proof(&message, &receipt, &proof).expect_err("tampered proof fails");
+        let err = validate_stream_proof_wire(&original.msg, &tampered_receipt, &proof)
+            .expect_err("tampered proof fails");
         assert!(err.to_string().contains("mmr proof verification failed"));
 
         runtime.shutdown().await?;

@@ -33,12 +33,12 @@ serde_bytes.workspace = true
 rand.workspace = true
 bloomfilter.workspace = true
 lru.workspace = true
+ed25519-dalek.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 assert_cmd.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }
 serde_json.workspace = true
-ed25519-dalek.workspace = true
 rand.workspace = true
 reqwest.workspace = true

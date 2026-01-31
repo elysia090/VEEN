@@ -1283,7 +1283,7 @@ impl IntegrationHarness {
         self.wait_for_health(replica.listen).await?;
         let replica_base = format!("http://{}", replica.listen);
         let replicated_checkpoint = self
-            .wait_for_checkpoint(&replica_base, accepted.receipt.seq)
+            .wait_for_checkpoint(&replica_base, accepted.receipt.stream_seq)
             .await
             .context("waiting for hardened replica to resync")?;
 
@@ -1294,8 +1294,8 @@ impl IntegrationHarness {
             pow_challenge: pow_descriptor.challenge,
             pow_difficulty: pow_descriptor.difficulty,
             pow_forbidden_status: forbidden.status(),
-            pow_accept_seq: accepted.receipt.seq,
-            pow_accept_root: accepted.receipt.mmr_root,
+            pow_accept_seq: accepted.receipt.stream_seq,
+            pow_accept_root: hex::encode(accepted.receipt.mmr_root.as_bytes()),
             rate_limit_status: rate_limited.status(),
             replicated_seq: replicated_checkpoint.upto_seq,
         })

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -10,8 +11,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use sha2::{Digest, Sha256};
+use veen_core::label::Label;
+use veen_core::profile::ProfileId;
 use veen_core::wire::mmr::Mmr;
-use veen_core::wire::types::LeafHash;
+use veen_core::wire::types::{ClientId, CtHash, LeafHash};
 use veen_hub::pipeline::{
     BridgeIngestRequest, BridgeIngestResponse, HubStreamState, StoredMessage, StreamResponse,
 };
@@ -314,7 +317,11 @@ impl BridgeRuntime {
                 response.ver
             );
         }
-        Ok(response.items.into_iter().map(|item| item.msg).collect())
+        Ok(response
+            .items
+            .into_iter()
+            .map(|item| StoredMessage::from_wire(stream, item.stream_seq, 0, &item.msg))
+            .collect())
     }
 
     async fn fetch_replica_state(&self, stream: &str) -> Result<HubStreamState> {
@@ -410,6 +417,31 @@ struct ResyncBody {
 }
 
 fn leaf_hash_for(message: &StoredMessage) -> Result<LeafHash> {
+    let label_hex = message.label.as_ref();
+    let profile_hex = message.profile_id.as_ref();
+    let ct_hash_hex = message.ct_hash.as_ref();
+    let client_seq = message.client_seq;
+
+    if let (Some(label_hex), Some(profile_hex), Some(ct_hash_hex), Some(client_seq)) =
+        (label_hex, profile_hex, ct_hash_hex, client_seq)
+    {
+        let label =
+            Label::from_str(label_hex).with_context(|| format!("parsing label {label_hex}"))?;
+        let profile_id = ProfileId::from_str(profile_hex)
+            .with_context(|| format!("parsing profile_id {profile_hex}"))?;
+        let ct_hash = CtHash::from_str(ct_hash_hex)
+            .with_context(|| format!("parsing ct_hash {ct_hash_hex}"))?;
+        let client_id = ClientId::from_str(&message.client_id)
+            .with_context(|| format!("parsing client_id {}", message.client_id))?;
+        return Ok(LeafHash::derive(
+            &label,
+            &profile_id,
+            &ct_hash,
+            &client_id,
+            client_seq,
+        ));
+    }
+
     let encoded = serde_json::to_vec(message).context("encoding message for leaf hash")?;
     let digest = Sha256::digest(&encoded);
     let mut bytes = [0u8; 32];
@@ -423,49 +455,49 @@ mod tests {
     use anyhow::ensure;
     use httpmock::prelude::*;
     use serde_json::json;
+    use veen_core::wire::types::Signature64;
+    use veen_core::wire::Msg;
     use veen_hub::pipeline::StreamResponseItem;
 
-    fn sample_message(stream: &str, seq: u64) -> StoredMessage {
-        StoredMessage {
-            stream: stream.to_string(),
-            seq,
-            sent_at: 1_700_000_000,
-            client_id: "bridge-test-client".to_string(),
-            ver: None,
-            profile_id: None,
-            label: None,
-            client_seq: None,
-            prev_ack: None,
-            ct_hash: None,
-            ciphertext: None,
-            sig: None,
-            schema: Some("wallet.transfer".to_string()),
-            expires_at: None,
-            parent: None,
-            body: Some("{\"amount\":100}".to_string()),
-            body_digest: None,
-            attachments: Vec::new(),
+    fn sample_msg(stream: &str, seq: u64) -> Msg {
+        let label =
+            Label::from_slice(Sha256::digest(stream.as_bytes()).as_slice()).expect("label bytes");
+        let profile_id =
+            ProfileId::from_slice(Sha256::digest(b"bridge-profile").as_slice()).expect("profile");
+        let client_id = ClientId::from([0x11; 32]);
+        let ciphertext = vec![0u8; 16];
+        let ct_hash = CtHash::compute(&ciphertext);
+        Msg {
+            ver: 1,
+            profile_id,
+            label,
+            client_id,
+            client_seq: seq,
+            prev_ack: seq.saturating_sub(1),
             auth_ref: None,
-            idem: None,
+            ct_hash,
+            ciphertext,
+            sig: Signature64::from([0u8; 64]),
         }
     }
 
-    fn encode_stream_response(messages: Vec<StoredMessage>) -> Vec<u8> {
-        let stream = messages
-            .first()
-            .map(|message| message.stream.clone())
-            .unwrap_or_default();
-        let from_seq = messages.first().map(|message| message.seq).unwrap_or(0);
+    fn sample_message(stream: &str, seq: u64) -> StoredMessage {
+        let msg = sample_msg(stream, seq);
+        StoredMessage::from_wire(stream, seq, 0, &msg)
+    }
+
+    fn encode_stream_response(stream: &str, items: Vec<(u64, Msg)>) -> Vec<u8> {
+        let from_seq = items.first().map(|(seq, _)| *seq).unwrap_or(0);
         let response = StreamResponse {
             ver: DATA_PLANE_VERSION,
-            stream,
+            stream: stream.to_string(),
             from_seq,
             to_seq: None,
-            items: messages
+            items: items
                 .into_iter()
-                .map(|message| StreamResponseItem {
-                    stream_seq: message.seq,
-                    msg: message,
+                .map(|(stream_seq, msg)| StreamResponseItem {
+                    stream_seq,
+                    msg,
                     receipt: None,
                 })
                 .collect(),
@@ -513,6 +545,7 @@ mod tests {
         let replica = MockServer::start_async().await;
         let stream = "test/stream";
         let message = sample_message(stream, 1);
+        let wire_msg = sample_msg(stream, 1);
 
         let leaf = leaf_hash_for(&message)?;
         let mut mmr = Mmr::new();
@@ -528,7 +561,7 @@ mod tests {
 
         let mut runtime = start_bridge_runtime(&primary, &replica, config).await?;
 
-        let stream_body = encode_stream_response(vec![message.clone()]);
+        let stream_body = encode_stream_response(stream, vec![(1, wire_msg.clone())]);
         primary
             .mock_async(move |when, then| {
                 when.method(POST).path("/v1/stream");
@@ -573,6 +606,7 @@ mod tests {
         let replica = MockServer::start_async().await;
         let stream = "dynamic/stream";
         let message = sample_message(stream, 1);
+        let wire_msg = sample_msg(stream, 1);
 
         let leaf = leaf_hash_for(&message)?;
         let mut mmr = Mmr::new();
@@ -606,7 +640,7 @@ mod tests {
         let mut runtime = BridgeRuntime::new(Client::builder().no_proxy().build()?, config);
         runtime.initialise().await?;
 
-        let stream_body = encode_stream_response(vec![message.clone()]);
+        let stream_body = encode_stream_response(stream, vec![(1, wire_msg.clone())]);
         primary
             .mock_async(move |when, then| {
                 when.method(POST).path("/v1/stream");

@@ -209,8 +209,11 @@ async fn goals_core_pipeline() -> Result<()> {
     .await
     .context("submitting attachment message")?;
 
-    let attachment_bundle_path =
-        message_bundle_path(hub_dir.path(), "core/att", attachment_response.receipt.seq);
+    let attachment_bundle_path = message_bundle_path(
+        hub_dir.path(),
+        "core/att",
+        attachment_response.receipt.stream_seq,
+    );
     run_cli([
         "attachment",
         "verify",
@@ -419,14 +422,14 @@ async fn goals_core_pipeline() -> Result<()> {
         .send()
         .await
         .context("submitting message after capability ttl expiry")?;
-    assert_eq!(ttl_expired.status(), StatusCode::FORBIDDEN);
+    assert_eq!(ttl_expired.status(), StatusCode::BAD_REQUEST);
     let ttl_body = ttl_expired
         .text()
         .await
         .context("reading ttl expiry response body")?;
     assert!(
-        ttl_body.contains("E.CAP"),
-        "expected ttl expiry to return E.CAP, got: {ttl_body}"
+        ttl_body.contains("E.TIME"),
+        "expected ttl expiry to return E.TIME, got: {ttl_body}"
     );
 
     let reauthorized_bytes = http
@@ -474,10 +477,15 @@ async fn goals_core_pipeline() -> Result<()> {
         .json()
         .await
         .context("decoding metrics response")?;
-    let cap_errors = metrics.submit_err_total.get("E.CAP").copied().unwrap_or(0);
+    let auth_errors = metrics.submit_err_total.get("E.AUTH").copied().unwrap_or(0);
+    let time_errors = metrics.submit_err_total.get("E.TIME").copied().unwrap_or(0);
     assert!(
-        cap_errors >= 2,
-        "expected at least two E.CAP errors (subject mismatch + ttl expiry), got {cap_errors}"
+        auth_errors >= 1,
+        "expected at least one E.AUTH error (subject mismatch), got {auth_errors}"
+    );
+    assert!(
+        time_errors >= 1,
+        "expected at least one E.TIME error (ttl expiry), got {time_errors}"
     );
     let rate_errors = metrics.submit_err_total.get("E.RATE").copied().unwrap_or(0);
     assert!(
@@ -509,12 +517,13 @@ async fn goals_core_pipeline() -> Result<()> {
     run_cli(["selftest", "core"]).context("running selftest core suite")?;
 
     println!(
-        "goal: CORE.PIPELINE\n  hub.data: {}\n  cli.streams: {}\n  attachments.bundle: {}\n  cap.auth_ref: {}\n  metrics: E.CAP={}, E.RATE={}",
+        "goal: CORE.PIPELINE\n  hub.data: {}\n  cli.streams: {}\n  attachments.bundle: {}\n  cap.auth_ref: {}\n  metrics: E.AUTH={}, E.TIME={}, E.RATE={}",
         hub_data_path.display(),
         cli_streams.join(","),
         attachment_bundle_path.display(),
         auth_ref_hex,
-        cap_errors,
+        auth_errors,
+        time_errors,
         rate_errors
     );
 
@@ -598,8 +607,8 @@ async fn goals_pow_prefilter_enforced() -> Result<()> {
         hex::encode(pow_challenge),
         pow_difficulty,
         forbidden_status,
-        success.receipt.seq,
-        success.receipt.mmr_root,
+        success.receipt.stream_seq,
+        hex::encode(success.receipt.mmr_root.as_bytes()),
     );
 
     runtime.shutdown().await?;
@@ -726,7 +735,7 @@ async fn goals_capability_gating_persists() -> Result<()> {
     let authorized = submit_cbor(&http, &submit_endpoint, &authorized_request)
         .await
         .context("submitting authorized message after restart")?;
-    assert_eq!(authorized.receipt.seq, 1);
+    assert_eq!(authorized.receipt.stream_seq, 1);
 
     let missing_auth_request = make_submit_request(
         "core/capped",
@@ -752,8 +761,8 @@ async fn goals_capability_gating_persists() -> Result<()> {
         .await
         .context("reading missing auth_ref response body")?;
     assert!(
-        missing_body.contains("E.AUTH"),
-        "expected E.AUTH error code in response: {missing_body}"
+        missing_body.contains("E.CAP"),
+        "expected E.CAP error code in response: {missing_body}"
     );
 
     let restart_metrics: MetricsResponse = http
@@ -771,22 +780,22 @@ async fn goals_capability_gating_persists() -> Result<()> {
         .context("decoding restart metrics response")?;
     let auth_errors = restart_metrics
         .submit_err_total
-        .get("E.AUTH")
+        .get("E.CAP")
         .copied()
         .unwrap_or(0);
     assert!(
         auth_errors >= 1,
-        "expected at least one E.AUTH error recorded for missing auth_ref, got {auth_errors}"
+        "expected at least one E.CAP error recorded for missing auth_ref, got {auth_errors}"
     );
 
     println!(
-        "goal: CAP.PERSISTENCE\n  hub.path: {}\n  cap.file: {}\n  auth_ref: {}\n  capability.store: {}\n  restart.addr: {}\n  submit.seq: {}\n  metrics.E.AUTH: {}",
+        "goal: CAP.PERSISTENCE\n  hub.path: {}\n  cap.file: {}\n  auth_ref: {}\n  capability.store: {}\n  restart.addr: {}\n  submit.seq: {}\n  metrics.E.CAP: {}",
         hub_dir.path().display(),
         cap_file.display(),
         auth_ref_hex,
         if capability_store_survived { "persisted" } else { "missing" },
         restart_runtime.listen_addr(),
-        authorized.receipt.seq,
+        authorized.receipt.stream_seq,
         auth_errors,
     );
 
@@ -909,7 +918,7 @@ async fn goals_admission_bounds() -> Result<()> {
         let quota_response = submit_cbor(&http, &submit_endpoint, &quota_request)
             .await
             .with_context(|| format!("submitting quota message {index}"))?;
-        quota_seqs.push(quota_response.receipt.seq);
+        quota_seqs.push(quota_response.receipt.stream_seq);
     }
 
     let quota_fail_request = make_submit_request(
@@ -1000,23 +1009,23 @@ async fn goals_admission_bounds() -> Result<()> {
         .await
         .context("submitting lifetime-expired message")?;
     let lifetime_fail_status = lifetime_fail.status();
-    assert_eq!(lifetime_fail_status, StatusCode::FORBIDDEN);
+    assert_eq!(lifetime_fail_status, StatusCode::BAD_REQUEST);
     let lifetime_body = lifetime_fail
         .text()
         .await
         .context("reading lifetime failure body")?;
-    let lifetime_error_code = lifetime_body.contains("E.AUTH");
+    let lifetime_error_code = lifetime_body.contains("E.TIME");
     assert!(
         lifetime_error_code,
-        "expected lifetime enforcement to return E.AUTH, got: {lifetime_body}"
+        "expected lifetime enforcement to return E.TIME, got: {lifetime_body}"
     );
 
     println!(
-        "goal: ADMISSION.BOUNDS\n  hub.url: {hub_url}\n  streams: [{stream_quota}, {stream_lifetime}]\n  auth_ref.quota: {auth_ref_quota}\n  auth_ref.lifetime: {auth_ref_b}\n  quota.seqs: {:?}\n  quota.forbidden.status: {}\n  quota.error.E.AUTH: {}\n  lifetime.initial.seq: {}\n  lifetime.expiry.status: {}\n  lifetime.error.E.AUTH: {}\n  lifetime.limit.sec: {}",
+        "goal: ADMISSION.BOUNDS\n  hub.url: {hub_url}\n  streams: [{stream_quota}, {stream_lifetime}]\n  auth_ref.quota: {auth_ref_quota}\n  auth_ref.lifetime: {auth_ref_b}\n  quota.seqs: {:?}\n  quota.forbidden.status: {}\n  quota.error.E.AUTH: {}\n  lifetime.initial.seq: {}\n  lifetime.expiry.status: {}\n  lifetime.error.E.TIME: {}\n  lifetime.limit.sec: {}",
         quota_seqs,
         quota_fail_status,
         quota_error_code,
-        lifetime_initial.receipt.seq,
+        lifetime_initial.receipt.stream_seq,
         lifetime_fail_status,
         lifetime_error_code,
         3,

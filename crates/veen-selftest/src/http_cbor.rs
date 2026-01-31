@@ -3,8 +3,8 @@ use serde::ser::SerializeMap;
 use serde::Serialize;
 
 use veen_hub::pipeline::{
-    AttachmentUpload, PowCookieEnvelope, StreamMessageWithProof, StreamResponse, SubmitRequest,
-    SubmitResponse,
+    AttachmentUpload, PowCookieEnvelope, StoredMessage, StreamMessageWithProof, StreamProof,
+    StreamReceipt, StreamResponse, SubmitRequest, SubmitResponse,
 };
 
 const DATA_PLANE_VERSION: u64 = 1;
@@ -70,15 +70,27 @@ pub fn decode_stream_proofs(bytes: &[u8]) -> Result<Vec<StreamMessageWithProof>>
         .items
         .into_iter()
         .map(|item| {
+            let receipt = item.receipt.ok_or_else(|| {
+                anyhow!(
+                    "stream response missing receipt for seq {}",
+                    item.stream_seq
+                )
+            })?;
+            let stored = StoredMessage::from_wire(
+                &response.stream,
+                item.stream_seq,
+                receipt.hub_ts,
+                &item.msg,
+            );
             Ok(StreamMessageWithProof {
-                message: item.msg,
-                receipt: item.receipt.ok_or_else(|| {
-                    anyhow!(
-                        "stream response missing receipt for seq {}",
-                        item.stream_seq
-                    )
-                })?,
-                proof: proof.clone(),
+                message: stored,
+                receipt: StreamReceipt {
+                    seq: receipt.stream_seq,
+                    leaf_hash: hex::encode(receipt.leaf_hash.as_bytes()),
+                    mmr_root: hex::encode(receipt.mmr_root.as_bytes()),
+                    hub_ts: receipt.hub_ts,
+                },
+                proof: StreamProof::from(proof.clone()),
             })
         })
         .collect()
