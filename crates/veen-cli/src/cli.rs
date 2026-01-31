@@ -11960,6 +11960,7 @@ mod tests {
             HubRole::Primary,
             HubConfigOverrides {
                 capability_gating_enabled: Some(false),
+                tooling_enabled: Some(true),
                 ..Default::default()
             },
         )
@@ -12171,6 +12172,7 @@ mod tests {
             HubRole::Primary,
             HubConfigOverrides {
                 capability_gating_enabled: Some(false),
+                tooling_enabled: Some(true),
                 ..Default::default()
             },
         )
@@ -12255,6 +12257,7 @@ mod tests {
             HubRole::Primary,
             HubConfigOverrides {
                 capability_gating_enabled: Some(false),
+                tooling_enabled: Some(true),
                 ..Default::default()
             },
         )
