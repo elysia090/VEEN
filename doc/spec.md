@@ -284,6 +284,28 @@ CHECKPOINTs MUST:
 - Allow deterministic reconstruction of MMR peaks and index cursors using the data directory’s peak snapshots and chunk summaries (CHECKPOINTs do not carry peaks).
 - Be reproducible from the same log prefix and configuration.
 
+#### 4.4.1 Verification and label transition rules
+Verifiers MUST recompute `mmr_root` for `label_curr` at `upto_seq` by reconstructing the MMR peaks for the
+log prefix `[1, upto_seq]`. Reconstruction MUST use the persisted peak snapshots and chunk summaries:
+1) locate the latest peak snapshot at or before `upto_seq`, 2) apply the indexed chunk summaries covering
+`(snapshot_seq, upto_seq]` to merge leaves into the peak set, and 3) fold the resulting peaks in canonical
+order to derive `mmr_root`. Any deviation from the MMR peak ordering or a mismatch between the computed
+root and `mmr_root` in the CHECKPOINT MUST be rejected.
+
+`label_prev` and `label_curr` define a deterministic label rotation boundary. A transition where
+`label_prev != label_curr` implies a label rotation and MUST coincide with an epoch change as defined in
+§3.2. Verifiers MUST validate that the checkpoint’s `epoch` matches the derived epoch for `label_curr` and
+that `label_prev` equals the label derived from the immediately preceding epoch (using the same
+`routing_key` and `stream_id`). A transition where `label_prev == label_curr` MUST mean no rotation and
+the `epoch` MUST equal the label’s current epoch; otherwise the CHECKPOINT is invalid.
+
+CHECKPOINTs MUST be rejected if:
+- The `epoch` does not match the derived epoch for `label_curr`, or `label_prev` does not match the
+  previous-epoch label when rotation is indicated.
+- `upto_seq` is less than the last accepted checkpoint for the same `label_curr`, or does not align with
+  the reconstructed prefix length from indexed chunks and peak snapshots.
+- The reconstructed `mmr_root` at `upto_seq` does not equal the checkpoint’s `mmr_root`.
+
 ### 4.5 Payload header (encrypted)
 CBOR(payload_hdr) map with integer keys:
 - `1`: `schema` (bstr32)
