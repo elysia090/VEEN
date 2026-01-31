@@ -524,6 +524,29 @@ Rules:
 - CapToken revocation MUST be modeled as an overlay stream and is enforced by clients/overlays in v0.0.1 (hubs do not enforce revocation).
 - Unknown keys are rejected in `cap_token`, `allow`, and `rate`.
 
+### 6.1 CapToken minting, distribution, and auditability
+
+- **Minting:** CapTokens are minted by an issuer holding `issuer_pk` and signing the `cap_token` to form the `sig_chain`.
+  Minting MUST be deterministic given the issuance inputs (`subject_pk`, `allow`, and `ver`) and MUST NOT depend on hidden
+  mutable state.
+- **Distribution:** CapTokens are distributed out-of-band to the subject (e.g., over a secure control plane or provisioning
+  channel). Hubs do not issue CapTokens in the data plane; they only verify `auth_ref` and the referenced CapToken.
+- **Persistence:** Clients/overlays MUST persist CapTokens (or an exact CBOR re-encoding) and the derived `auth_ref` so they
+  can re-submit `auth_ref` and reconstruct admission history. Hubs MUST persist a stable admission record keyed by
+  `auth_ref` with `issued_at` to enforce TTL deterministically.
+- **MSG binding:** MSGs carry only `auth_ref` (not the CapToken itself) once established; the CapToken MAY be supplied
+  out-of-band or via a separate authorization path, but the hub MUST bind the `auth_ref` to a unique CapToken
+  representation for its admission record.
+- **Replayable issuance artifacts:** To satisfy the replayability requirement, any CapToken issuance path (including
+  `/tooling/authorize`) MUST produce log-replayable artifacts that allow reconstruction of (a) the CapToken bytes,
+  (b) the derived `auth_ref`, and (c) the `issued_at` bound by the hub. At minimum, the hub MUST emit a receipt-like record
+  containing `hub_ts`, `auth_ref`, and a hash of the CapToken bytes, and MUST persist the CapToken bytes or a deterministic
+  encoding that can be replayed to the same hash.
+- **Operational constraints for `/tooling/authorize`:** If used, `/tooling/authorize` MUST be deterministic, MUST write to
+  the same append-only log domain as MSG admission (or an equivalently replayable log), and MUST produce a receipt that
+  anchors `issued_at`. Alternative issuance flows are permitted only if they generate the same replayable artifacts and
+  allow the hub to reconstruct `issued_at` solely from logs and checkpoints.
+
 ---
 
 ## 7. Core invariants (MUST)
