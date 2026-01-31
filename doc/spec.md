@@ -6,6 +6,24 @@ The v0.0.1 core is **fixed and immutable**. All optional features are expressed 
 
 ---
 
+## Table of contents
+
+- [0. Design intent (normative)](#0-design-intent-normative)
+- [1. Scope, versioning, and compatibility](#1-scope-versioning-and-compatibility)
+- [2. Terms and identifiers](#2-terms-and-identifiers)
+- [3. Global conventions (strict)](#3-global-conventions-strict)
+- [4. Core wire specification (v0.0.1)](#4-core-wire-specification-v001)
+- [5. MMR and proofs](#5-mmr-and-proofs)
+- [6. Capability tokens (CapToken)](#6-capability-tokens-captoken)
+- [7. Core invariants (MUST)](#7-core-invariants-must)
+- [8. Hub behavior (normative)](#8-hub-behavior-normative)
+- [9. Client behavior (normative)](#9-client-behavior-normative)
+- [10. Data plane API (minimal and strict)](#10-data-plane-api-minimal-and-strict)
+- [11. Overlay framework (v0.0.1)](#11-overlay-framework-v001)
+- [12. Operational requirements](#12-operational-requirements)
+- [13. Non-goals](#13-non-goals)
+- [14. Protocol limits (normative)](#14-protocol-limits-normative)
+
 ## 0. Design intent (normative)
 
 VEEN is an **ephemeral, verifiable, reproducible network fabric**.
