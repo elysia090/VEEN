@@ -12,15 +12,15 @@ use axum::routing::{get, post};
 use axum::{body::Bytes, Json, Router};
 use ciborium::ser::into_writer;
 use serde::de::{DeserializeOwned, Error as DeError, MapAccess, Visitor};
-use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::pipeline::{
-    AnchorRequest, BridgeIngestRequest, CapabilityError, HubPipeline, HubProfileDescriptor,
-    ObservabilityReport, SubmitError, SubmitRequest,
+    AnchorRequest, BridgeIngestRequest, CapabilityError, CheckpointResponse, HubPipeline,
+    HubProfileDescriptor, ObservabilityReport, ProofResponse, ReceiptResponse, SubmitError,
+    SubmitRequest,
 };
 use std::str::FromStr;
 use veen_core::label::StreamId;
@@ -143,44 +143,6 @@ struct SubmitRequestCbor {
     auth_ref: Option<String>,
     idem: Option<u64>,
     pow_cookie: Option<crate::pipeline::PowCookieEnvelope>,
-}
-
-struct SubmitResponseCbor {
-    ver: u64,
-    stream: String,
-    seq: u64,
-    mmr_root: String,
-    stored_attachments: Vec<crate::pipeline::StoredAttachment>,
-}
-
-struct StreamResponseCbor {
-    ver: u64,
-    stream: String,
-    from_seq: u64,
-    to_seq: Option<u64>,
-    items: Vec<StreamResponseItemCbor>,
-}
-
-struct StreamResponseItemCbor {
-    stream_seq: u64,
-    message: crate::pipeline::StoredMessage,
-    receipt: Option<crate::pipeline::StreamReceipt>,
-    proof: Option<crate::pipeline::StreamProof>,
-}
-
-struct ReceiptResponseCbor {
-    ver: u64,
-    receipt: crate::pipeline::StreamReceipt,
-}
-
-struct ProofResponseCbor {
-    ver: u64,
-    proof: crate::pipeline::StreamProof,
-}
-
-struct CheckpointResponseCbor {
-    ver: u64,
-    checkpoint: veen_core::wire::checkpoint::Checkpoint,
 }
 
 impl<'de> Deserialize<'de> for SubmitRequestCbor {
@@ -585,92 +547,6 @@ impl<'de> Deserialize<'de> for CheckpointRequest {
     }
 }
 
-impl Serialize for SubmitResponseCbor {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(5))?;
-        map.serialize_entry(&1u64, &self.ver)?;
-        map.serialize_entry(&2u64, &self.stream)?;
-        map.serialize_entry(&3u64, &self.seq)?;
-        map.serialize_entry(&4u64, &self.mmr_root)?;
-        map.serialize_entry(&5u64, &self.stored_attachments)?;
-        map.end()
-    }
-}
-
-impl Serialize for StreamResponseCbor {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry(&1u64, &self.ver)?;
-        map.serialize_entry(&2u64, &self.stream)?;
-        map.serialize_entry(&3u64, &self.from_seq)?;
-        if let Some(to_seq) = self.to_seq {
-            map.serialize_entry(&4u64, &to_seq)?;
-        }
-        map.serialize_entry(&5u64, &self.items)?;
-        map.end()
-    }
-}
-
-impl Serialize for StreamResponseItemCbor {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry(&1u64, &self.stream_seq)?;
-        map.serialize_entry(&2u64, &self.message)?;
-        if let Some(ref receipt) = self.receipt {
-            map.serialize_entry(&3u64, receipt)?;
-        }
-        if let Some(ref proof) = self.proof {
-            map.serialize_entry(&4u64, proof)?;
-        }
-        map.end()
-    }
-}
-
-impl Serialize for ReceiptResponseCbor {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(2))?;
-        map.serialize_entry(&1u64, &self.ver)?;
-        map.serialize_entry(&2u64, &self.receipt)?;
-        map.end()
-    }
-}
-
-impl Serialize for ProofResponseCbor {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(2))?;
-        map.serialize_entry(&1u64, &self.ver)?;
-        map.serialize_entry(&2u64, &self.proof)?;
-        map.end()
-    }
-}
-
-impl Serialize for CheckpointResponseCbor {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(2))?;
-        map.serialize_entry(&1u64, &self.ver)?;
-        map.serialize_entry(&2u64, &self.checkpoint)?;
-        map.end()
-    }
-}
-
 #[derive(Debug, Deserialize)]
 struct CommitWaitQuery {
     stream: String,
@@ -734,22 +610,13 @@ async fn handle_submit(State(pipeline): State<HubPipeline>, body: Bytes) -> impl
         pow_cookie: request.pow_cookie,
     };
     match pipeline.submit(submit_request).await {
-        Ok(response) => {
-            let response = SubmitResponseCbor {
-                ver: DATA_PLANE_VERSION,
-                stream: response.stream,
-                seq: response.seq,
-                mmr_root: response.mmr_root,
-                stored_attachments: response.stored_attachments,
-            };
-            match cbor_response(&response) {
-                Ok(response) => response,
-                Err(err) => {
-                    tracing::warn!(error = ?err, "serialising submit response failed");
-                    (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
-                }
+        Ok(response) => match cbor_response(&response) {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(error = ?err, "serialising submit response failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
             }
-        }
+        },
         Err(err) => {
             if let Some(cap_err) = err.downcast_ref::<CapabilityError>() {
                 tracing::warn!(error = ?cap_err, "submit failed");
@@ -828,47 +695,19 @@ async fn handle_stream(State(pipeline): State<HubPipeline>, body: Bytes) -> impl
         );
     }
     let from = query.cursor.unwrap_or(query.from.unwrap_or(0));
-    let with_proof = query.with_receipts.unwrap_or(false) || query.with_mmr_proof.unwrap_or(false);
+    let with_receipts = query.with_receipts.unwrap_or(false);
+    let with_mmr_proof = query.with_mmr_proof.unwrap_or(false);
     match pipeline
-        .stream(&query.stream, from, query.to, with_proof)
+        .stream(&query.stream, from, query.to, with_receipts, with_mmr_proof)
         .await
     {
-        Ok(messages) => {
-            let items = match messages {
-                crate::pipeline::StreamResponse::Messages(messages) => messages
-                    .into_iter()
-                    .map(|message| StreamResponseItemCbor {
-                        stream_seq: message.seq,
-                        message,
-                        receipt: None,
-                        proof: None,
-                    })
-                    .collect(),
-                crate::pipeline::StreamResponse::Proven(messages) => messages
-                    .into_iter()
-                    .map(|entry| StreamResponseItemCbor {
-                        stream_seq: entry.message.seq,
-                        message: entry.message,
-                        receipt: Some(entry.receipt),
-                        proof: Some(entry.proof),
-                    })
-                    .collect(),
-            };
-            let response = StreamResponseCbor {
-                ver: DATA_PLANE_VERSION,
-                stream: query.stream,
-                from_seq: from,
-                to_seq: query.to,
-                items,
-            };
-            match cbor_response(&response) {
-                Ok(response) => response,
-                Err(err) => {
-                    tracing::warn!(error = ?err, "serialising stream response failed");
-                    (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
-                }
+        Ok(response) => match cbor_response(&response) {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(error = ?err, "serialising stream response failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
             }
-        }
+        },
         Err(err) => {
             tracing::warn!(error = ?err, "stream request failed");
             (StatusCode::NOT_FOUND, err.to_string()).into_response()
@@ -895,9 +734,10 @@ async fn handle_receipt(State(pipeline): State<HubPipeline>, body: Bytes) -> imp
             .into_response();
     }
     match pipeline.receipt(&query.stream, query.seq).await {
-        Ok(receipt) => match cbor_response(&ReceiptResponseCbor {
+        Ok(receipt) => match cbor_response(&ReceiptResponse {
             ver: DATA_PLANE_VERSION,
             receipt,
+            server_version: None,
         }) {
             Ok(response) => response,
             Err(err) => {
@@ -931,9 +771,10 @@ async fn handle_proof(State(pipeline): State<HubPipeline>, body: Bytes) -> impl 
             .into_response();
     }
     match pipeline.proof(&query.stream, query.seq).await {
-        Ok(proof) => match cbor_response(&ProofResponseCbor {
+        Ok(proof) => match cbor_response(&ProofResponse {
             ver: DATA_PLANE_VERSION,
-            proof,
+            mmr_proof: proof,
+            server_version: None,
         }) {
             Ok(response) => response,
             Err(err) => {
@@ -967,9 +808,10 @@ async fn handle_checkpoint(State(pipeline): State<HubPipeline>, body: Bytes) -> 
             .into_response();
     }
     match pipeline.checkpoint(&query.stream, query.upto_seq).await {
-        Ok(Some(checkpoint)) => match cbor_response(&CheckpointResponseCbor {
+        Ok(Some(checkpoint)) => match cbor_response(&CheckpointResponse {
             ver: DATA_PLANE_VERSION,
             checkpoint,
+            server_version: None,
         }) {
             Ok(response) => response,
             Err(err) => {

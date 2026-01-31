@@ -210,7 +210,7 @@ async fn goals_core_pipeline() -> Result<()> {
     .context("submitting attachment message")?;
 
     let attachment_bundle_path =
-        message_bundle_path(hub_dir.path(), "core/att", attachment_response.seq);
+        message_bundle_path(hub_dir.path(), "core/att", attachment_response.receipt.seq);
     run_cli([
         "attachment",
         "verify",
@@ -592,16 +592,14 @@ async fn goals_pow_prefilter_enforced() -> Result<()> {
         .await
         .context("submitting message with pow cookie")?;
 
-    assert_eq!(success.stream, pow_stream);
-
     println!(
         "goal: POW.PREFILTER\n  stream: {}\n  pow.challenge: {}\n  pow.difficulty: {}\n  forbidden.status: {}\n  submit.seq: {}\n  submit.mmr: {}\n  pow.cookie: accepted",
         pow_stream,
         hex::encode(pow_challenge),
         pow_difficulty,
         forbidden_status,
-        success.seq,
-        success.mmr_root,
+        success.receipt.seq,
+        success.receipt.mmr_root,
     );
 
     runtime.shutdown().await?;
@@ -728,7 +726,7 @@ async fn goals_capability_gating_persists() -> Result<()> {
     let authorized = submit_cbor(&http, &submit_endpoint, &authorized_request)
         .await
         .context("submitting authorized message after restart")?;
-    assert_eq!(authorized.stream, "core/capped");
+    assert_eq!(authorized.receipt.seq, 1);
 
     let missing_auth_request = make_submit_request(
         "core/capped",
@@ -788,7 +786,7 @@ async fn goals_capability_gating_persists() -> Result<()> {
         auth_ref_hex,
         if capability_store_survived { "persisted" } else { "missing" },
         restart_runtime.listen_addr(),
-        authorized.seq,
+        authorized.receipt.seq,
         auth_errors,
     );
 
@@ -911,7 +909,7 @@ async fn goals_admission_bounds() -> Result<()> {
         let quota_response = submit_cbor(&http, &submit_endpoint, &quota_request)
             .await
             .with_context(|| format!("submitting quota message {index}"))?;
-        quota_seqs.push(quota_response.seq);
+        quota_seqs.push(quota_response.receipt.seq);
     }
 
     let quota_fail_request = make_submit_request(
@@ -1018,7 +1016,7 @@ async fn goals_admission_bounds() -> Result<()> {
         quota_seqs,
         quota_fail_status,
         quota_error_code,
-        lifetime_initial.seq,
+        lifetime_initial.receipt.seq,
         lifetime_fail_status,
         lifetime_error_code,
         3,

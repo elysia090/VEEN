@@ -21,7 +21,7 @@ use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use rand::{rngs::OsRng, RngCore};
 use reqwest::{Client as HttpClient, Response, Url};
-use serde::de::{DeserializeOwned, Error as DeError, MapAccess, Visitor};
+use serde::de::DeserializeOwned;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
@@ -96,7 +96,8 @@ use veen_hub::pipeline::{
     HubStreamState as RemoteHubStreamState, PowCookieEnvelope,
     StoredAttachment as RemoteStoredAttachment, StoredMessage as RemoteStoredMessage,
     StreamProof as RemoteStreamProof, StreamReceipt as RemoteStreamReceipt,
-    SubmitRequest as RemoteSubmitRequest, SubmitResponse as RemoteSubmitResponse,
+    StreamResponse as RemoteStreamResponse, SubmitRequest as RemoteSubmitRequest,
+    SubmitResponse as RemoteSubmitResponse,
 };
 
 const CLIENT_KEY_VERSION: u8 = 1;
@@ -4937,20 +4938,10 @@ fn render_send_outcome(outcome: &SendOutcome) {
         SendOutcomeDetail::Remote(detail) => {
             println!(
                 "sent message seq={} stream={} client_id={}",
-                detail.response.seq, detail.response.stream, outcome.client_id_hex
+                outcome.seq, outcome.stream, outcome.client_id_hex
             );
-            if detail.response.stored_attachments.is_empty() {
-                return;
-            }
-            println!(
-                "attachments stored: {}",
-                detail.response.stored_attachments.len()
-            );
-            for attachment in &detail.response.stored_attachments {
-                println!(
-                    "  {} ({} bytes) -> {}",
-                    attachment.name, attachment.size, attachment.digest
-                );
+            if let Some(ref server_version) = detail.response.server_version {
+                println!("hub_version: {server_version}");
             }
         }
     }
@@ -5290,29 +5281,24 @@ async fn send_message_remote(client: HubHttpClient, args: SendArgs) -> Result<Se
     let mut cbor_body = Vec::new();
     ciborium::ser::into_writer(&cbor_request, &mut cbor_body)
         .context("encoding submit request as CBOR")?;
-    let cbor_response: SubmitCborResponse = client
+    let response: RemoteSubmitResponse = client
         .post_cbor("/v1/submit", &cbor_body)
         .await
         .context("submitting message to hub")?;
-    if cbor_response.ver != DATA_PLANE_VERSION {
+    if response.ver != DATA_PLANE_VERSION {
         bail!(
             "hub returned unsupported submit response version {}",
-            cbor_response.ver
+            response.ver
         );
     }
-    let response = RemoteSubmitResponse {
-        stream: cbor_response.stream,
-        seq: cbor_response.seq,
-        mmr_root: cbor_response.mmr_root,
-        stored_attachments: cbor_response.stored_attachments,
-    };
 
     let send_ts = current_unix_timestamp()?;
-    update_client_label_send_state(&args.client, &args.stream, response.seq, send_ts).await?;
+    update_client_label_send_state(&args.client, &args.stream, response.receipt.seq, send_ts)
+        .await?;
 
     Ok(SendOutcome {
         stream: args.stream,
-        seq: response.seq,
+        seq: response.receipt.seq,
         client_id_hex,
         detail: SendOutcomeDetail::Remote(RemoteSendDetail { response }),
     })
@@ -5610,29 +5596,36 @@ async fn handle_stream_remote(client: HubHttpClient, args: StreamArgs) -> Result
     }
 
     if args.with_proof {
-        for item in response.items {
-            let message = item.message;
-            let receipt = item
-                .receipt
-                .ok_or_else(|| anyhow!("hub response missing receipt"))?;
-            let proof_wire = item
-                .proof
-                .ok_or_else(|| anyhow!("hub response missing proof"))?;
-            let proof = proof_wire
-                .clone()
-                .try_into_mmr()
-                .context("decoding stream proof")?;
+        let proof_wire = response
+            .mmr_proof
+            .clone()
+            .ok_or_else(|| anyhow!("hub response missing mmr proof"))?;
+        let proof = proof_wire
+            .clone()
+            .try_into_mmr()
+            .context("decoding stream proof")?;
+        let last_index = response.items.len().saturating_sub(1);
+        for (index, item) in response.items.into_iter().enumerate() {
+            let message = StoredMessage::from(item.msg);
+            let receipt = StreamReceipt::from(
+                item.receipt
+                    .ok_or_else(|| anyhow!("hub response missing receipt"))?,
+            );
             print_stream_message(&message);
-            validate_stream_proof(&message, &receipt, &proof)?;
+            if index == last_index {
+                validate_stream_proof(&message, &receipt, &proof)?;
+            }
             print_stream_receipt(&receipt);
-            print_stream_proof(&proof_wire)?;
+            if index == last_index {
+                print_stream_proof(&proof_wire)?;
+            }
             println!("---");
         }
         return Ok(());
     }
 
     for item in response.items {
-        let message = item.message;
+        let message = StoredMessage::from(item.msg);
         print_stream_message(&message);
         println!("---");
     }
@@ -5646,7 +5639,7 @@ async fn fetch_stream_cbor(
     from: u64,
     to: Option<u64>,
     with_proof: bool,
-) -> Result<StreamCborResponse> {
+) -> Result<RemoteStreamResponse> {
     let request = StreamCborRequest {
         stream,
         from,
@@ -5657,7 +5650,7 @@ async fn fetch_stream_cbor(
     let mut cbor_body = Vec::new();
     ciborium::ser::into_writer(&request, &mut cbor_body)
         .context("encoding stream request as CBOR")?;
-    let response: StreamCborResponse = client
+    let response: RemoteStreamResponse = client
         .post_cbor("/v1/stream", &cbor_body)
         .await
         .context("fetching stream messages")?;
@@ -6513,8 +6506,19 @@ async fn execute_federate_mirror_run(
         }
 
         let mut progressed = false;
-        for item in response.items {
-            let message = item.message;
+        let last_index = response.items.len().saturating_sub(1);
+        let proof_wire = response.mmr_proof.clone();
+        let proof = match proof_wire.as_ref() {
+            Some(proof_wire) => Some(
+                proof_wire
+                    .clone()
+                    .try_into_mmr()
+                    .context("decoding stream proof")?,
+            ),
+            None => None,
+        };
+        for (index, item) in response.items.into_iter().enumerate() {
+            let message = StoredMessage::from(item.msg);
             if message.seq < next_seq {
                 continue;
             }
@@ -6530,17 +6534,16 @@ async fn execute_federate_mirror_run(
                 );
             }
 
-            let receipt = item
-                .receipt
-                .ok_or_else(|| anyhow!("hub response missing receipt"))?;
-            let proof_wire = item
-                .proof
-                .ok_or_else(|| anyhow!("hub response missing proof"))?;
-            let proof = proof_wire
-                .clone()
-                .try_into_mmr()
-                .context("decoding stream proof")?;
-            validate_stream_proof(&message, &receipt, &proof)?;
+            let receipt = StreamReceipt::from(
+                item.receipt
+                    .ok_or_else(|| anyhow!("hub response missing receipt"))?,
+            );
+            if index == last_index {
+                let proof = proof
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("hub response missing mmr proof"))?;
+                validate_stream_proof(&message, &receipt, proof)?;
+            }
 
             let payload = encode_federation_mirror_payload(
                 &source_identifier,
@@ -7894,16 +7897,15 @@ async fn load_stream_messages(
         }
         HubReference::Remote(client) => {
             let response = fetch_stream_cbor(&client, stream, from_seq, None, false).await?;
-            let tip = response
-                .items
-                .last()
-                .map(|item| item.message.seq)
-                .unwrap_or_else(|| from_seq.saturating_sub(1));
-            let messages = response
+            let messages: Vec<StoredMessage> = response
                 .items
                 .into_iter()
-                .map(|item| item.message)
+                .map(|item| StoredMessage::from(item.msg))
                 .collect();
+            let tip = messages
+                .last()
+                .map(|message| message.seq)
+                .unwrap_or_else(|| from_seq.saturating_sub(1));
             Ok((messages, tip))
         }
     }
@@ -8194,26 +8196,29 @@ async fn fetch_remote_operation_receipt(
     stream: &str,
     seq: u64,
 ) -> Result<StreamReceipt> {
-    let response = fetch_stream_cbor(client, stream, seq, None, true)
+    let response = fetch_stream_cbor(client, stream, seq, Some(seq), true)
         .await
         .context("fetching stream receipt")?;
-    let entry = response
-        .items
-        .into_iter()
-        .find(|entry| entry.message.seq == seq)
-        .ok_or_else(|| anyhow!("hub did not return receipt for {}#{}", stream, seq))?;
-
-    let stored_message = entry.message;
-    let receipt = entry
-        .receipt
-        .ok_or_else(|| anyhow!("hub response missing receipt"))?;
-    let proof_wire = entry
-        .proof
+    let proof_wire = response
+        .mmr_proof
+        .clone()
         .ok_or_else(|| anyhow!("hub response missing proof"))?;
     let proof = proof_wire
         .clone()
         .try_into_mmr()
         .context("decoding stream proof")?;
+    let entry = response
+        .items
+        .into_iter()
+        .find(|entry| entry.msg.seq == seq)
+        .ok_or_else(|| anyhow!("hub did not return receipt for {}#{}", stream, seq))?;
+
+    let stored_message = StoredMessage::from(entry.msg);
+    let receipt = StreamReceipt::from(
+        entry
+            .receipt
+            .ok_or_else(|| anyhow!("hub response missing receipt"))?,
+    );
     validate_stream_proof(&stored_message, &receipt, &proof)?;
     Ok(receipt)
 }
@@ -10151,7 +10156,7 @@ async fn fetch_stream_messages(
                 Ok(response) => Ok(response
                     .items
                     .into_iter()
-                    .map(|item| item.message)
+                    .map(|item| StoredMessage::from(item.msg))
                     .collect()),
                 Err(err) => {
                     if let Some(response_err) = err.downcast_ref::<HubResponseError>() {
@@ -11193,7 +11198,6 @@ async fn hub_reference_from_locator(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::bail;
     use ciborium::de::from_reader;
     use ciborium::ser::into_writer;
     use clap::Parser;
@@ -11215,7 +11219,6 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::sleep;
     use veen_core::wire::types::{MmrRoot, Signature64};
-    use veen_hub::pipeline::StreamResponse;
     use veen_hub::runtime::HubRuntime;
     use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 
@@ -11531,12 +11534,10 @@ mod tests {
                         assert_eq!(req.uri().path(), "/v1/submit");
                         let body = to_bytes(req.body_mut()).await.unwrap().to_vec();
                         tx.send(body).await.unwrap();
-                        let response = SubmitCborResponse {
+                        let response = RemoteSubmitResponse {
                             ver: DATA_PLANE_VERSION,
-                            stream: response.stream.clone(),
-                            seq: response.seq,
-                            mmr_root: response.mmr_root.clone(),
-                            stored_attachments: response.stored_attachments.clone(),
+                            receipt: response.receipt.clone(),
+                            server_version: response.server_version.clone(),
                         };
                         let mut cbor = Vec::new();
                         ciborium::ser::into_writer(&response, &mut cbor).unwrap();
@@ -12093,10 +12094,14 @@ mod tests {
         .await?;
 
         let response = RemoteSubmitResponse {
-            stream: "pow".to_string(),
-            seq: 1,
-            mmr_root: "root".to_string(),
-            stored_attachments: Vec::new(),
+            ver: DATA_PLANE_VERSION,
+            receipt: RemoteStreamReceipt {
+                seq: 1,
+                leaf_hash: "leaf".to_string(),
+                mmr_root: "root".to_string(),
+                hub_ts: 0,
+            },
+            server_version: None,
         };
         let (url, mut body_rx, server) = spawn_submit_capture_server(response).await?;
 
@@ -12140,10 +12145,14 @@ mod tests {
         .await?;
 
         let response = RemoteSubmitResponse {
-            stream: "pow".to_string(),
-            seq: 7,
-            mmr_root: "root".to_string(),
-            stored_attachments: Vec::new(),
+            ver: DATA_PLANE_VERSION,
+            receipt: RemoteStreamReceipt {
+                seq: 7,
+                leaf_hash: "leaf".to_string(),
+                mmr_root: "root".to_string(),
+                hub_ts: 0,
+            },
+            server_version: None,
         };
         let (url, mut body_rx, server) = spawn_submit_capture_server(response).await?;
 
@@ -12277,26 +12286,27 @@ mod tests {
         })
         .await?;
 
-        let mut proven = match runtime.pipeline().stream("proofs", 0, None, true).await? {
-            StreamResponse::Proven(items) => items,
-            StreamResponse::Messages(_) => bail!("expected proofs in stream response"),
-        };
+        let response = runtime
+            .pipeline()
+            .stream("proofs", 0, None, true, true)
+            .await?;
+        assert_eq!(response.items.len(), 1);
+        let original = response.items.into_iter().next().expect("message");
+        let proof_wire = response
+            .mmr_proof
+            .ok_or_else(|| anyhow!("missing mmr proof"))?;
+        let proof = proof_wire
+            .clone()
+            .try_into_mmr()
+            .context("decoding stream proof")?;
 
-        assert_eq!(proven.len(), 1);
-        let original = proven.pop().expect("message");
-
-        let mut tampered_receipt = StreamReceipt::from(original.receipt.clone());
+        let mut tampered_receipt = original.receipt.ok_or_else(|| anyhow!("missing receipt"))?;
         let mut root_bytes = hex::decode(&tampered_receipt.mmr_root)?;
         root_bytes[0] ^= 0xFF;
         tampered_receipt.mmr_root = hex::encode(root_bytes);
 
-        let message: StoredMessage = original.message.into();
-        let receipt = tampered_receipt;
-        let proof = original
-            .proof
-            .clone()
-            .try_into_mmr()
-            .context("decoding stream proof")?;
+        let message: StoredMessage = original.msg.into();
+        let receipt: StreamReceipt = tampered_receipt.into();
         let err =
             validate_stream_proof(&message, &receipt, &proof).expect_err("tampered proof fails");
         assert!(err.to_string().contains("mmr proof verification failed"));
@@ -13164,38 +13174,12 @@ struct SubmitCborRequest<'a> {
 }
 
 #[derive(Debug)]
-struct SubmitCborResponse {
-    ver: u64,
-    stream: String,
-    seq: u64,
-    mmr_root: String,
-    stored_attachments: Vec<RemoteStoredAttachment>,
-}
-
-#[derive(Debug)]
 struct StreamCborRequest<'a> {
     stream: &'a str,
     from: u64,
     to: Option<u64>,
     with_receipts: bool,
     with_mmr_proof: bool,
-}
-
-#[derive(Debug)]
-struct StreamCborResponse {
-    ver: u64,
-    stream: String,
-    from_seq: u64,
-    to_seq: Option<u64>,
-    items: Vec<StreamCborItem>,
-}
-
-#[derive(Debug)]
-struct StreamCborItem {
-    stream_seq: u64,
-    message: StoredMessage,
-    receipt: Option<StreamReceipt>,
-    proof: Option<RemoteStreamProof>,
 }
 
 impl Serialize for SubmitCborRequest<'_> {
@@ -13224,106 +13208,6 @@ impl Serialize for SubmitCborRequest<'_> {
     }
 }
 
-impl Serialize for SubmitCborResponse {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut map = serializer.serialize_map(Some(5))?;
-        map.serialize_entry(&1u64, &self.ver)?;
-        map.serialize_entry(&2u64, &self.stream)?;
-        map.serialize_entry(&3u64, &self.seq)?;
-        map.serialize_entry(&4u64, &self.mmr_root)?;
-        map.serialize_entry(&5u64, &self.stored_attachments)?;
-        map.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for SubmitCborResponse {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct SubmitResponseVisitor;
-
-        impl<'de> Visitor<'de> for SubmitResponseVisitor {
-            type Value = SubmitCborResponse;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("submit response CBOR map with integer keys")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut ver = None;
-                let mut stream = None;
-                let mut seq = None;
-                let mut mmr_root = None;
-                let mut stored_attachments = None;
-
-                while let Some(key) = map.next_key::<u64>()? {
-                    match key {
-                        1 => {
-                            if ver.is_some() {
-                                return Err(DeError::duplicate_field("ver"));
-                            }
-                            ver = Some(map.next_value()?);
-                        }
-                        2 => {
-                            if stream.is_some() {
-                                return Err(DeError::duplicate_field("stream"));
-                            }
-                            stream = Some(map.next_value()?);
-                        }
-                        3 => {
-                            if seq.is_some() {
-                                return Err(DeError::duplicate_field("seq"));
-                            }
-                            seq = Some(map.next_value()?);
-                        }
-                        4 => {
-                            if mmr_root.is_some() {
-                                return Err(DeError::duplicate_field("mmr_root"));
-                            }
-                            mmr_root = Some(map.next_value()?);
-                        }
-                        5 => {
-                            if stored_attachments.is_some() {
-                                return Err(DeError::duplicate_field("stored_attachments"));
-                            }
-                            stored_attachments = Some(map.next_value()?);
-                        }
-                        _ => {
-                            return Err(DeError::custom(format!(
-                                "unknown submit response key {key}"
-                            )));
-                        }
-                    }
-                }
-
-                let ver = ver.ok_or_else(|| DeError::missing_field("ver"))?;
-                let stream = stream.ok_or_else(|| DeError::missing_field("stream"))?;
-                let seq = seq.ok_or_else(|| DeError::missing_field("seq"))?;
-                let mmr_root = mmr_root.ok_or_else(|| DeError::missing_field("mmr_root"))?;
-                let stored_attachments = stored_attachments
-                    .ok_or_else(|| DeError::missing_field("stored_attachments"))?;
-
-                Ok(SubmitCborResponse {
-                    ver,
-                    stream,
-                    seq,
-                    mmr_root,
-                    stored_attachments,
-                })
-            }
-        }
-
-        deserializer.deserialize_map(SubmitResponseVisitor)
-    }
-}
-
 impl Serialize for StreamCborRequest<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -13339,160 +13223,6 @@ impl Serialize for StreamCborRequest<'_> {
         map.serialize_entry(&7u64, &self.with_receipts)?;
         map.serialize_entry(&8u64, &self.with_mmr_proof)?;
         map.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for StreamCborResponse {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct StreamResponseVisitor;
-
-        impl<'de> Visitor<'de> for StreamResponseVisitor {
-            type Value = StreamCborResponse;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("stream response CBOR map with integer keys")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut ver = None;
-                let mut stream = None;
-                let mut from_seq = None;
-                let mut to_seq = None;
-                let mut items = None;
-
-                while let Some(key) = map.next_key::<u64>()? {
-                    match key {
-                        1 => {
-                            if ver.is_some() {
-                                return Err(DeError::duplicate_field("ver"));
-                            }
-                            ver = Some(map.next_value()?);
-                        }
-                        2 => {
-                            if stream.is_some() {
-                                return Err(DeError::duplicate_field("stream"));
-                            }
-                            stream = Some(map.next_value()?);
-                        }
-                        3 => {
-                            if from_seq.is_some() {
-                                return Err(DeError::duplicate_field("from_seq"));
-                            }
-                            from_seq = Some(map.next_value()?);
-                        }
-                        4 => {
-                            if to_seq.is_some() {
-                                return Err(DeError::duplicate_field("to_seq"));
-                            }
-                            to_seq = Some(map.next_value()?);
-                        }
-                        5 => {
-                            if items.is_some() {
-                                return Err(DeError::duplicate_field("items"));
-                            }
-                            items = Some(map.next_value()?);
-                        }
-                        _ => {
-                            return Err(DeError::custom(format!(
-                                "unknown stream response key {key}"
-                            )));
-                        }
-                    }
-                }
-
-                let ver = ver.ok_or_else(|| DeError::missing_field("ver"))?;
-                let stream = stream.ok_or_else(|| DeError::missing_field("stream"))?;
-                let from_seq = from_seq.ok_or_else(|| DeError::missing_field("from_seq"))?;
-                let items = items.ok_or_else(|| DeError::missing_field("items"))?;
-
-                Ok(StreamCborResponse {
-                    ver,
-                    stream,
-                    from_seq,
-                    to_seq,
-                    items,
-                })
-            }
-        }
-
-        deserializer.deserialize_map(StreamResponseVisitor)
-    }
-}
-
-impl<'de> Deserialize<'de> for StreamCborItem {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct StreamItemVisitor;
-
-        impl<'de> Visitor<'de> for StreamItemVisitor {
-            type Value = StreamCborItem;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("stream item CBOR map with integer keys")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut stream_seq = None;
-                let mut message = None;
-                let mut receipt = None;
-                let mut proof = None;
-
-                while let Some(key) = map.next_key::<u64>()? {
-                    match key {
-                        1 => {
-                            if stream_seq.is_some() {
-                                return Err(DeError::duplicate_field("stream_seq"));
-                            }
-                            stream_seq = Some(map.next_value()?);
-                        }
-                        2 => {
-                            if message.is_some() {
-                                return Err(DeError::duplicate_field("message"));
-                            }
-                            message = Some(map.next_value()?);
-                        }
-                        3 => {
-                            if receipt.is_some() {
-                                return Err(DeError::duplicate_field("receipt"));
-                            }
-                            receipt = Some(map.next_value()?);
-                        }
-                        4 => {
-                            if proof.is_some() {
-                                return Err(DeError::duplicate_field("proof"));
-                            }
-                            proof = Some(map.next_value()?);
-                        }
-                        _ => {
-                            return Err(DeError::custom(format!("unknown stream item key {key}")));
-                        }
-                    }
-                }
-
-                let stream_seq = stream_seq.ok_or_else(|| DeError::missing_field("stream_seq"))?;
-                let message = message.ok_or_else(|| DeError::missing_field("message"))?;
-
-                Ok(StreamCborItem {
-                    stream_seq,
-                    message,
-                    receipt,
-                    proof,
-                })
-            }
-        }
-
-        deserializer.deserialize_map(StreamItemVisitor)
     }
 }
 

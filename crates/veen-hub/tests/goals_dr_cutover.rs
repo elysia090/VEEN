@@ -9,16 +9,13 @@ use serde_bytes::ByteBuf;
 use tempfile::TempDir;
 use tokio::fs;
 
-use veen_hub::pipeline::{
-    BridgeIngestRequest, BridgeIngestResponse, StreamMessageWithProof, SubmitRequest,
-};
+use veen_hub::pipeline::{BridgeIngestRequest, BridgeIngestResponse, SubmitRequest};
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 mod support;
 use support::{
     client_id_hex, decode_stream_response_cbor, decode_submit_response_cbor,
     encode_stream_request_cbor, encode_submit_msg, encode_submit_request_cbor,
-    stream_items_to_proofs,
 };
 
 /// Scenario acceptance covering disaster recovery cutover with replicated hubs.
@@ -79,7 +76,7 @@ async fn goals_dr_cutover() -> Result<()> {
     let primary_base = format!("http://{}", primary_runtime.listen_addr());
     let replica_base = format!("http://{}", replica_runtime.listen_addr());
 
-    let mut submit_roots = Vec::new();
+    let mut submit_receipts = Vec::new();
     let mut bridged_receipts = 0usize;
     for idx in 0..3u8 {
         let body = serde_json::json!({"text": format!("primary-{idx}")});
@@ -115,7 +112,7 @@ async fn goals_dr_cutover() -> Result<()> {
                 .await
                 .context("reading primary submit response")?,
         )?;
-        submit_roots.push(response);
+        submit_receipts.push(response.receipt);
     }
 
     let stream_body = encode_stream_request_cbor(stream, 1, None, true)?;
@@ -133,18 +130,21 @@ async fn goals_dr_cutover() -> Result<()> {
             .await
             .context("reading primary stream response")?,
     )?;
-    let proven: Vec<StreamMessageWithProof> = stream_items_to_proofs(response.items)?;
+    let proven = response.items;
     ensure!(
-        proven.len() == submit_roots.len(),
+        proven.len() == submit_receipts.len(),
         "expected proven messages to match submissions"
     );
 
-    for message in proven {
+    for item in proven {
+        let receipt = item
+            .receipt
+            .ok_or_else(|| anyhow!("stream response missing receipt for message"))?;
         let ingest: BridgeIngestResponse = http
             .post(format!("{}/tooling/bridge", replica_base))
             .json(&BridgeIngestRequest {
-                message: message.message.clone(),
-                expected_mmr_root: message.receipt.mmr_root.clone(),
+                message: item.msg.clone(),
+                expected_mmr_root: receipt.mmr_root.clone(),
             })
             .send()
             .await
@@ -155,7 +155,7 @@ async fn goals_dr_cutover() -> Result<()> {
             .await
             .context("decoding bridge ingest response")?;
         ensure!(
-            ingest.mmr_root == message.receipt.mmr_root,
+            ingest.mmr_root == receipt.mmr_root,
             "replica computed unexpected mmr root"
         );
         bridged_receipts += 1;
@@ -251,7 +251,7 @@ async fn goals_dr_cutover() -> Result<()> {
             .context("reading promoted submission response")?,
     )?;
     ensure!(
-        promote_response.seq as usize == submit_roots.len() + 1,
+        promote_response.receipt.seq as usize == submit_receipts.len() + 1,
         "promoted hub did not continue sequence"
     );
 
@@ -271,7 +271,7 @@ async fn goals_dr_cutover() -> Result<()> {
         .cloned()
         .ok_or_else(|| anyhow!("promoted hub missing mmr root"))?;
     ensure!(
-        promoted_root == promote_response.mmr_root,
+        promoted_root == promote_response.receipt.mmr_root,
         "promoted hub reported inconsistent mmr root"
     );
 
@@ -281,7 +281,7 @@ async fn goals_dr_cutover() -> Result<()> {
         replica_addr,
         bridged_receipts,
         shared_mmr_root_before_cutover: primary_root.clone(),
-        post_promotion_seq: promote_response.seq,
+        post_promotion_seq: promote_response.receipt.seq,
         post_promotion_root: promoted_root.clone(),
     });
 

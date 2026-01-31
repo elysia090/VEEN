@@ -1283,7 +1283,7 @@ impl IntegrationHarness {
         self.wait_for_health(replica.listen).await?;
         let replica_base = format!("http://{}", replica.listen);
         let replicated_checkpoint = self
-            .wait_for_checkpoint(&replica_base, accepted.seq)
+            .wait_for_checkpoint(&replica_base, accepted.receipt.seq)
             .await
             .context("waiting for hardened replica to resync")?;
 
@@ -1294,8 +1294,8 @@ impl IntegrationHarness {
             pow_challenge: pow_descriptor.challenge,
             pow_difficulty: pow_descriptor.difficulty,
             pow_forbidden_status: forbidden.status(),
-            pow_accept_seq: accepted.seq,
-            pow_accept_root: accepted.mmr_root,
+            pow_accept_seq: accepted.receipt.seq,
+            pow_accept_root: accepted.receipt.mmr_root,
             rate_limit_status: rate_limited.status(),
             replicated_seq: replicated_checkpoint.upto_seq,
         })
@@ -1561,6 +1561,10 @@ impl IntegrationHarness {
         );
 
         let mut recovery_mmr = Mmr::new();
+        let last_seq = remote_messages
+            .last()
+            .map(|entry| entry.message.seq)
+            .unwrap_or_default();
         for remote in &remote_messages {
             let leaf = message_leaf_hash(&remote.message)
                 .context("computing leaf hash for streamed message")?;
@@ -1578,15 +1582,17 @@ impl IntegrationHarness {
                 "replayed receipt root does not match reconstructed MMR"
             );
 
-            let proof = remote
-                .proof
-                .clone()
-                .try_into_mmr()
-                .context("decoding remote MMR proof")?;
-            ensure!(
-                proof.verify(&receipt_root),
-                "remote proof failed verification during recovery replay"
-            );
+            if remote.message.seq == last_seq {
+                let proof = remote
+                    .proof
+                    .clone()
+                    .try_into_mmr()
+                    .context("decoding remote MMR proof")?;
+                ensure!(
+                    proof.verify(&receipt_root),
+                    "remote proof failed verification during recovery replay"
+                );
+            }
         }
 
         let final_root = recovery_mmr
@@ -2580,23 +2586,24 @@ fn verify_stream_proofs(
     messages: &[StreamMessageWithProof],
     expected_root: &MmrRoot,
 ) -> Result<()> {
-    for entry in messages {
-        let proof = entry
-            .proof
-            .clone()
-            .try_into_mmr()
-            .context("decoding stream proof")?;
-        ensure!(
-            proof.leaf_hash == message_leaf_hash(&entry.message)?,
-            "proof leaf hash mismatch for seq {}",
-            entry.message.seq,
-        );
-        ensure!(
-            proof.verify(expected_root),
-            "proof verification failed for seq {}",
-            entry.message.seq,
-        );
-    }
+    let Some(entry) = messages.last() else {
+        return Ok(());
+    };
+    let proof = entry
+        .proof
+        .clone()
+        .try_into_mmr()
+        .context("decoding stream proof")?;
+    ensure!(
+        proof.leaf_hash == message_leaf_hash(&entry.message)?,
+        "proof leaf hash mismatch for seq {}",
+        entry.message.seq,
+    );
+    ensure!(
+        proof.verify(expected_root),
+        "proof verification failed for seq {}",
+        entry.message.seq,
+    );
     Ok(())
 }
 

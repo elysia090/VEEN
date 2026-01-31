@@ -1,13 +1,10 @@
-use std::fmt;
-
 use anyhow::{anyhow, Context, Result};
-use serde::de::{Error as DeError, MapAccess, Visitor};
 use serde::ser::SerializeMap;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use veen_hub::pipeline::{
-    AttachmentUpload, PowCookieEnvelope, StoredAttachment, StoredMessage, StreamMessageWithProof,
-    StreamProof, StreamReceipt, SubmitRequest, SubmitResponse,
+    AttachmentUpload, PowCookieEnvelope, StreamMessageWithProof, StreamResponse, SubmitRequest,
+    SubmitResponse,
 };
 
 const DATA_PLANE_VERSION: u64 = 1;
@@ -29,7 +26,7 @@ pub fn encode_submit_request(request: &SubmitRequest) -> Result<Vec<u8>> {
 
 pub fn decode_submit_response(bytes: &[u8]) -> Result<SubmitResponse> {
     let mut cursor = std::io::Cursor::new(bytes);
-    let response: SubmitResponseCbor =
+    let response: SubmitResponse =
         ciborium::de::from_reader(&mut cursor).context("decoding submit response")?;
     if response.ver != DATA_PLANE_VERSION {
         return Err(anyhow!(
@@ -37,12 +34,7 @@ pub fn decode_submit_response(bytes: &[u8]) -> Result<SubmitResponse> {
             response.ver
         ));
     }
-    Ok(SubmitResponse {
-        stream: response.stream,
-        seq: response.seq,
-        mmr_root: response.mmr_root,
-        stored_attachments: response.stored_attachments,
-    })
+    Ok(response)
 }
 
 pub fn encode_stream_request(stream: &str, from: u64, to: Option<u64>) -> Result<Vec<u8>> {
@@ -60,7 +52,7 @@ pub fn encode_stream_request(stream: &str, from: u64, to: Option<u64>) -> Result
 
 pub fn decode_stream_proofs(bytes: &[u8]) -> Result<Vec<StreamMessageWithProof>> {
     let mut cursor = std::io::Cursor::new(bytes);
-    let response: StreamResponseCbor =
+    let response: StreamResponse =
         ciborium::de::from_reader(&mut cursor).context("decoding stream response")?;
     if response.ver != DATA_PLANE_VERSION {
         return Err(anyhow!(
@@ -68,21 +60,25 @@ pub fn decode_stream_proofs(bytes: &[u8]) -> Result<Vec<StreamMessageWithProof>>
             response.ver
         ));
     }
+    if response.items.is_empty() {
+        return Ok(Vec::new());
+    }
+    let proof = response
+        .mmr_proof
+        .ok_or_else(|| anyhow!("stream response missing mmr proof"))?;
     response
         .items
         .into_iter()
         .map(|item| {
             Ok(StreamMessageWithProof {
-                message: item.message,
+                message: item.msg,
                 receipt: item.receipt.ok_or_else(|| {
                     anyhow!(
                         "stream response missing receipt for seq {}",
                         item.stream_seq
                     )
                 })?,
-                proof: item.proof.ok_or_else(|| {
-                    anyhow!("stream response missing proof for seq {}", item.stream_seq)
-                })?,
+                proof: proof.clone(),
             })
         })
         .collect()
@@ -104,32 +100,6 @@ struct StreamRequestCbor<'a> {
     to: Option<u64>,
     with_receipts: bool,
     with_mmr_proof: bool,
-}
-
-#[derive(Debug)]
-struct SubmitResponseCbor {
-    ver: u64,
-    stream: String,
-    seq: u64,
-    mmr_root: String,
-    stored_attachments: Vec<StoredAttachment>,
-}
-
-#[derive(Debug)]
-struct StreamResponseCbor {
-    ver: u64,
-    stream: String,
-    from_seq: u64,
-    to_seq: Option<u64>,
-    items: Vec<StreamItemCbor>,
-}
-
-#[derive(Debug)]
-struct StreamItemCbor {
-    stream_seq: u64,
-    message: StoredMessage,
-    receipt: Option<StreamReceipt>,
-    proof: Option<StreamProof>,
 }
 
 impl Serialize for SubmitRequestCbor<'_> {
@@ -173,244 +143,5 @@ impl Serialize for StreamRequestCbor<'_> {
         map.serialize_entry(&7u64, &self.with_receipts)?;
         map.serialize_entry(&8u64, &self.with_mmr_proof)?;
         map.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for SubmitResponseCbor {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct SubmitResponseVisitor;
-
-        impl<'de> Visitor<'de> for SubmitResponseVisitor {
-            type Value = SubmitResponseCbor;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("submit response CBOR map with integer keys")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut ver = None;
-                let mut stream = None;
-                let mut seq = None;
-                let mut mmr_root = None;
-                let mut stored_attachments = None;
-
-                while let Some(key) = map.next_key::<u64>()? {
-                    match key {
-                        1 => {
-                            if ver.is_some() {
-                                return Err(DeError::duplicate_field("ver"));
-                            }
-                            ver = Some(map.next_value()?);
-                        }
-                        2 => {
-                            if stream.is_some() {
-                                return Err(DeError::duplicate_field("stream"));
-                            }
-                            stream = Some(map.next_value()?);
-                        }
-                        3 => {
-                            if seq.is_some() {
-                                return Err(DeError::duplicate_field("seq"));
-                            }
-                            seq = Some(map.next_value()?);
-                        }
-                        4 => {
-                            if mmr_root.is_some() {
-                                return Err(DeError::duplicate_field("mmr_root"));
-                            }
-                            mmr_root = Some(map.next_value()?);
-                        }
-                        5 => {
-                            if stored_attachments.is_some() {
-                                return Err(DeError::duplicate_field("stored_attachments"));
-                            }
-                            stored_attachments = Some(map.next_value()?);
-                        }
-                        _ => {
-                            return Err(DeError::custom(format!(
-                                "unknown submit response key {key}"
-                            )));
-                        }
-                    }
-                }
-
-                let ver = ver.ok_or_else(|| DeError::missing_field("ver"))?;
-                let stream = stream.ok_or_else(|| DeError::missing_field("stream"))?;
-                let seq = seq.ok_or_else(|| DeError::missing_field("seq"))?;
-                let mmr_root = mmr_root.ok_or_else(|| DeError::missing_field("mmr_root"))?;
-                let stored_attachments = stored_attachments
-                    .ok_or_else(|| DeError::missing_field("stored_attachments"))?;
-
-                Ok(SubmitResponseCbor {
-                    ver,
-                    stream,
-                    seq,
-                    mmr_root,
-                    stored_attachments,
-                })
-            }
-        }
-
-        deserializer.deserialize_map(SubmitResponseVisitor)
-    }
-}
-
-impl<'de> Deserialize<'de> for StreamResponseCbor {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct StreamResponseVisitor;
-
-        impl<'de> Visitor<'de> for StreamResponseVisitor {
-            type Value = StreamResponseCbor;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("stream response CBOR map with integer keys")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut ver = None;
-                let mut stream = None;
-                let mut from_seq = None;
-                let mut to_seq = None;
-                let mut items = None;
-
-                while let Some(key) = map.next_key::<u64>()? {
-                    match key {
-                        1 => {
-                            if ver.is_some() {
-                                return Err(DeError::duplicate_field("ver"));
-                            }
-                            ver = Some(map.next_value()?);
-                        }
-                        2 => {
-                            if stream.is_some() {
-                                return Err(DeError::duplicate_field("stream"));
-                            }
-                            stream = Some(map.next_value()?);
-                        }
-                        3 => {
-                            if from_seq.is_some() {
-                                return Err(DeError::duplicate_field("from_seq"));
-                            }
-                            from_seq = Some(map.next_value()?);
-                        }
-                        4 => {
-                            if to_seq.is_some() {
-                                return Err(DeError::duplicate_field("to_seq"));
-                            }
-                            to_seq = Some(map.next_value()?);
-                        }
-                        5 => {
-                            if items.is_some() {
-                                return Err(DeError::duplicate_field("items"));
-                            }
-                            items = Some(map.next_value()?);
-                        }
-                        _ => {
-                            return Err(DeError::custom(format!(
-                                "unknown stream response key {key}"
-                            )));
-                        }
-                    }
-                }
-
-                let ver = ver.ok_or_else(|| DeError::missing_field("ver"))?;
-                let stream = stream.ok_or_else(|| DeError::missing_field("stream"))?;
-                let from_seq = from_seq.ok_or_else(|| DeError::missing_field("from_seq"))?;
-                let items = items.ok_or_else(|| DeError::missing_field("items"))?;
-
-                Ok(StreamResponseCbor {
-                    ver,
-                    stream,
-                    from_seq,
-                    to_seq,
-                    items,
-                })
-            }
-        }
-
-        deserializer.deserialize_map(StreamResponseVisitor)
-    }
-}
-
-impl<'de> Deserialize<'de> for StreamItemCbor {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct StreamItemVisitor;
-
-        impl<'de> Visitor<'de> for StreamItemVisitor {
-            type Value = StreamItemCbor;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("stream item CBOR map with integer keys")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut stream_seq = None;
-                let mut message = None;
-                let mut receipt = None;
-                let mut proof = None;
-
-                while let Some(key) = map.next_key::<u64>()? {
-                    match key {
-                        1 => {
-                            if stream_seq.is_some() {
-                                return Err(DeError::duplicate_field("stream_seq"));
-                            }
-                            stream_seq = Some(map.next_value()?);
-                        }
-                        2 => {
-                            if message.is_some() {
-                                return Err(DeError::duplicate_field("message"));
-                            }
-                            message = Some(map.next_value()?);
-                        }
-                        3 => {
-                            if receipt.is_some() {
-                                return Err(DeError::duplicate_field("receipt"));
-                            }
-                            receipt = Some(map.next_value()?);
-                        }
-                        4 => {
-                            if proof.is_some() {
-                                return Err(DeError::duplicate_field("proof"));
-                            }
-                            proof = Some(map.next_value()?);
-                        }
-                        _ => {
-                            return Err(DeError::custom(format!("unknown stream item key {key}")));
-                        }
-                    }
-                }
-
-                let stream_seq = stream_seq.ok_or_else(|| DeError::missing_field("stream_seq"))?;
-                let message = message.ok_or_else(|| DeError::missing_field("message"))?;
-
-                Ok(StreamItemCbor {
-                    stream_seq,
-                    message,
-                    receipt,
-                    proof,
-                })
-            }
-        }
-
-        deserializer.deserialize_map(StreamItemVisitor)
     }
 }
