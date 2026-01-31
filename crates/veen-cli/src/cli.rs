@@ -12213,11 +12213,7 @@ mod tests {
         })
         .await?;
 
-        let mut proven = match runtime
-            .pipeline()
-            .stream("proofs", 0, None, true)
-            .await?
-        {
+        let mut proven = match runtime.pipeline().stream("proofs", 0, None, true).await? {
             StreamResponse::Proven(items) => items,
             StreamResponse::Messages(_) => bail!("expected proofs in stream response"),
         };
