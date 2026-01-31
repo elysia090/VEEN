@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 use reqwest::Client;
@@ -19,6 +21,11 @@ use tracing::info;
 
 use veen_bridge::{run_bridge, BridgeConfig, EndpointConfig};
 use veen_core::ht;
+use veen_core::wire::message::MSG_VERSION;
+use veen_core::{
+    cap_stream_id_from_label, ClientId, CtHash, Label, Msg, Profile, Signature64,
+    CIPHERTEXT_LEN_PREFIX, HPKE_ENC_LEN, MAX_MSG_BYTES,
+};
 use veen_hub::pipeline::{
     BridgeIngestRequest, HubStreamState, StoredMessage, StreamReceipt, SubmitRequest,
 };
@@ -30,14 +37,22 @@ use veen_overlays::{schema_fed_authority, schema_label_class, schema_revocation}
 use crate::{query, SelftestGoalReport, SelftestReporter};
 
 const FED_CHAT_STREAM: &str = "fed/chat";
-const DEFAULT_CLIENT_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-
 const EXPORT_STREAM: &str = "export/events";
 const ONLINE_AUDIT_STREAM: &str = "bridge/online/log";
 const OFFLINE_AUDIT_STREAM: &str = "bridge/offline/log";
 
 const HUB_KEY_VERSION: u8 = 1;
 const ADMIN_SIGNING_DOMAIN: &str = "veen/admin";
+
+fn default_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[0x11; 32])
+}
+
+fn default_client_id_hex() -> String {
+    let signing = default_signing_key();
+    let client_id = veen_core::ClientId::from(*signing.verifying_key().as_bytes());
+    hex::encode(client_id.as_ref())
+}
 
 #[derive(Deserialize)]
 struct MetricsSnapshot {
@@ -309,14 +324,20 @@ async fn run_fed_auth() -> Result<()> {
     // Allow bridge loop to start.
     sleep(Duration::from_millis(100)).await;
 
+    let client_signing = default_signing_key();
+    let msg = encode_submit_msg(
+        FED_CHAT_STREAM,
+        &client_signing,
+        1,
+        0,
+        &json!({ "message": "hello from primary" }),
+    )?;
     let submit_request = SubmitRequest {
         stream: FED_CHAT_STREAM.to_string(),
-        client_id: DEFAULT_CLIENT_ID.to_string(),
-        payload: json!({ "message": "hello from primary" }),
+        client_id: default_client_id_hex(),
+        msg,
         attachments: None,
         auth_ref: None,
-        expires_at: None,
-        schema: None,
         idem: None,
         pow_cookie: None,
     };
@@ -791,13 +812,13 @@ async fn submit_message(
     stream: &str,
     body: &serde_json::Value,
 ) -> Result<()> {
+    let client_signing = default_signing_key();
+    let msg = encode_submit_msg(stream, &client_signing, 1, 0, body)?;
     let request = SubmitRequest {
         stream: stream.to_string(),
-        client_id: DEFAULT_CLIENT_ID.to_string(),
-        payload: body.clone(),
+        client_id: default_client_id_hex(),
+        msg,
         idem: None,
-        schema: None,
-        expires_at: None,
         attachments: None,
         auth_ref: None,
         pow_cookie: None,
@@ -989,7 +1010,15 @@ async fn record_offline_audit(
         stream: OFFLINE_AUDIT_STREAM.to_string(),
         seq: next_seq,
         sent_at: current_unix_timestamp(),
-        client_id: DEFAULT_CLIENT_ID.to_string(),
+        client_id: default_client_id_hex(),
+        ver: None,
+        profile_id: None,
+        label: None,
+        client_seq: None,
+        prev_ack: None,
+        ct_hash: None,
+        ciphertext: None,
+        sig: None,
         schema: None,
         expires_at: None,
         parent: None,
@@ -1016,6 +1045,82 @@ async fn record_offline_audit(
     Ok(())
 }
 
+fn encode_submit_msg(
+    stream: &str,
+    client_signing: &SigningKey,
+    client_seq: u64,
+    prev_ack: u64,
+    payload: &serde_json::Value,
+) -> Result<String> {
+    let label = derive_label_for_stream(stream)?;
+    let profile_id = Profile::default()
+        .id()
+        .context("computing profile id for overlay msg")?;
+    let client_id = ClientId::from(*client_signing.verifying_key().as_bytes());
+    let body_bytes = serde_json::to_vec(payload).context("encoding overlay payload")?;
+    let ciphertext = build_ciphertext_envelope(&[], &body_bytes, 256)?;
+    if ciphertext.len() > MAX_MSG_BYTES {
+        bail!(
+            "overlay ciphertext size {} exceeds max_msg_bytes {}",
+            ciphertext.len(),
+            MAX_MSG_BYTES
+        );
+    }
+    let ct_hash = CtHash::compute(&ciphertext);
+    let mut msg = Msg {
+        ver: MSG_VERSION,
+        profile_id,
+        label,
+        client_id,
+        client_seq,
+        prev_ack,
+        auth_ref: None,
+        ct_hash,
+        ciphertext,
+        sig: Signature64::new([0u8; 64]),
+    };
+    let digest = msg
+        .signing_tagged_hash()
+        .context("computing overlay msg signing digest")?;
+    let signature = client_signing.sign(digest.as_ref());
+    msg.sig = Signature64::from(signature.to_bytes());
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&msg, &mut encoded).context("encoding overlay msg")?;
+    Ok(BASE64_STANDARD.encode(encoded))
+}
+
+fn derive_label_for_stream(stream: &str) -> Result<Label> {
+    let stream_id = cap_stream_id_from_label(stream)
+        .with_context(|| format!("deriving stream identifier for {}", stream))?;
+    Ok(Label::derive([], stream_id, 0))
+}
+
+fn build_ciphertext_envelope(header: &[u8], body: &[u8], pad_block: u64) -> Result<Vec<u8>> {
+    if header.len() > u32::MAX as usize || body.len() > u32::MAX as usize {
+        bail!("ciphertext lengths overflow u32");
+    }
+    let mut ciphertext =
+        Vec::with_capacity(HPKE_ENC_LEN + CIPHERTEXT_LEN_PREFIX + header.len() + body.len());
+    ciphertext.extend_from_slice(&[0u8; HPKE_ENC_LEN]);
+    ciphertext.extend_from_slice(&(header.len() as u32).to_be_bytes());
+    ciphertext.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    ciphertext.extend_from_slice(header);
+    ciphertext.extend_from_slice(body);
+    if pad_block > 0 {
+        let pad_block = usize::try_from(pad_block)
+            .map_err(|_| anyhow!("invalid pad_block size {pad_block}"))?;
+        if pad_block == 0 {
+            bail!("pad_block must be non-zero when enabled");
+        }
+        let remainder = ciphertext.len() % pad_block;
+        if remainder != 0 {
+            let padding = pad_block - remainder;
+            ciphertext.extend(std::iter::repeat(0u8).take(padding));
+        }
+    }
+    Ok(ciphertext)
+}
+
 fn spawn_bridge(
     primary: &str,
     replica: &str,
@@ -1036,7 +1141,7 @@ async fn wait_for_replication(client: &Client, replica_base: &str) -> Result<()>
     for attempt in 0..MAX_ATTEMPTS {
         let state = fetch_stream_state(client, replica_base, FED_CHAT_STREAM).await?;
         if let Some(message) = state.messages.first() {
-            if message.client_id == DEFAULT_CLIENT_ID {
+            if message.client_id == default_client_id_hex() {
                 info!(seq = message.seq, "replica observed bridged message");
                 return Ok(());
             }

@@ -159,10 +159,17 @@ struct PowRequestQuery {
     difficulty: Option<u8>,
 }
 
-async fn handle_submit(
-    State(pipeline): State<HubPipeline>,
-    Json(request): Json<SubmitRequest>,
-) -> impl IntoResponse {
+async fn handle_submit(State(pipeline): State<HubPipeline>, body: Bytes) -> impl IntoResponse {
+    let request: SubmitRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("invalid submit request body: {err}"),
+            )
+                .into_response();
+        }
+    };
     let stream_label = request.stream.clone();
     let client_id = request.client_id.clone();
     match pipeline.submit(request).await {

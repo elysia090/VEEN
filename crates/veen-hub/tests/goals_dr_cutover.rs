@@ -15,6 +15,8 @@ use veen_hub::pipeline::{
 };
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
+mod support;
+use support::{client_id_hex, encode_submit_msg};
 
 /// Scenario acceptance covering disaster recovery cutover with replicated hubs.
 ///
@@ -66,7 +68,8 @@ async fn goals_dr_cutover() -> Result<()> {
 
     let http = Client::builder().no_proxy().build()?;
     let stream = "dr/cutover";
-    let client_id = hex::encode(generate_client_id());
+    let client_signing = generate_client_signing();
+    let client_id = client_id_hex(&client_signing);
 
     let primary_base = format!("http://{}", primary_runtime.listen_addr());
     let replica_base = format!("http://{}", replica_runtime.listen_addr());
@@ -75,16 +78,22 @@ async fn goals_dr_cutover() -> Result<()> {
     let mut bridged_receipts = 0usize;
     for idx in 0..3u8 {
         let body = serde_json::json!({"text": format!("primary-{idx}")});
+        let msg = encode_submit_msg(
+            stream,
+            &client_signing,
+            u64::from(idx) + 1,
+            0,
+            None,
+            &serde_json::to_vec(&body)?,
+        )?;
         let response: SubmitResponse = http
             .post(format!("{}/submit", primary_base))
             .json(&SubmitRequest {
                 stream: stream.to_string(),
                 client_id: client_id.clone(),
-                payload: body,
+                msg,
                 attachments: None,
                 auth_ref: None,
-                expires_at: None,
-                schema: None,
                 idem: None,
                 pow_cookie: None,
             })
@@ -194,16 +203,23 @@ async fn goals_dr_cutover() -> Result<()> {
     .await?;
 
     let promoted_base = format!("http://{}", promoted_runtime.listen_addr());
+    let promote_body = serde_json::json!({"text":"cutover"});
+    let promote_msg = encode_submit_msg(
+        stream,
+        &client_signing,
+        4,
+        0,
+        None,
+        &serde_json::to_vec(&promote_body)?,
+    )?;
     let promote_response: SubmitResponse = http
         .post(format!("{}/submit", promoted_base))
         .json(&SubmitRequest {
             stream: stream.to_string(),
             client_id: client_id.clone(),
-            payload: serde_json::json!({"text":"cutover"}),
+            msg: promote_msg,
             attachments: None,
             auth_ref: None,
-            expires_at: None,
-            schema: None,
             idem: None,
             pow_cookie: None,
         })
@@ -254,10 +270,10 @@ async fn goals_dr_cutover() -> Result<()> {
     Ok(())
 }
 
-fn generate_client_id() -> [u8; 32] {
+fn generate_client_signing() -> ed25519_dalek::SigningKey {
     use ed25519_dalek::SigningKey;
     let mut rng = OsRng;
-    SigningKey::generate(&mut rng).verifying_key().to_bytes()
+    SigningKey::generate(&mut rng)
 }
 
 async fn ensure_hub_key(data_dir: &Path) -> Result<()> {

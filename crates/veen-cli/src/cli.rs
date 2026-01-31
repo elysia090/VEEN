@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use ciborium::{de::Error as CborDeError, ser::Error as CborSerError, value::Value as CborValue};
@@ -42,12 +42,14 @@ use veen_core::{
     label::{Label, StreamId, STREAM_ID_LEN},
     wire::{
         checkpoint::CHECKPOINT_VERSION,
+        message::MSG_VERSION,
         mmr::Mmr,
         proof::MmrProof,
-        types::{AuthRef, ClientId, LeafHash, MmrRoot},
-        Checkpoint,
+        types::{AuthRef, ClientId, CtHash, LeafHash, MmrRoot, Signature64},
+        Checkpoint, Msg,
     },
-    CapToken, CapTokenAllow, CapTokenRate, Profile, RealmId, REALM_ID_LEN,
+    CapToken, CapTokenAllow, CapTokenRate, Profile, ProfileId, RealmId, CIPHERTEXT_LEN_PREFIX,
+    HPKE_ENC_LEN, MAX_MSG_BYTES, REALM_ID_LEN,
 };
 use veen_core::{h, ht};
 use veen_hub::runtime::HubRuntime;
@@ -2930,6 +2932,22 @@ struct StoredMessage {
     seq: u64,
     sent_at: u64,
     client_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ver: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prev_ack: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ct_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ciphertext: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sig: Option<String>,
     schema: Option<String>,
     expires_at: Option<u64>,
     parent: Option<String>,
@@ -2985,6 +3003,14 @@ impl From<RemoteStoredMessage> for StoredMessage {
             seq: remote.seq,
             sent_at: remote.sent_at,
             client_id: remote.client_id,
+            ver: remote.ver,
+            profile_id: remote.profile_id,
+            label: remote.label,
+            client_seq: remote.client_seq,
+            prev_ack: remote.prev_ack,
+            ct_hash: remote.ct_hash,
+            ciphertext: remote.ciphertext,
+            sig: remote.sig,
             schema: remote.schema,
             expires_at: remote.expires_at,
             parent: remote.parent,
@@ -5026,6 +5052,14 @@ async fn send_message_local(data_dir: PathBuf, args: SendArgs) -> Result<SendOut
         seq,
         sent_at: now,
         client_id: client_id_hex.clone(),
+        ver: None,
+        profile_id: None,
+        label: None,
+        client_seq: None,
+        prev_ack: None,
+        ct_hash: None,
+        ciphertext: None,
+        sig: None,
         schema: args.schema.clone(),
         expires_at: args.expires_at,
         parent: args.parent.clone(),
@@ -5150,6 +5184,20 @@ async fn send_message_remote(client: HubHttpClient, args: SendArgs) -> Result<Se
 
     let payload = serde_json::from_str(&args.body).unwrap_or_else(|_| json!(args.body));
 
+    let client_signing = read_client_signing_key(&args.client).await?;
+    let (client_seq, prev_ack) = read_client_send_state(&args.client, &args.stream).await?;
+    let msg = build_submit_msg(
+        &args.stream,
+        &client_signing,
+        client_seq,
+        prev_ack,
+        auth_ref_hex.as_deref(),
+        &payload,
+    )?;
+    let mut msg_bytes = Vec::new();
+    ciborium::ser::into_writer(&msg, &mut msg_bytes).context("encoding submit msg")?;
+    let msg_b64 = BASE64_STANDARD.encode(msg_bytes);
+
     let pow_cookie = if let Some(difficulty) = args.pow_difficulty {
         if difficulty == 0 {
             bail_usage!("--pow-difficulty must be greater than zero");
@@ -5205,11 +5253,9 @@ async fn send_message_remote(client: HubHttpClient, args: SendArgs) -> Result<Se
     let request = RemoteSubmitRequest {
         stream: args.stream.clone(),
         client_id: client_id_hex.clone(),
-        payload,
+        msg: msg_b64,
         attachments,
         auth_ref: auth_ref_hex,
-        expires_at: args.expires_at,
-        schema: args.schema.clone(),
         idem: None,
         pow_cookie,
     };
@@ -5228,6 +5274,109 @@ async fn send_message_remote(client: HubHttpClient, args: SendArgs) -> Result<Se
         client_id_hex,
         detail: SendOutcomeDetail::Remote(RemoteSendDetail { response }),
     })
+}
+
+async fn read_client_signing_key(client_dir: &Path) -> Result<SigningKey> {
+    let keystore_path = client_dir.join("keystore.enc");
+    let secret: ClientSecretBundle = read_cbor_file(&keystore_path)
+        .await
+        .with_context(|| format!("reading client keystore from {}", keystore_path.display()))?;
+    let signing_key_bytes: [u8; 32] = secret
+        .signing_key
+        .as_ref()
+        .try_into()
+        .map_err(|_| anyhow!("invalid signing key length"))?;
+    Ok(SigningKey::from_bytes(&signing_key_bytes))
+}
+
+async fn read_client_send_state(client_dir: &Path, stream: &str) -> Result<(u64, u64)> {
+    let state_path = client_dir.join("state.json");
+    let client_state: ClientStateFile = read_json_file(&state_path).await?;
+    let label_state = client_state.labels.get(stream);
+    let client_seq = label_state
+        .map(|state| state.msgs_sent.saturating_add(1))
+        .unwrap_or(1);
+    let prev_ack = label_state.map(|state| state.prev_ack).unwrap_or(0);
+    Ok((client_seq, prev_ack))
+}
+
+fn build_submit_msg(
+    stream: &str,
+    client_signing: &SigningKey,
+    client_seq: u64,
+    prev_ack: u64,
+    auth_ref_hex: Option<&str>,
+    payload: &serde_json::Value,
+) -> Result<Msg> {
+    let label = derive_label_for_stream(stream)?;
+    let profile_id = Profile::default()
+        .id()
+        .context("computing default profile id")?;
+    let client_id = ClientId::from(*client_signing.verifying_key().as_bytes());
+    let auth_ref = auth_ref_hex
+        .map(AuthRef::from_str)
+        .transpose()
+        .context("parsing auth_ref for submit msg")?;
+    let body_bytes = serde_json::to_vec(payload).context("encoding submit payload as JSON body")?;
+    let ciphertext = build_ciphertext_envelope(&[], &body_bytes, 256)?;
+    if ciphertext.len() > MAX_MSG_BYTES {
+        bail!(
+            "submit ciphertext size {} exceeds max_msg_bytes {}",
+            ciphertext.len(),
+            MAX_MSG_BYTES
+        );
+    }
+    let ct_hash = CtHash::compute(&ciphertext);
+    let mut msg = Msg {
+        ver: MSG_VERSION,
+        profile_id,
+        label,
+        client_id,
+        client_seq,
+        prev_ack,
+        auth_ref,
+        ct_hash,
+        ciphertext,
+        sig: Signature64::new([0u8; 64]),
+    };
+    let digest = msg
+        .signing_tagged_hash()
+        .context("computing msg signing digest")?;
+    let signature = client_signing.sign(digest.as_ref());
+    msg.sig = Signature64::from(signature.to_bytes());
+    Ok(msg)
+}
+
+fn derive_label_for_stream(stream: &str) -> Result<Label> {
+    let stream_id = cap_stream_id_from_label(stream)
+        .with_context(|| format!("deriving stream identifier for {}", stream))?;
+    Ok(Label::derive([], stream_id, 0))
+}
+
+fn build_ciphertext_envelope(header: &[u8], body: &[u8], pad_block: u64) -> Result<Vec<u8>> {
+    if header.len() > u32::MAX as usize || body.len() > u32::MAX as usize {
+        bail!("ciphertext lengths overflow u32");
+    }
+    let mut ciphertext =
+        Vec::with_capacity(HPKE_ENC_LEN + CIPHERTEXT_LEN_PREFIX + header.len() + body.len());
+    ciphertext.extend_from_slice(&[0u8; HPKE_ENC_LEN]);
+    ciphertext.extend_from_slice(&(header.len() as u32).to_be_bytes());
+    ciphertext.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    ciphertext.extend_from_slice(header);
+    ciphertext.extend_from_slice(body);
+    if pad_block > 0 {
+        let pad_block = usize::try_from(pad_block)
+            .map_err(|_| anyhow!("invalid pad_block size {pad_block}"))?;
+        if pad_block == 0 {
+            bail!("pad_block must be non-zero when enabled");
+        }
+        let remainder = ciphertext.len() % pad_block;
+        if remainder != 0 {
+            let padding = pad_block - remainder;
+            ciphertext.extend(std::iter::repeat(0u8).take(padding));
+        }
+    }
+    Ok(ciphertext)
 }
 
 fn decode_pow_challenge_hex(hex_value: &str) -> Result<Vec<u8>> {
@@ -10685,11 +10834,52 @@ fn compute_digest_hex(data: &[u8]) -> String {
 }
 
 fn compute_message_leaf_hash(message: &StoredMessage) -> Result<LeafHash> {
+    if let Some(leaf) = leaf_hash_from_wire(message)? {
+        return Ok(leaf);
+    }
     let encoded = serde_json::to_vec(message).context("encoding message for leaf hash")?;
     let digest = Sha256::digest(&encoded);
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(&digest);
     Ok(LeafHash::new(bytes))
+}
+
+fn leaf_hash_from_wire(message: &StoredMessage) -> Result<Option<LeafHash>> {
+    let Some(label_hex) = message.label.as_ref() else {
+        return Ok(None);
+    };
+    let Some(profile_hex) = message.profile_id.as_ref() else {
+        return Ok(None);
+    };
+    let Some(ct_hash_hex) = message.ct_hash.as_ref() else {
+        return Ok(None);
+    };
+    let Some(client_seq) = message.client_seq else {
+        return Ok(None);
+    };
+
+    let label_bytes =
+        hex::decode(label_hex).with_context(|| format!("decoding label {}", label_hex))?;
+    let profile_bytes =
+        hex::decode(profile_hex).with_context(|| format!("decoding profile_id {}", profile_hex))?;
+    let ct_hash_bytes =
+        hex::decode(ct_hash_hex).with_context(|| format!("decoding ct_hash {}", ct_hash_hex))?;
+
+    let label = Label::from_slice(&label_bytes).context("parsing label from stored message")?;
+    let profile_id =
+        ProfileId::from_slice(&profile_bytes).context("parsing profile_id from stored message")?;
+    let ct_hash =
+        CtHash::from_slice(&ct_hash_bytes).context("parsing ct_hash from stored message")?;
+    let client_id =
+        ClientId::from_str(&message.client_id).context("parsing client_id from stored message")?;
+
+    Ok(Some(LeafHash::derive(
+        &label,
+        &profile_id,
+        &ct_hash,
+        &client_id,
+        client_seq,
+    )))
 }
 
 fn print_stream_message(message: &StoredMessage) {
@@ -12530,6 +12720,14 @@ mod tests {
             seq: 5,
             sent_at: 1_700_000_000,
             client_id: hex::encode([0xAAu8; 32]),
+            ver: None,
+            profile_id: None,
+            label: None,
+            client_seq: None,
+            prev_ack: None,
+            ct_hash: None,
+            ciphertext: None,
+            sig: None,
             schema: Some("schema-id".to_string()),
             expires_at: Some(1_700_000_600),
             parent: None,
@@ -12616,6 +12814,14 @@ mod tests {
             seq,
             sent_at: 1_700_000_000 + seq,
             client_id: "client".to_string(),
+            ver: None,
+            profile_id: None,
+            label: None,
+            client_seq: None,
+            prev_ack: None,
+            ct_hash: None,
+            ciphertext: None,
+            sig: None,
             schema: Some(hex::encode(schema_paid_operation())),
             expires_at: None,
             parent: None,
@@ -12633,6 +12839,14 @@ mod tests {
             seq,
             sent_at: 1_700_000_000 + seq,
             client_id: format!("client-{seq}"),
+            ver: None,
+            profile_id: None,
+            label: None,
+            client_seq: None,
+            prev_ack: None,
+            ct_hash: None,
+            ciphertext: None,
+            sig: None,
             schema: Some("test.schema".to_string()),
             expires_at: None,
             parent: None,

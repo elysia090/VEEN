@@ -10,6 +10,8 @@ use tokio::fs;
 use veen_hub::pipeline::{StreamResponse, SubmitRequest, SubmitResponse};
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
+mod support;
+use support::{client_id_hex, encode_submit_msg};
 
 /// Scenario acceptance covering disposable mesh deployments on Kubernetes.
 ///
@@ -50,18 +52,25 @@ async fn goals_k8s_disposable_mesh() -> Result<()> {
     let http = reqwest::Client::builder().no_proxy().build()?;
     let base = format!("http://{}", runtime.listen_addr());
     let stream = "mesh/core";
-    let client_id = hex::encode(generate_client_id());
+    let client_signing = generate_client_signing();
+    let client_id = client_id_hex(&client_signing);
+    let msg = encode_submit_msg(
+        stream,
+        &client_signing,
+        1,
+        0,
+        None,
+        &serde_json::to_vec(&serde_json::json!({"text":"disposable-mesh"}))?,
+    )?;
 
     let first: SubmitResponse = http
         .post(format!("{}/submit", base))
         .json(&SubmitRequest {
             stream: stream.to_string(),
             client_id: client_id.clone(),
-            payload: serde_json::json!({"text":"disposable-mesh"}),
+            msg,
             attachments: None,
             auth_ref: None,
-            expires_at: None,
-            schema: None,
             idem: None,
             pow_cookie: None,
         })
@@ -130,10 +139,10 @@ async fn goals_k8s_disposable_mesh() -> Result<()> {
     Ok(())
 }
 
-fn generate_client_id() -> [u8; 32] {
+fn generate_client_signing() -> ed25519_dalek::SigningKey {
     use ed25519_dalek::SigningKey;
     let mut rng = OsRng;
-    SigningKey::generate(&mut rng).verifying_key().to_bytes()
+    SigningKey::generate(&mut rng)
 }
 
 async fn ensure_hub_key(data_dir: &Path) -> Result<()> {

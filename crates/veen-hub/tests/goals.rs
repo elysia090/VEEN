@@ -28,6 +28,8 @@ use veen_hub::pipeline::{
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_overlays::{cap_token_hash, PowCookie};
+mod support;
+use support::{client_id_hex, encode_submit_msg, read_signing_key};
 
 #[derive(Debug, Deserialize)]
 struct MetricsResponse {
@@ -108,21 +110,28 @@ async fn goals_core_pipeline() -> Result<()> {
     ensure_hub_key(hub_dir.path()).await?;
     let runtime = HubRuntime::start(config).await?;
 
-    let client_id = read_client_id(&client_dir.join("identity_card.pub"))?;
+    let client_signing = read_signing_key(&client_dir)?;
+    let client_id = client_id_hex(&client_signing);
 
     let http = Client::builder().no_proxy().build()?;
     let submit_endpoint = format!("http://{}/submit", runtime.listen_addr());
 
+    let msg = encode_submit_msg(
+        "core/main",
+        &client_signing,
+        1,
+        0,
+        None,
+        &serde_json::to_vec(&serde_json::json!({ "text": "hello-veens" }))?,
+    )?;
     let _main_response: SubmitResponse = http
         .post(&submit_endpoint)
         .json(&SubmitRequest {
             stream: "core/main".to_string(),
             client_id: client_id.clone(),
-            payload: serde_json::json!({ "text": "hello-veens" }),
+            msg,
             attachments: None,
             auth_ref: None,
-            expires_at: None,
-            schema: None,
             idem: None,
             pow_cookie: None,
         })
@@ -155,19 +164,25 @@ async fn goals_core_pipeline() -> Result<()> {
         .context("writing attachment test file")?;
     let attachment_data = BASE64_ENGINE.encode(std::fs::read(&attachment_path)?);
 
+    let msg = encode_submit_msg(
+        "core/att",
+        &client_signing,
+        1,
+        0,
+        None,
+        &serde_json::to_vec(&serde_json::json!({ "text": "attachment" }))?,
+    )?;
     let attachment_response: SubmitResponse = http
         .post(&submit_endpoint)
         .json(&SubmitRequest {
             stream: "core/att".to_string(),
             client_id: client_id.clone(),
-            payload: serde_json::json!({ "text": "attachment" }),
+            msg,
             attachments: Some(vec![AttachmentUpload {
                 name: Some("file.bin".into()),
                 data: attachment_data,
             }]),
             auth_ref: None,
-            expires_at: None,
-            schema: None,
             idem: None,
             pow_cookie: None,
         })
@@ -263,25 +278,21 @@ async fn goals_core_pipeline() -> Result<()> {
     );
     let auth_ref_hex = hex::encode(authorize_response.auth_ref.as_ref());
 
-    let mut mismatched_subject = cap_token.subject_pk.as_ref().to_vec();
-    if let Some(first) = mismatched_subject.first_mut() {
-        *first ^= 0xFF;
-    }
-    let invalid_client_id = hex::encode(mismatched_subject);
-
+    let mut rng = OsRng;
+    let unauthorized_signing = SigningKey::generate(&mut rng);
     let unauthorized = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: "core/capped".to_string(),
-            client_id: invalid_client_id,
-            payload: serde_json::json!({"text":"denied"}),
-            attachments: None,
-            auth_ref: Some(auth_ref_hex.clone()),
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        })
+        .json(&make_submit_request(
+            "core/capped",
+            &unauthorized_signing,
+            1,
+            0,
+            serde_json::json!({"text":"denied"}),
+            None,
+            Some(auth_ref_hex.clone()),
+            None,
+            None,
+        )?)
         .send()
         .await
         .context("submitting unauthorized message")?;
@@ -297,17 +308,17 @@ async fn goals_core_pipeline() -> Result<()> {
 
     let _authorized: SubmitResponse = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: "core/capped".to_string(),
-            client_id: hex::encode(cap_token.subject_pk.as_ref()),
-            payload: serde_json::json!({"text":"authorized"}),
-            attachments: None,
-            auth_ref: Some(auth_ref_hex.clone()),
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        })
+        .json(&make_submit_request(
+            "core/capped",
+            &client_signing,
+            1,
+            0,
+            serde_json::json!({"text":"authorized"}),
+            None,
+            Some(auth_ref_hex.clone()),
+            None,
+            None,
+        )?)
         .send()
         .await
         .context("submitting authorized message")?
@@ -319,17 +330,17 @@ async fn goals_core_pipeline() -> Result<()> {
 
     let rate_limited = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: "core/capped".to_string(),
-            client_id: hex::encode(cap_token.subject_pk.as_ref()),
-            payload: serde_json::json!({"text":"rate-limited"}),
-            attachments: None,
-            auth_ref: Some(auth_ref_hex.clone()),
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        })
+        .json(&make_submit_request(
+            "core/capped",
+            &client_signing,
+            2,
+            0,
+            serde_json::json!({"text":"rate-limited"}),
+            None,
+            Some(auth_ref_hex.clone()),
+            None,
+            None,
+        )?)
         .send()
         .await
         .context("submitting rate-limited message")?;
@@ -358,17 +369,17 @@ async fn goals_core_pipeline() -> Result<()> {
 
     let _rate_recovered: SubmitResponse = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: "core/capped".to_string(),
-            client_id: hex::encode(cap_token.subject_pk.as_ref()),
-            payload: serde_json::json!({"text":"rate-recovered"}),
-            attachments: None,
-            auth_ref: Some(auth_ref_hex.clone()),
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        })
+        .json(&make_submit_request(
+            "core/capped",
+            &client_signing,
+            3,
+            0,
+            serde_json::json!({"text":"rate-recovered"}),
+            None,
+            Some(auth_ref_hex.clone()),
+            None,
+            None,
+        )?)
         .send()
         .await
         .context("submitting message after rate token refill")?
@@ -382,17 +393,17 @@ async fn goals_core_pipeline() -> Result<()> {
 
     let ttl_expired = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: "core/capped".to_string(),
-            client_id: hex::encode(cap_token.subject_pk.as_ref()),
-            payload: serde_json::json!({"text":"ttl-expired"}),
-            attachments: None,
-            auth_ref: Some(auth_ref_hex.clone()),
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        })
+        .json(&make_submit_request(
+            "core/capped",
+            &client_signing,
+            4,
+            0,
+            serde_json::json!({"text":"ttl-expired"}),
+            None,
+            Some(auth_ref_hex.clone()),
+            None,
+            None,
+        )?)
         .send()
         .await
         .context("submitting message after capability ttl expiry")?;
@@ -425,17 +436,17 @@ async fn goals_core_pipeline() -> Result<()> {
 
     let _ttl_recovered: SubmitResponse = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: "core/capped".to_string(),
-            client_id: hex::encode(cap_token.subject_pk.as_ref()),
-            payload: serde_json::json!({"text":"ttl-recovered"}),
-            attachments: None,
-            auth_ref: Some(auth_ref_hex.clone()),
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        })
+        .json(&make_submit_request(
+            "core/capped",
+            &client_signing,
+            5,
+            0,
+            serde_json::json!({"text":"ttl-recovered"}),
+            None,
+            Some(auth_ref_hex.clone()),
+            None,
+            None,
+        )?)
         .send()
         .await
         .context("submitting message after capability reauthorization")?
@@ -527,24 +538,24 @@ async fn goals_pow_prefilter_enforced() -> Result<()> {
     ensure_hub_key(hub_dir.path()).await?;
     let runtime = HubRuntime::start(config).await?;
 
-    let client_id = read_client_id(&client_dir.join("identity_card.pub"))?;
+    let client_signing = read_signing_key(&client_dir)?;
     let http = Client::builder().no_proxy().build()?;
     let submit_endpoint = format!("http://{}/submit", runtime.listen_addr());
     let pow_stream = "core/pow";
 
     let forbidden = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: pow_stream.to_string(),
-            client_id: client_id.clone(),
-            payload: serde_json::json!({ "text": "pow" }),
-            attachments: None,
-            auth_ref: None,
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        })
+        .json(&make_submit_request(
+            pow_stream,
+            &client_signing,
+            1,
+            0,
+            serde_json::json!({ "text": "pow" }),
+            None,
+            None,
+            None,
+            None,
+        )?)
         .send()
         .await
         .context("submitting message without pow cookie")?;
@@ -557,17 +568,17 @@ async fn goals_pow_prefilter_enforced() -> Result<()> {
 
     let success: SubmitResponse = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: pow_stream.to_string(),
-            client_id,
-            payload: serde_json::json!({ "text": "pow" }),
-            attachments: None,
-            auth_ref: None,
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: Some(pow_envelope),
-        })
+        .json(&make_submit_request(
+            pow_stream,
+            &client_signing,
+            2,
+            0,
+            serde_json::json!({ "text": "pow" }),
+            None,
+            None,
+            Some(pow_envelope),
+            None,
+        )?)
         .send()
         .await
         .context("submitting message with pow cookie")?
@@ -604,6 +615,7 @@ async fn goals_capability_gating_persists() -> Result<()> {
         .context("generating client identity")?;
     run_cli(["keygen", "--out", admin_dir.to_str().unwrap()])
         .context("generating admin identity")?;
+    let client_signing = read_signing_key(&client_dir)?;
 
     run_cli([
         "cap",
@@ -641,8 +653,6 @@ async fn goals_capability_gating_persists() -> Result<()> {
     cap_token
         .verify()
         .map_err(|err| anyhow::anyhow!("issued capability failed verification: {err}"))?;
-    let subject_client_id = hex::encode(cap_token.subject_pk.as_ref());
-
     let http = Client::builder().no_proxy().build()?;
     let authorize_response_bytes = http
         .post(format!("{base_url}/authorize"))
@@ -696,17 +706,17 @@ async fn goals_capability_gating_persists() -> Result<()> {
 
     let authorized: SubmitResponse = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: "core/capped".to_string(),
-            client_id: subject_client_id.clone(),
-            payload: serde_json::json!({ "text": "authorized" }),
-            attachments: None,
-            auth_ref: Some(auth_ref_hex.clone()),
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        })
+        .json(&make_submit_request(
+            "core/capped",
+            &client_signing,
+            1,
+            0,
+            serde_json::json!({ "text": "authorized" }),
+            None,
+            Some(auth_ref_hex.clone()),
+            None,
+            None,
+        )?)
         .send()
         .await
         .context("submitting authorized message after restart")?
@@ -719,17 +729,17 @@ async fn goals_capability_gating_persists() -> Result<()> {
 
     let missing_auth = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: "core/capped".to_string(),
-            client_id: subject_client_id,
-            payload: serde_json::json!({ "text": "unauthorized" }),
-            attachments: None,
-            auth_ref: None,
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        })
+        .json(&make_submit_request(
+            "core/capped",
+            &client_signing,
+            2,
+            0,
+            serde_json::json!({ "text": "unauthorized" }),
+            None,
+            None,
+            None,
+            None,
+        )?)
         .send()
         .await
         .context("submitting message without auth_ref")?;
@@ -918,25 +928,25 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
 
     let auth_ref_quota = hex::encode(auth_quota.auth_ref.as_ref());
     let auth_ref_revoke = hex::encode(auth_revoke.auth_ref.as_ref());
-    let client_a_id = read_client_id(&client_a_dir.join("identity_card.pub"))?;
-    let client_revoke_id = read_client_id(&client_revoke_dir.join("identity_card.pub"))?;
+    let client_a_signing = read_signing_key(&client_a_dir)?;
+    let client_revoke_signing = read_signing_key(&client_revoke_dir)?;
     let token_hash_revoke = hex::encode(cap_token_hash(&cap_revoke_bytes));
 
     let mut quota_seqs = Vec::new();
     for index in 0..2 {
         let quota_response: SubmitResponse = http
             .post(&submit_endpoint)
-            .json(&SubmitRequest {
-                stream: stream_quota.to_string(),
-                client_id: client_a_id.clone(),
-                payload: serde_json::json!({ "msg": index }),
-                attachments: None,
-                auth_ref: Some(auth_ref_quota.clone()),
-                expires_at: None,
-                schema: None,
-                idem: None,
-                pow_cookie: None,
-            })
+            .json(&make_submit_request(
+                stream_quota,
+                &client_a_signing,
+                index + 1,
+                0,
+                serde_json::json!({ "msg": index }),
+                None,
+                Some(auth_ref_quota.clone()),
+                None,
+                None,
+            )?)
             .send()
             .await
             .with_context(|| format!("submitting quota message {index}"))?
@@ -950,17 +960,17 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
 
     let quota_fail = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: stream_quota.to_string(),
-            client_id: client_a_id.clone(),
-            payload: serde_json::json!({ "msg": "over" }),
-            attachments: None,
-            auth_ref: Some(auth_ref_quota.clone()),
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        })
+        .json(&make_submit_request(
+            stream_quota,
+            &client_a_signing,
+            3,
+            0,
+            serde_json::json!({ "msg": "over" }),
+            None,
+            Some(auth_ref_quota.clone()),
+            None,
+            None,
+        )?)
         .send()
         .await
         .context("submitting over-quota message")?;
@@ -987,7 +997,7 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         "--kind",
         "client-id",
         "--target",
-        &client_revoke_id,
+        &client_id_hex(&client_revoke_signing),
         "--ttl",
         &revocation_ttl,
     ])
@@ -995,17 +1005,17 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
 
     let revoked = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: stream_revoke.to_string(),
-            client_id: client_revoke_id.clone(),
-            payload: serde_json::json!({ "msg": "revoked" }),
-            attachments: None,
-            auth_ref: Some(auth_ref_revoke.clone()),
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        })
+        .json(&make_submit_request(
+            stream_revoke,
+            &client_revoke_signing,
+            1,
+            0,
+            serde_json::json!({ "msg": "revoked" }),
+            None,
+            Some(auth_ref_revoke.clone()),
+            None,
+            None,
+        )?)
         .send()
         .await
         .context("submitting message during revocation TTL")?;
@@ -1025,17 +1035,17 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
 
     let post_ttl = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: stream_revoke.to_string(),
-            client_id: client_revoke_id.clone(),
-            payload: serde_json::json!({ "msg": "restored" }),
-            attachments: None,
-            auth_ref: Some(auth_ref_revoke.clone()),
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        })
+        .json(&make_submit_request(
+            stream_revoke,
+            &client_revoke_signing,
+            2,
+            0,
+            serde_json::json!({ "msg": "restored" }),
+            None,
+            Some(auth_ref_revoke.clone()),
+            None,
+            None,
+        )?)
         .send()
         .await
         .context("submitting message after revocation TTL")?;
@@ -1069,17 +1079,17 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
 
     let cap_revoked = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: stream_revoke.to_string(),
-            client_id: client_revoke_id.clone(),
-            payload: serde_json::json!({ "msg": "cap revoked" }),
-            attachments: None,
-            auth_ref: Some(auth_ref_revoke.clone()),
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        })
+        .json(&make_submit_request(
+            stream_revoke,
+            &client_revoke_signing,
+            3,
+            0,
+            serde_json::json!({ "msg": "cap revoked" }),
+            None,
+            Some(auth_ref_revoke.clone()),
+            None,
+            None,
+        )?)
         .send()
         .await
         .context("submitting message after cap-token revocation")?;
@@ -1115,21 +1125,21 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
     let auth_b: AuthorizeResponse = from_reader(&mut Cursor::new(auth_b_bytes.as_ref()))
         .context("decoding authorize response for client B")?;
     let auth_ref_b = hex::encode(auth_b.auth_ref.as_ref());
-    let client_b_id = read_client_id(&client_b_dir.join("identity_card.pub"))?;
+    let client_b_signing = read_signing_key(&client_b_dir)?;
 
     let lifetime_initial: SubmitResponse = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: stream_lifetime.to_string(),
-            client_id: client_b_id.clone(),
-            payload: serde_json::json!({ "msg": "first" }),
-            attachments: None,
-            auth_ref: Some(auth_ref_b.clone()),
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        })
+        .json(&make_submit_request(
+            stream_lifetime,
+            &client_b_signing,
+            1,
+            0,
+            serde_json::json!({ "msg": "first" }),
+            None,
+            Some(auth_ref_b.clone()),
+            None,
+            None,
+        )?)
         .send()
         .await
         .context("submitting initial lifetime message")?
@@ -1143,17 +1153,17 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
 
     let lifetime_fail = http
         .post(&submit_endpoint)
-        .json(&SubmitRequest {
-            stream: stream_lifetime.to_string(),
-            client_id: client_b_id,
-            payload: serde_json::json!({ "msg": "expired" }),
-            attachments: None,
-            auth_ref: Some(auth_ref_b.clone()),
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        })
+        .json(&make_submit_request(
+            stream_lifetime,
+            &client_b_signing,
+            2,
+            0,
+            serde_json::json!({ "msg": "expired" }),
+            None,
+            Some(auth_ref_b.clone()),
+            None,
+            None,
+        )?)
         .send()
         .await
         .context("submitting lifetime-expired message")?;
@@ -1226,10 +1236,35 @@ where
     Ok(())
 }
 
-fn read_client_id(path: &Path) -> Result<String> {
-    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let bundle: ClientPublicBundle = from_reader(file).context("decoding client identity card")?;
-    Ok(hex::encode(bundle.client_id))
+fn make_submit_request(
+    stream: &str,
+    client_signing: &SigningKey,
+    client_seq: u64,
+    prev_ack: u64,
+    payload: serde_json::Value,
+    attachments: Option<Vec<AttachmentUpload>>,
+    auth_ref: Option<String>,
+    pow_cookie: Option<PowCookieEnvelope>,
+    idem: Option<u64>,
+) -> Result<SubmitRequest> {
+    let payload_bytes = serde_json::to_vec(&payload).context("encoding payload for submit msg")?;
+    let msg = encode_submit_msg(
+        stream,
+        client_signing,
+        client_seq,
+        prev_ack,
+        auth_ref.as_deref(),
+        &payload_bytes,
+    )?;
+    Ok(SubmitRequest {
+        stream: stream.to_string(),
+        client_id: client_id_hex(client_signing),
+        msg,
+        attachments,
+        auth_ref,
+        idem,
+        pow_cookie,
+    })
 }
 
 fn solve_pow_for_tests(challenge: Vec<u8>, difficulty: u8) -> PowCookieEnvelope {
@@ -1275,10 +1310,4 @@ fn stream_storage_name(stream: &str) -> String {
     let digest = Sha256::digest(stream.as_bytes());
     let suffix = hex::encode(&digest[..8]);
     format!("{safe}-{suffix}")
-}
-
-#[derive(Deserialize)]
-struct ClientPublicBundle {
-    #[serde(with = "serde_bytes")]
-    client_id: ByteBuf,
 }

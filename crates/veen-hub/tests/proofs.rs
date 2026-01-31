@@ -17,6 +17,8 @@ use tokio::fs;
 use veen_hub::pipeline::{StreamMessageWithProof, SubmitRequest, SubmitResponse};
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
+mod support;
+use support::{client_id_hex, encode_submit_msg};
 
 const HUB_KEY_VERSION: u8 = 1;
 
@@ -52,10 +54,11 @@ async fn stream_proof_reuses_stored_entries() -> Result<()> {
     let client = Client::builder().no_proxy().build()?;
     let base = format!("http://{}", runtime.listen_addr());
     let stream = "proofs/constant";
-    let client_id = hex::encode([0x11; 32]);
+    let mut rng = OsRng;
+    let client_signing = SigningKey::generate(&mut rng);
 
     for idx in 0..5u8 {
-        submit_message(&client, &base, stream, &client_id, idx).await?;
+        submit_message(&client, &base, stream, &client_signing, idx).await?;
     }
 
     runtime.shutdown().await?;
@@ -108,9 +111,10 @@ async fn legacy_bundles_are_migrated() -> Result<()> {
     let client = Client::builder().no_proxy().build()?;
     let base = format!("http://{}", runtime.listen_addr());
     let stream = "proofs/migrate";
-    let client_id = hex::encode([0x33; 32]);
+    let mut rng = OsRng;
+    let client_signing = SigningKey::generate(&mut rng);
 
-    submit_message(&client, &base, stream, &client_id, 0).await?;
+    submit_message(&client, &base, stream, &client_signing, 0).await?;
 
     runtime.shutdown().await?;
 
@@ -154,19 +158,25 @@ async fn submit_message(
     client: &Client,
     base: &str,
     stream: &str,
-    client_id: &str,
+    client_signing: &SigningKey,
     idx: u8,
 ) -> Result<SubmitResponse> {
+    let msg = encode_submit_msg(
+        stream,
+        client_signing,
+        u64::from(idx) + 1,
+        0,
+        None,
+        &serde_json::to_vec(&json!({"text": format!("msg-{idx}")}))?,
+    )?;
     client
         .post(format!("{}/submit", base))
         .json(&SubmitRequest {
             stream: stream.to_string(),
-            client_id: client_id.to_string(),
-            payload: json!({"text": format!("msg-{idx}")}),
+            client_id: client_id_hex(client_signing),
+            msg,
             attachments: None,
             auth_ref: None,
-            expires_at: None,
-            schema: None,
             idem: None,
             pow_cookie: None,
         })

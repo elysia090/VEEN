@@ -25,6 +25,8 @@ use veen_core::wire::types::{MmrRoot, Signature64};
 use veen_hub::pipeline::{AnchorLog, AnchorRequest};
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
+mod support;
+use support::{client_id_hex, encode_submit_msg};
 
 /// Scenario acceptance covering audit anchor workflows with checkpoint binding.
 ///
@@ -55,17 +57,24 @@ async fn goals_audit_anchor() -> Result<()> {
 
     let http = reqwest::Client::builder().no_proxy().build()?;
     let stream = "audit/anchor";
-    let client_id = hex::encode(generate_client_id().verifying_key().to_bytes());
+    let client_signing = generate_client_id();
+    let client_id = client_id_hex(&client_signing);
+    let msg = encode_submit_msg(
+        stream,
+        &client_signing,
+        1,
+        0,
+        None,
+        &serde_json::to_vec(&serde_json::json!({"text":"anchor"}))?,
+    )?;
     let submit: veen_hub::pipeline::SubmitResponse = http
         .post(format!("http://{}/submit", runtime.listen_addr()))
         .json(&veen_hub::pipeline::SubmitRequest {
             stream: stream.to_string(),
             client_id: client_id.clone(),
-            payload: serde_json::json!({"text":"anchor"}),
+            msg,
             attachments: None,
             auth_ref: None,
-            expires_at: None,
-            schema: None,
             idem: None,
             pow_cookie: None,
         })
