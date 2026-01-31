@@ -20,6 +20,7 @@ use veen_overlays::{
     TRANSFER_ID_LEN, WALLET_ID_LEN,
 };
 
+mod http_cbor;
 pub mod metrics;
 mod overlays;
 mod perf;

@@ -23,13 +23,15 @@ use tokio::fs;
 use veen_core::cap_token_from_cbor;
 use veen_hub::pipeline::{
     AnchorRequest, AttachmentUpload, AuthorizeResponse, PowCookieEnvelope, SubmitRequest,
-    SubmitResponse,
 };
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_overlays::PowCookie;
 mod support;
-use support::{client_id_hex, encode_submit_msg, read_signing_key};
+use support::{
+    client_id_hex, decode_submit_response_cbor, encode_submit_msg, encode_submit_request_cbor,
+    read_signing_key,
+};
 
 #[derive(Debug, Deserialize)]
 struct MetricsResponse {
@@ -38,6 +40,27 @@ struct MetricsResponse {
 
 const HUB_KEY_VERSION: u8 = 1;
 const RATE_LIMIT_TTL_SEC: u64 = 2;
+
+async fn submit_cbor(
+    http: &Client,
+    endpoint: &str,
+    request: &SubmitRequest,
+) -> Result<veen_hub::pipeline::SubmitResponse> {
+    let body = encode_submit_request_cbor(request)?;
+    let response = http
+        .post(endpoint)
+        .header("Content-Type", "application/cbor")
+        .body(body)
+        .send()
+        .await
+        .context("submitting CBOR request")?
+        .error_for_status()
+        .context("submit endpoint returned error")?
+        .bytes()
+        .await
+        .context("reading submit response")?;
+    decode_submit_response_cbor(&response)
+}
 const RATE_LIMIT_EXPIRY_SLEEP_SEC: u64 = 2;
 const CLIENT_LIFETIME_SEC: u64 = 2;
 const CLIENT_LIFETIME_EXPIRY_SLEEP_SEC: u64 = 2;
@@ -113,7 +136,7 @@ async fn goals_core_pipeline() -> Result<()> {
     let client_id = client_id_hex(&client_signing);
 
     let http = Client::builder().no_proxy().build()?;
-    let submit_endpoint = format!("http://{}/submit", runtime.listen_addr());
+    let submit_endpoint = format!("http://{}/v1/submit", runtime.listen_addr());
 
     let msg = encode_submit_msg(
         "core/main",
@@ -123,9 +146,10 @@ async fn goals_core_pipeline() -> Result<()> {
         None,
         &serde_json::to_vec(&serde_json::json!({ "text": "hello-veens" }))?,
     )?;
-    let _main_response: SubmitResponse = http
-        .post(&submit_endpoint)
-        .json(&SubmitRequest {
+    let _main_response = submit_cbor(
+        &http,
+        &submit_endpoint,
+        &SubmitRequest {
             stream: "core/main".to_string(),
             client_id: client_id.clone(),
             msg,
@@ -133,15 +157,10 @@ async fn goals_core_pipeline() -> Result<()> {
             auth_ref: None,
             idem: None,
             pow_cookie: None,
-        })
-        .send()
-        .await
-        .context("submitting core message")?
-        .error_for_status()
-        .context("submit endpoint returned error")?
-        .json()
-        .await
-        .context("parsing submit response")?;
+        },
+    )
+    .await
+    .context("submitting core message")?;
 
     cli_streams.push("core/main".to_string());
     run_cli([
@@ -171,9 +190,10 @@ async fn goals_core_pipeline() -> Result<()> {
         None,
         &serde_json::to_vec(&serde_json::json!({ "text": "attachment" }))?,
     )?;
-    let attachment_response: SubmitResponse = http
-        .post(&submit_endpoint)
-        .json(&SubmitRequest {
+    let attachment_response = submit_cbor(
+        &http,
+        &submit_endpoint,
+        &SubmitRequest {
             stream: "core/att".to_string(),
             client_id: client_id.clone(),
             msg,
@@ -184,15 +204,10 @@ async fn goals_core_pipeline() -> Result<()> {
             auth_ref: None,
             idem: None,
             pow_cookie: None,
-        })
-        .send()
-        .await
-        .context("submitting attachment message")?
-        .error_for_status()
-        .context("attachment submit returned error")?
-        .json()
-        .await
-        .context("parsing attachment submit response")?;
+        },
+    )
+    .await
+    .context("submitting attachment message")?;
 
     let attachment_bundle_path =
         message_bundle_path(hub_dir.path(), "core/att", attachment_response.seq);
@@ -285,19 +300,21 @@ async fn goals_core_pipeline() -> Result<()> {
 
     let mut rng = OsRng;
     let unauthorized_signing = SigningKey::generate(&mut rng);
+    let unauthorized_request = make_submit_request(
+        "core/capped",
+        &unauthorized_signing,
+        1,
+        0,
+        serde_json::json!({"text":"denied"}),
+        None,
+        Some(auth_ref_hex.clone()),
+        None,
+        None,
+    )?;
     let unauthorized = http
         .post(&submit_endpoint)
-        .json(&make_submit_request(
-            "core/capped",
-            &unauthorized_signing,
-            1,
-            0,
-            serde_json::json!({"text":"denied"}),
-            None,
-            Some(auth_ref_hex.clone()),
-            None,
-            None,
-        )?)
+        .header("Content-Type", "application/cbor")
+        .body(encode_submit_request_cbor(&unauthorized_request)?)
         .send()
         .await
         .context("submitting unauthorized message")?;
@@ -311,41 +328,36 @@ async fn goals_core_pipeline() -> Result<()> {
         "expected capability rejection to return E.AUTH or E.CAP, got: {unauthorized_body}"
     );
 
-    let _authorized: SubmitResponse = http
-        .post(&submit_endpoint)
-        .json(&make_submit_request(
-            "core/capped",
-            &client_signing,
-            1,
-            0,
-            serde_json::json!({"text":"authorized"}),
-            None,
-            Some(auth_ref_hex.clone()),
-            None,
-            None,
-        )?)
-        .send()
+    let authorized_request = make_submit_request(
+        "core/capped",
+        &client_signing,
+        1,
+        0,
+        serde_json::json!({"text":"authorized"}),
+        None,
+        Some(auth_ref_hex.clone()),
+        None,
+        None,
+    )?;
+    let _authorized = submit_cbor(&http, &submit_endpoint, &authorized_request)
         .await
-        .context("submitting authorized message")?
-        .error_for_status()
-        .context("authorized submit returned error")?
-        .json()
-        .await
-        .context("parsing authorized submit response")?;
+        .context("submitting authorized message")?;
 
+    let rate_request = make_submit_request(
+        "core/capped",
+        &client_signing,
+        2,
+        0,
+        serde_json::json!({"text":"rate-limited"}),
+        None,
+        Some(auth_ref_hex.clone()),
+        None,
+        None,
+    )?;
     let rate_limited = http
         .post(&submit_endpoint)
-        .json(&make_submit_request(
-            "core/capped",
-            &client_signing,
-            2,
-            0,
-            serde_json::json!({"text":"rate-limited"}),
-            None,
-            Some(auth_ref_hex.clone()),
-            None,
-            None,
-        )?)
+        .header("Content-Type", "application/cbor")
+        .body(encode_submit_request_cbor(&rate_request)?)
         .send()
         .await
         .context("submitting rate-limited message")?;
@@ -372,43 +384,38 @@ async fn goals_core_pipeline() -> Result<()> {
         .context("parsing retry-after header as integer")?;
     tokio::time::sleep(Duration::from_secs(retry_after_secs.max(1))).await;
 
-    let _rate_recovered: SubmitResponse = http
-        .post(&submit_endpoint)
-        .json(&make_submit_request(
-            "core/capped",
-            &client_signing,
-            3,
-            0,
-            serde_json::json!({"text":"rate-recovered"}),
-            None,
-            Some(auth_ref_hex.clone()),
-            None,
-            None,
-        )?)
-        .send()
+    let rate_recovered_request = make_submit_request(
+        "core/capped",
+        &client_signing,
+        3,
+        0,
+        serde_json::json!({"text":"rate-recovered"}),
+        None,
+        Some(auth_ref_hex.clone()),
+        None,
+        None,
+    )?;
+    let _rate_recovered = submit_cbor(&http, &submit_endpoint, &rate_recovered_request)
         .await
-        .context("submitting message after rate token refill")?
-        .error_for_status()
-        .context("rate limit persisted after retry-after interval")?
-        .json()
-        .await
-        .context("parsing rate recovery response")?;
+        .context("submitting message after rate token refill")?;
 
     tokio::time::sleep(Duration::from_secs(RATE_LIMIT_EXPIRY_SLEEP_SEC)).await;
 
+    let ttl_request = make_submit_request(
+        "core/capped",
+        &client_signing,
+        4,
+        0,
+        serde_json::json!({"text":"ttl-expired"}),
+        None,
+        Some(auth_ref_hex.clone()),
+        None,
+        None,
+    )?;
     let ttl_expired = http
         .post(&submit_endpoint)
-        .json(&make_submit_request(
-            "core/capped",
-            &client_signing,
-            4,
-            0,
-            serde_json::json!({"text":"ttl-expired"}),
-            None,
-            Some(auth_ref_hex.clone()),
-            None,
-            None,
-        )?)
+        .header("Content-Type", "application/cbor")
+        .body(encode_submit_request_cbor(&ttl_request)?)
         .send()
         .await
         .context("submitting message after capability ttl expiry")?;
@@ -442,27 +449,20 @@ async fn goals_core_pipeline() -> Result<()> {
             .context("decoding reauthorize response")?;
     assert_eq!(hex::encode(reauthorized.auth_ref.as_ref()), auth_ref_hex);
 
-    let _ttl_recovered: SubmitResponse = http
-        .post(&submit_endpoint)
-        .json(&make_submit_request(
-            "core/capped",
-            &client_signing,
-            5,
-            0,
-            serde_json::json!({"text":"ttl-recovered"}),
-            None,
-            Some(auth_ref_hex.clone()),
-            None,
-            None,
-        )?)
-        .send()
+    let ttl_recovered_request = make_submit_request(
+        "core/capped",
+        &client_signing,
+        5,
+        0,
+        serde_json::json!({"text":"ttl-recovered"}),
+        None,
+        Some(auth_ref_hex.clone()),
+        None,
+        None,
+    )?;
+    let _ttl_recovered = submit_cbor(&http, &submit_endpoint, &ttl_recovered_request)
         .await
-        .context("submitting message after capability reauthorization")?
-        .error_for_status()
-        .context("submission after reauthorization returned error")?
-        .json()
-        .await
-        .context("parsing capability recovery response")?;
+        .context("submitting message after capability reauthorization")?;
 
     let metrics: MetricsResponse = http
         .get(format!("http://{}/tooling/metrics", runtime.listen_addr()))
@@ -549,22 +549,24 @@ async fn goals_pow_prefilter_enforced() -> Result<()> {
 
     let client_signing = read_signing_key(&client_dir)?;
     let http = Client::builder().no_proxy().build()?;
-    let submit_endpoint = format!("http://{}/submit", runtime.listen_addr());
+    let submit_endpoint = format!("http://{}/v1/submit", runtime.listen_addr());
     let pow_stream = "core/pow";
 
+    let forbidden_request = make_submit_request(
+        pow_stream,
+        &client_signing,
+        1,
+        0,
+        serde_json::json!({ "text": "pow" }),
+        None,
+        None,
+        None,
+        None,
+    )?;
     let forbidden = http
         .post(&submit_endpoint)
-        .json(&make_submit_request(
-            pow_stream,
-            &client_signing,
-            1,
-            0,
-            serde_json::json!({ "text": "pow" }),
-            None,
-            None,
-            None,
-            None,
-        )?)
+        .header("Content-Type", "application/cbor")
+        .body(encode_submit_request_cbor(&forbidden_request)?)
         .send()
         .await
         .context("submitting message without pow cookie")?;
@@ -575,27 +577,20 @@ async fn goals_pow_prefilter_enforced() -> Result<()> {
     let pow_difficulty = 10;
     let pow_envelope = solve_pow_for_tests(pow_challenge.clone(), pow_difficulty);
 
-    let success: SubmitResponse = http
-        .post(&submit_endpoint)
-        .json(&make_submit_request(
-            pow_stream,
-            &client_signing,
-            2,
-            0,
-            serde_json::json!({ "text": "pow" }),
-            None,
-            None,
-            Some(pow_envelope),
-            None,
-        )?)
-        .send()
+    let success_request = make_submit_request(
+        pow_stream,
+        &client_signing,
+        2,
+        0,
+        serde_json::json!({ "text": "pow" }),
+        None,
+        None,
+        Some(pow_envelope),
+        None,
+    )?;
+    let success = submit_cbor(&http, &submit_endpoint, &success_request)
         .await
-        .context("submitting message with pow cookie")?
-        .error_for_status()
-        .context("pow submit returned error")?
-        .json()
-        .await
-        .context("parsing pow submit response")?;
+        .context("submitting message with pow cookie")?;
 
     assert_eq!(success.stream, pow_stream);
 
@@ -717,44 +712,39 @@ async fn goals_capability_gating_persists() -> Result<()> {
     .await?;
     ensure_hub_key(hub_dir.path()).await?;
     let restart_runtime = HubRuntime::start(restart_config).await?;
-    let submit_endpoint = format!("http://{}/submit", restart_runtime.listen_addr());
+    let submit_endpoint = format!("http://{}/v1/submit", restart_runtime.listen_addr());
 
-    let authorized: SubmitResponse = http
-        .post(&submit_endpoint)
-        .json(&make_submit_request(
-            "core/capped",
-            &client_signing,
-            1,
-            0,
-            serde_json::json!({ "text": "authorized" }),
-            None,
-            Some(auth_ref_hex.clone()),
-            None,
-            None,
-        )?)
-        .send()
+    let authorized_request = make_submit_request(
+        "core/capped",
+        &client_signing,
+        1,
+        0,
+        serde_json::json!({ "text": "authorized" }),
+        None,
+        Some(auth_ref_hex.clone()),
+        None,
+        None,
+    )?;
+    let authorized = submit_cbor(&http, &submit_endpoint, &authorized_request)
         .await
-        .context("submitting authorized message after restart")?
-        .error_for_status()
-        .context("authorized submit after restart returned error")?
-        .json()
-        .await
-        .context("parsing authorized submit response")?;
+        .context("submitting authorized message after restart")?;
     assert_eq!(authorized.stream, "core/capped");
 
+    let missing_auth_request = make_submit_request(
+        "core/capped",
+        &client_signing,
+        2,
+        0,
+        serde_json::json!({ "text": "unauthorized" }),
+        None,
+        None,
+        None,
+        None,
+    )?;
     let missing_auth = http
         .post(&submit_endpoint)
-        .json(&make_submit_request(
-            "core/capped",
-            &client_signing,
-            2,
-            0,
-            serde_json::json!({ "text": "unauthorized" }),
-            None,
-            None,
-            None,
-            None,
-        )?)
+        .header("Content-Type", "application/cbor")
+        .body(encode_submit_request_cbor(&missing_auth_request)?)
         .send()
         .await
         .context("submitting message without auth_ref")?;
@@ -877,7 +867,7 @@ async fn goals_admission_bounds() -> Result<()> {
     ensure_hub_key(hub_dir.path()).await?;
     let runtime = HubRuntime::start(config).await?;
     let hub_url = format!("http://{}", runtime.listen_addr());
-    let submit_endpoint = format!("{hub_url}/submit");
+    let submit_endpoint = format!("{hub_url}/v1/submit");
     let http = Client::builder().no_proxy().build()?;
 
     let cap_quota_bytes =
@@ -907,43 +897,38 @@ async fn goals_admission_bounds() -> Result<()> {
 
     let mut quota_seqs = Vec::new();
     for index in 0..2 {
-        let quota_response: SubmitResponse = http
-            .post(&submit_endpoint)
-            .json(&make_submit_request(
-                stream_quota,
-                &client_a_signing,
-                index + 1,
-                0,
-                serde_json::json!({ "msg": index }),
-                None,
-                Some(auth_ref_quota.clone()),
-                None,
-                None,
-            )?)
-            .send()
-            .await
-            .with_context(|| format!("submitting quota message {index}"))?
-            .error_for_status()
-            .context("quota submission returned error")?
-            .json()
-            .await
-            .context("decoding quota submit response")?;
-        quota_seqs.push(quota_response.seq);
-    }
-
-    let quota_fail = http
-        .post(&submit_endpoint)
-        .json(&make_submit_request(
+        let quota_request = make_submit_request(
             stream_quota,
             &client_a_signing,
-            3,
+            index + 1,
             0,
-            serde_json::json!({ "msg": "over" }),
+            serde_json::json!({ "msg": index }),
             None,
             Some(auth_ref_quota.clone()),
             None,
             None,
-        )?)
+        )?;
+        let quota_response = submit_cbor(&http, &submit_endpoint, &quota_request)
+            .await
+            .with_context(|| format!("submitting quota message {index}"))?;
+        quota_seqs.push(quota_response.seq);
+    }
+
+    let quota_fail_request = make_submit_request(
+        stream_quota,
+        &client_a_signing,
+        3,
+        0,
+        serde_json::json!({ "msg": "over" }),
+        None,
+        Some(auth_ref_quota.clone()),
+        None,
+        None,
+    )?;
+    let quota_fail = http
+        .post(&submit_endpoint)
+        .header("Content-Type", "application/cbor")
+        .body(encode_submit_request_cbor(&quota_fail_request)?)
         .send()
         .await
         .context("submitting over-quota message")?;
@@ -981,43 +966,38 @@ async fn goals_admission_bounds() -> Result<()> {
     let auth_ref_b = hex::encode(auth_b.auth_ref.as_ref());
     let client_b_signing = read_signing_key(&client_b_dir)?;
 
-    let lifetime_initial: SubmitResponse = http
-        .post(&submit_endpoint)
-        .json(&make_submit_request(
-            stream_lifetime,
-            &client_b_signing,
-            1,
-            0,
-            serde_json::json!({ "msg": "first" }),
-            None,
-            Some(auth_ref_b.clone()),
-            None,
-            None,
-        )?)
-        .send()
+    let lifetime_initial_request = make_submit_request(
+        stream_lifetime,
+        &client_b_signing,
+        1,
+        0,
+        serde_json::json!({ "msg": "first" }),
+        None,
+        Some(auth_ref_b.clone()),
+        None,
+        None,
+    )?;
+    let lifetime_initial = submit_cbor(&http, &submit_endpoint, &lifetime_initial_request)
         .await
-        .context("submitting initial lifetime message")?
-        .error_for_status()
-        .context("initial lifetime submission returned error")?
-        .json()
-        .await
-        .context("decoding initial lifetime submit response")?;
+        .context("submitting initial lifetime message")?;
 
     tokio::time::sleep(Duration::from_secs(CLIENT_LIFETIME_EXPIRY_SLEEP_SEC)).await;
 
+    let lifetime_fail_request = make_submit_request(
+        stream_lifetime,
+        &client_b_signing,
+        2,
+        0,
+        serde_json::json!({ "msg": "expired" }),
+        None,
+        Some(auth_ref_b.clone()),
+        None,
+        None,
+    )?;
     let lifetime_fail = http
         .post(&submit_endpoint)
-        .json(&make_submit_request(
-            stream_lifetime,
-            &client_b_signing,
-            2,
-            0,
-            serde_json::json!({ "msg": "expired" }),
-            None,
-            Some(auth_ref_b.clone()),
-            None,
-            None,
-        )?)
+        .header("Content-Type", "application/cbor")
+        .body(encode_submit_request_cbor(&lifetime_fail_request)?)
         .send()
         .await
         .context("submitting lifetime-expired message")?;

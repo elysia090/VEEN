@@ -26,7 +26,9 @@ use veen_hub::pipeline::{AnchorLog, AnchorRequest};
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 mod support;
-use support::{client_id_hex, encode_submit_msg};
+use support::{
+    client_id_hex, decode_submit_response_cbor, encode_submit_msg, encode_submit_request_cbor,
+};
 
 /// Scenario acceptance covering audit anchor workflows with checkpoint binding.
 ///
@@ -68,25 +70,30 @@ async fn goals_audit_anchor() -> Result<()> {
         None,
         &serde_json::to_vec(&serde_json::json!({"text":"anchor"}))?,
     )?;
-    let submit: veen_hub::pipeline::SubmitResponse = http
-        .post(format!("http://{}/submit", runtime.listen_addr()))
-        .json(&veen_hub::pipeline::SubmitRequest {
-            stream: stream.to_string(),
-            client_id: client_id.clone(),
-            msg,
-            attachments: None,
-            auth_ref: None,
-            idem: None,
-            pow_cookie: None,
-        })
-        .send()
-        .await
-        .context("submitting anchor-bound message")?
-        .error_for_status()
-        .context("submit endpoint returned error for anchor scenario")?
-        .json()
-        .await
-        .context("decoding anchor submit response")?;
+    let submit_request = veen_hub::pipeline::SubmitRequest {
+        stream: stream.to_string(),
+        client_id: client_id.clone(),
+        msg,
+        attachments: None,
+        auth_ref: None,
+        idem: None,
+        pow_cookie: None,
+    };
+    let submit_body = encode_submit_request_cbor(&submit_request)?;
+    let submit = decode_submit_response_cbor(
+        &http
+            .post(format!("http://{}/v1/submit", runtime.listen_addr()))
+            .header("Content-Type", "application/cbor")
+            .body(submit_body)
+            .send()
+            .await
+            .context("submitting anchor-bound message")?
+            .error_for_status()
+            .context("submit endpoint returned error for anchor scenario")?
+            .bytes()
+            .await
+            .context("reading anchor submit response")?,
+    )?;
 
     let checkpoint_bytes =
         create_signed_checkpoint(hub_dir.path(), stream, submit.seq, &submit.mmr_root).await?;

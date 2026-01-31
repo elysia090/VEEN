@@ -18,7 +18,11 @@ use veen_hub::pipeline::{StreamMessageWithProof, SubmitRequest, SubmitResponse};
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 mod support;
-use support::{client_id_hex, encode_submit_msg};
+use support::{
+    client_id_hex, decode_stream_response_cbor, decode_submit_response_cbor,
+    encode_stream_request_cbor, encode_submit_msg, encode_submit_request_cbor,
+    stream_items_to_proofs,
+};
 
 const HUB_KEY_VERSION: u8 = 1;
 
@@ -68,17 +72,22 @@ async fn stream_proof_reuses_stored_entries() -> Result<()> {
     overwrite_proof_peaks(&bundle, "deadbeef").await?;
 
     let runtime = HubRuntime::start(config).await?;
-    let proven: Vec<StreamMessageWithProof> = client
-        .get(format!("{}/stream", base))
-        .query(&[("stream", stream), ("from", "5"), ("with_proof", "true")])
-        .send()
-        .await
-        .context("requesting stream proofs")?
-        .error_for_status()
-        .context("stream endpoint returned error")?
-        .json()
-        .await
-        .context("decoding proven messages")?;
+    let stream_body = encode_stream_request_cbor(stream, 5, None, true)?;
+    let response = decode_stream_response_cbor(
+        &client
+            .post(format!("{}/v1/stream", base))
+            .header("Content-Type", "application/cbor")
+            .body(stream_body)
+            .send()
+            .await
+            .context("requesting stream proofs")?
+            .error_for_status()
+            .context("stream endpoint returned error")?
+            .bytes()
+            .await
+            .context("reading stream response")?,
+    )?;
+    let proven: Vec<StreamMessageWithProof> = stream_items_to_proofs(response.items)?;
     assert_eq!(
         proven.len(),
         1,
@@ -125,17 +134,22 @@ async fn legacy_bundles_are_migrated() -> Result<()> {
 
     let runtime = HubRuntime::start(config).await?;
 
-    let proven: Vec<StreamMessageWithProof> = client
-        .get(format!("{}/stream", base))
-        .query(&[("stream", stream), ("with_proof", "true")])
-        .send()
-        .await
-        .context("requesting stream proofs")?
-        .error_for_status()
-        .context("stream endpoint returned error")?
-        .json()
-        .await
-        .context("decoding proven messages")?;
+    let stream_body = encode_stream_request_cbor(stream, 0, None, true)?;
+    let response = decode_stream_response_cbor(
+        &client
+            .post(format!("{}/v1/stream", base))
+            .header("Content-Type", "application/cbor")
+            .body(stream_body)
+            .send()
+            .await
+            .context("requesting stream proofs")?
+            .error_for_status()
+            .context("stream endpoint returned error")?
+            .bytes()
+            .await
+            .context("reading stream response")?,
+    )?;
+    let proven: Vec<StreamMessageWithProof> = stream_items_to_proofs(response.items)?;
     assert_eq!(proven.len(), 1, "single legacy message should remain");
     assert!(!proven[0].receipt.mmr_root.is_empty());
 
@@ -171,25 +185,30 @@ async fn submit_message(
         None,
         &serde_json::to_vec(&json!({"text": format!("msg-{idx}")}))?,
     )?;
-    client
-        .post(format!("{}/submit", base))
-        .json(&SubmitRequest {
-            stream: stream.to_string(),
-            client_id: client_id_hex(client_signing),
-            msg,
-            attachments: None,
-            auth_ref: None,
-            idem: None,
-            pow_cookie: None,
-        })
-        .send()
-        .await
-        .context("submitting message")?
-        .error_for_status()
-        .context("submit endpoint returned error")?
-        .json()
-        .await
-        .context("decoding submit response")
+    let submit_request = SubmitRequest {
+        stream: stream.to_string(),
+        client_id: client_id_hex(client_signing),
+        msg,
+        attachments: None,
+        auth_ref: None,
+        idem: None,
+        pow_cookie: None,
+    };
+    let submit_body = encode_submit_request_cbor(&submit_request)?;
+    decode_submit_response_cbor(
+        &client
+            .post(format!("{}/v1/submit", base))
+            .header("Content-Type", "application/cbor")
+            .body(submit_body)
+            .send()
+            .await
+            .context("submitting message")?
+            .error_for_status()
+            .context("submit endpoint returned error")?
+            .bytes()
+            .await
+            .context("reading submit response")?,
+    )
 }
 
 async fn overwrite_proof_peaks(path: &Path, marker: &str) -> Result<()> {

@@ -19,6 +19,8 @@ use veen_core::wire::message::MSG_VERSION;
 use veen_core::wire::types::{ClientId, CtHash, Signature64};
 use veen_core::{Label, Msg, CIPHERTEXT_LEN_PREFIX, HPKE_ENC_LEN, MAX_MSG_BYTES};
 use veen_hub::pipeline::{HubPipeline, SubmitRequest, SubmitResponse};
+
+use crate::http_cbor::{decode_submit_response, encode_submit_request};
 use veen_hub::runtime::{
     AdmissionConfig, AnchorConfig, DedupConfig, FederationConfig, HubRole, HubRuntimeConfig,
     ObservabilityConfig,
@@ -351,11 +353,13 @@ impl PerfDriver {
                     .http
                     .as_ref()
                     .ok_or_else(|| anyhow!("missing HTTP context for perf run"))?;
-                let url = format!("{}/submit", http.base_url);
+                let url = format!("{}/v1/submit", http.base_url);
+                let body = encode_submit_request(&request)?;
                 let response = http
                     .client
                     .post(url)
-                    .json(&request)
+                    .header("Content-Type", "application/cbor")
+                    .body(body)
                     .send()
                     .await
                     .context("issuing HTTP submit")?;
@@ -364,10 +368,8 @@ impl PerfDriver {
                     let body = response.text().await.unwrap_or_default();
                     return Err(anyhow!("HTTP submit failed: {status} {body}"));
                 }
-                response
-                    .json::<SubmitResponse>()
-                    .await
-                    .context("decoding hub response")
+                let bytes = response.bytes().await.context("reading hub response")?;
+                decode_submit_response(&bytes)
             }
         }
     }
