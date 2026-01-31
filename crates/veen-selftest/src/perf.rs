@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
+use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 use reqwest::{Client, ClientBuilder};
 use serde::Serialize;
@@ -12,7 +15,9 @@ use tokio::sync::{Mutex, Semaphore};
 
 use veen_core::cap_stream_id_from_label;
 use veen_core::profile::Profile;
-use veen_core::wire::types::ClientId;
+use veen_core::wire::message::MSG_VERSION;
+use veen_core::wire::types::{ClientId, CtHash, Signature64};
+use veen_core::{Label, Msg, CIPHERTEXT_LEN_PREFIX, HPKE_ENC_LEN, MAX_MSG_BYTES};
 use veen_hub::pipeline::{HubPipeline, SubmitRequest, SubmitResponse};
 use veen_hub::runtime::{
     AdmissionConfig, AnchorConfig, DedupConfig, FederationConfig, HubRole, HubRuntimeConfig,
@@ -84,6 +89,7 @@ struct PerfHarness {
     pipeline: HubPipeline,
     stream_label: String,
     client_id: String,
+    client_signing: SigningKey,
     http: Option<Arc<HttpContext>>,
     _tempdir: TempDir,
     server: Option<HubServerHandle>,
@@ -98,7 +104,9 @@ impl PerfHarness {
 
         let storage = HubStorage::bootstrap(&config).await?;
         let pipeline = HubPipeline::initialise(&config, &storage).await?;
-        let client_id = random_client_id_hex();
+        let mut rng = OsRng;
+        let client_signing = SigningKey::generate(&mut rng);
+        let client_id = hex::encode(client_signing.verifying_key().as_bytes());
         let stream_label = "perf/main".to_string();
         cap_stream_id_from_label(&stream_label).context("validating perf stream label")?;
 
@@ -123,6 +131,7 @@ impl PerfHarness {
             pipeline,
             stream_label,
             client_id,
+            client_signing,
             http,
             _tempdir: tempdir,
             server,
@@ -268,6 +277,7 @@ struct PerfDriver {
     pipeline: HubPipeline,
     stream_label: String,
     client_id: String,
+    client_signing: SigningKey,
     http: Option<Arc<HttpContext>>,
     payload: serde_json::Value,
     idem: u64,
@@ -285,6 +295,7 @@ impl PerfDriver {
             pipeline: harness.pipeline.clone(),
             stream_label: harness.stream_label.clone(),
             client_id: harness.client_id.clone(),
+            client_signing: harness.client_signing.clone(),
             http: harness.http.clone(),
             payload,
             idem: idx,
@@ -315,14 +326,19 @@ impl PerfDriver {
     }
 
     async fn submit(&self) -> Result<SubmitResponse> {
+        let msg = encode_submit_msg(
+            &self.stream_label,
+            &self.client_signing,
+            self.idem.saturating_add(1),
+            0,
+            &self.payload,
+        )?;
         let request = SubmitRequest {
             stream: self.stream_label.clone(),
             client_id: self.client_id.clone(),
-            payload: self.payload.clone(),
+            msg,
             attachments: None,
             auth_ref: None,
-            expires_at: None,
-            schema: None,
             idem: Some(self.idem),
             pow_cookie: None,
         };
@@ -444,11 +460,80 @@ fn millis(start: Instant, end: Instant) -> u64 {
     end.duration_since(start).as_millis() as u64
 }
 
-fn random_client_id_hex() -> String {
-    let signing = ed25519_dalek::SigningKey::generate(&mut OsRng);
-    let verifier = signing.verifying_key();
-    let id = ClientId::from(*verifier.as_bytes());
-    hex::encode(id.as_ref())
+fn encode_submit_msg(
+    stream: &str,
+    client_signing: &SigningKey,
+    client_seq: u64,
+    prev_ack: u64,
+    payload: &serde_json::Value,
+) -> Result<String> {
+    let label = derive_label_for_stream(stream)?;
+    let profile_id = Profile::default()
+        .id()
+        .context("computing profile id for perf msg")?;
+    let client_id = ClientId::from(*client_signing.verifying_key().as_bytes());
+    let body_bytes = serde_json::to_vec(payload).context("encoding perf payload")?;
+    let ciphertext = build_ciphertext_envelope(&[], &body_bytes, 256)?;
+    if ciphertext.len() > MAX_MSG_BYTES {
+        bail!(
+            "perf ciphertext size {} exceeds max_msg_bytes {}",
+            ciphertext.len(),
+            MAX_MSG_BYTES
+        );
+    }
+    let ct_hash = CtHash::compute(&ciphertext);
+    let mut msg = Msg {
+        ver: MSG_VERSION,
+        profile_id,
+        label,
+        client_id,
+        client_seq,
+        prev_ack,
+        auth_ref: None,
+        ct_hash,
+        ciphertext,
+        sig: Signature64::new([0u8; 64]),
+    };
+    let digest = msg
+        .signing_tagged_hash()
+        .context("computing perf msg signing digest")?;
+    let signature = client_signing.sign(digest.as_ref());
+    msg.sig = Signature64::from(signature.to_bytes());
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&msg, &mut encoded).context("encoding perf msg")?;
+    Ok(BASE64_STANDARD.encode(encoded))
+}
+
+fn derive_label_for_stream(stream: &str) -> Result<Label> {
+    let stream_id = cap_stream_id_from_label(stream)
+        .with_context(|| format!("deriving stream identifier for {}", stream))?;
+    Ok(Label::derive([], stream_id, 0))
+}
+
+fn build_ciphertext_envelope(header: &[u8], body: &[u8], pad_block: u64) -> Result<Vec<u8>> {
+    if header.len() > u32::MAX as usize || body.len() > u32::MAX as usize {
+        bail!("ciphertext lengths overflow u32");
+    }
+    let mut ciphertext =
+        Vec::with_capacity(HPKE_ENC_LEN + CIPHERTEXT_LEN_PREFIX + header.len() + body.len());
+    ciphertext.extend_from_slice(&[0u8; HPKE_ENC_LEN]);
+    ciphertext.extend_from_slice(&(header.len() as u32).to_be_bytes());
+    ciphertext.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    ciphertext.extend_from_slice(header);
+    ciphertext.extend_from_slice(body);
+    if pad_block > 0 {
+        let pad_block = usize::try_from(pad_block)
+            .map_err(|_| anyhow!("invalid pad_block size {pad_block}"))?;
+        if pad_block == 0 {
+            bail!("pad_block must be non-zero when enabled");
+        }
+        let remainder = ciphertext.len() % pad_block;
+        if remainder != 0 {
+            let padding = pad_block - remainder;
+            ciphertext.extend(std::iter::repeat(0u8).take(padding));
+        }
+    }
+    Ok(ciphertext)
 }
 
 fn current_millis() -> u128 {

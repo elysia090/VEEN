@@ -1,11 +1,13 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
-use std::fs as stdfs;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use ciborium::{de::from_reader, ser::into_writer};
 use ed25519_dalek::{Signer, SigningKey};
 
@@ -26,9 +28,13 @@ use tracing::warn;
 
 use veen_core::label::Label;
 use veen_core::wire::checkpoint::{Checkpoint, CHECKPOINT_VERSION};
+use veen_core::wire::message::MSG_VERSION;
 use veen_core::wire::mmr::Mmr;
-use veen_core::wire::types::{LeafHash, MmrRoot, Signature64};
-use veen_core::{h, ht};
+use veen_core::wire::types::{ClientId, CtHash, LeafHash, MmrRoot, Signature64};
+use veen_core::{
+    cap_stream_id_from_label, h, ht, Msg, Profile, CIPHERTEXT_LEN_PREFIX, HPKE_ENC_LEN,
+    MAX_MSG_BYTES,
+};
 use veen_hub::pipeline::{HubStreamState, StoredMessage, StreamMessageWithProof, SubmitRequest};
 use veen_hub::pipeline::{PowCookieEnvelope, SubmitResponse};
 use veen_hub::storage::{CHECKPOINTS_FILE, HUB_PID_FILE};
@@ -988,17 +994,9 @@ impl IntegrationHarness {
             "event_type": "health_check",
             "event_time": current_unix_timestamp()? + 1,
         });
-        let submit_request = SubmitRequest {
-            stream: STREAM.to_string(),
-            client_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
-            payload: http_payload,
-            attachments: None,
-            auth_ref: None,
-            expires_at: None,
-            schema: None,
-            idem: None,
-            pow_cookie: None,
-        };
+        let mut rng = OsRng;
+        let signing_key = SigningKey::generate(&mut rng);
+        let submit_request = build_submit_request(STREAM, &signing_key, 1, 0, http_payload, None)?;
         self.http
             .post(format!("{hub_url}/submit"))
             .json(&submit_request)
@@ -1180,21 +1178,19 @@ impl IntegrationHarness {
         )
         .await?;
 
-        let client_id = read_client_id(&client_dir.join("identity_card.pub"))?;
+        let mut rng = OsRng;
+        let signing_key = SigningKey::generate(&mut rng);
         let forbidden = self
             .http
             .post(&submit_endpoint)
-            .json(&SubmitRequest {
-                stream: "hardened/pow".to_string(),
-                client_id: client_id.clone(),
-                payload: json!({ "msg": "missing pow" }),
-                attachments: None,
-                auth_ref: None,
-                expires_at: None,
-                schema: None,
-                idem: None,
-                pow_cookie: None,
-            })
+            .json(&build_submit_request(
+                "hardened/pow",
+                &signing_key,
+                1,
+                0,
+                json!({ "msg": "missing pow" }),
+                None,
+            )?)
             .send()
             .await
             .context("submitting hardened message without pow")?;
@@ -1228,17 +1224,14 @@ impl IntegrationHarness {
         let accepted: SubmitResponse = self
             .http
             .post(&submit_endpoint)
-            .json(&SubmitRequest {
-                stream: "hardened/pow".to_string(),
-                client_id: client_id.clone(),
-                payload: json!({ "msg": "with pow" }),
-                attachments: None,
-                auth_ref: None,
-                expires_at: None,
-                schema: None,
-                idem: None,
-                pow_cookie: Some(pow_envelope.clone()),
-            })
+            .json(&build_submit_request(
+                "hardened/pow",
+                &signing_key,
+                2,
+                0,
+                json!({ "msg": "with pow" }),
+                Some(pow_envelope.clone()),
+            )?)
             .send()
             .await
             .context("submitting hardened message with pow")?
@@ -1251,17 +1244,14 @@ impl IntegrationHarness {
         let rate_limited = self
             .http
             .post(&submit_endpoint)
-            .json(&SubmitRequest {
-                stream: "hardened/pow".to_string(),
-                client_id: client_id.clone(),
-                payload: json!({ "msg": "quota" }),
-                attachments: None,
-                auth_ref: None,
-                expires_at: None,
-                schema: None,
-                idem: None,
-                pow_cookie: Some(pow_envelope),
-            })
+            .json(&build_submit_request(
+                "hardened/pow",
+                &signing_key,
+                3,
+                0,
+                json!({ "msg": "quota" }),
+                Some(pow_envelope),
+            )?)
             .send()
             .await
             .context("submitting hardened rate-limit probe")?;
@@ -2388,13 +2378,150 @@ fn parse_recorder_event(entry: &StreamMessageWithProof) -> Result<RecorderEvent>
     })
 }
 
+fn build_submit_request(
+    stream: &str,
+    signing_key: &SigningKey,
+    client_seq: u64,
+    prev_ack: u64,
+    payload: serde_json::Value,
+    pow_cookie: Option<PowCookieEnvelope>,
+) -> Result<SubmitRequest> {
+    let payload_bytes = serde_json::to_vec(&payload).context("encoding submit payload")?;
+    let msg = encode_submit_msg(stream, signing_key, client_seq, prev_ack, &payload_bytes)?;
+    Ok(SubmitRequest {
+        stream: stream.to_string(),
+        client_id: hex::encode(signing_key.verifying_key().as_bytes()),
+        msg,
+        attachments: None,
+        auth_ref: None,
+        idem: None,
+        pow_cookie,
+    })
+}
+
+fn encode_submit_msg(
+    stream: &str,
+    signing_key: &SigningKey,
+    client_seq: u64,
+    prev_ack: u64,
+    payload: &[u8],
+) -> Result<String> {
+    let label = derive_label_for_stream(stream)?;
+    let profile_id = Profile::default()
+        .id()
+        .context("computing profile id for submit msg")?;
+    let client_id = ClientId::from(*signing_key.verifying_key().as_bytes());
+    let ciphertext = build_ciphertext_envelope(&[], payload, 256)?;
+    if ciphertext.len() > MAX_MSG_BYTES {
+        bail!(
+            "submit ciphertext size {} exceeds max_msg_bytes {}",
+            ciphertext.len(),
+            MAX_MSG_BYTES
+        );
+    }
+    let ct_hash = CtHash::compute(&ciphertext);
+    let mut msg = Msg {
+        ver: MSG_VERSION,
+        profile_id,
+        label,
+        client_id,
+        client_seq,
+        prev_ack,
+        auth_ref: None,
+        ct_hash,
+        ciphertext,
+        sig: Signature64::new([0u8; 64]),
+    };
+    let digest = msg
+        .signing_tagged_hash()
+        .context("computing submit msg signing digest")?;
+    let signature = signing_key.sign(digest.as_ref());
+    msg.sig = Signature64::from(signature.to_bytes());
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&msg, &mut encoded).context("encoding submit msg")?;
+    Ok(BASE64_STANDARD.encode(encoded))
+}
+
+fn derive_label_for_stream(stream: &str) -> Result<Label> {
+    let stream_id = cap_stream_id_from_label(stream)
+        .with_context(|| format!("deriving stream identifier for {}", stream))?;
+    Ok(Label::derive([], stream_id, 0))
+}
+
+fn build_ciphertext_envelope(header: &[u8], body: &[u8], pad_block: u64) -> Result<Vec<u8>> {
+    if header.len() > u32::MAX as usize || body.len() > u32::MAX as usize {
+        bail!("ciphertext lengths overflow u32");
+    }
+    let mut ciphertext =
+        Vec::with_capacity(HPKE_ENC_LEN + CIPHERTEXT_LEN_PREFIX + header.len() + body.len());
+    ciphertext.extend_from_slice(&[0u8; HPKE_ENC_LEN]);
+    ciphertext.extend_from_slice(&(header.len() as u32).to_be_bytes());
+    ciphertext.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    ciphertext.extend_from_slice(header);
+    ciphertext.extend_from_slice(body);
+    if pad_block > 0 {
+        let pad_block = usize::try_from(pad_block)
+            .map_err(|_| anyhow!("invalid pad_block size {pad_block}"))?;
+        if pad_block == 0 {
+            bail!("pad_block must be non-zero when enabled");
+        }
+        let remainder = ciphertext.len() % pad_block;
+        if remainder != 0 {
+            let padding = pad_block - remainder;
+            ciphertext.extend(std::iter::repeat(0u8).take(padding));
+        }
+    }
+    Ok(ciphertext)
+}
+
 fn message_leaf_hash(message: &StoredMessage) -> Result<LeafHash> {
+    if let Some(leaf) = wire_leaf_hash(message)? {
+        return Ok(leaf);
+    }
     let encoded =
         serde_json::to_vec(message).context("encoding message for leaf hash computation")?;
     let digest = sha2::Sha256::digest(&encoded);
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(&digest);
     Ok(LeafHash::new(bytes))
+}
+
+fn wire_leaf_hash(message: &StoredMessage) -> Result<Option<LeafHash>> {
+    let Some(label_hex) = message.label.as_ref() else {
+        return Ok(None);
+    };
+    let Some(profile_hex) = message.profile_id.as_ref() else {
+        return Ok(None);
+    };
+    let Some(ct_hash_hex) = message.ct_hash.as_ref() else {
+        return Ok(None);
+    };
+    let Some(client_seq) = message.client_seq else {
+        return Ok(None);
+    };
+
+    let label_bytes =
+        hex::decode(label_hex).with_context(|| format!("decoding label {}", label_hex))?;
+    let profile_bytes =
+        hex::decode(profile_hex).with_context(|| format!("decoding profile_id {}", profile_hex))?;
+    let ct_hash_bytes =
+        hex::decode(ct_hash_hex).with_context(|| format!("decoding ct_hash {}", ct_hash_hex))?;
+
+    let label = Label::from_slice(&label_bytes).context("parsing label from stored message")?;
+    let profile_id = veen_core::ProfileId::from_slice(&profile_bytes)
+        .context("parsing profile_id from stored message")?;
+    let ct_hash =
+        CtHash::from_slice(&ct_hash_bytes).context("parsing ct_hash from stored message")?;
+    let client_id =
+        ClientId::from_str(&message.client_id).context("parsing client_id from stored message")?;
+
+    Ok(Some(LeafHash::derive(
+        &label,
+        &profile_id,
+        &ct_hash,
+        &client_id,
+        client_seq,
+    )))
 }
 
 fn parse_mmr_root_hex(value: &str) -> Result<MmrRoot> {
@@ -2610,12 +2737,6 @@ fn solve_pow_cookie_with_limit(
     }
 
     bail!("unable to satisfy pow difficulty {difficulty} within iteration budget");
-}
-
-fn read_client_id(path: &Path) -> Result<String> {
-    let data = stdfs::read_to_string(path)
-        .with_context(|| format!("reading client identity card from {}", path.display()))?;
-    Ok(data.trim().to_string())
 }
 
 fn current_unix_timestamp_millis() -> u64 {

@@ -17,7 +17,6 @@ use hex;
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
-use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
@@ -32,10 +31,12 @@ use veen_core::wire::{
     proof::{Direction, MmrPathNode, MmrProof},
     types::{AuthRef, ClientId, LeafHash, MmrNode},
 };
+use veen_core::wire::{CtHash, Msg};
 use veen_core::{
-    cap_stream_id_from_label, cap_token_from_cbor, CapTokenRate, Label, RealmId, StreamId,
-    StreamIdParseError, CAP_TOKEN_VERSION, MAX_ATTACHMENTS_PER_MSG, MAX_ATTACHMENT_BYTES,
-    MAX_BODY_BYTES, MAX_MSG_BYTES,
+    cap_stream_id_from_label, cap_token_from_cbor, CapTokenRate, CiphertextEnvelope,
+    CiphertextParseError, Label, ProfileId, RealmId, StreamId, StreamIdParseError,
+    CAP_TOKEN_VERSION, MAX_ATTACHMENTS_PER_MSG, MAX_ATTACHMENT_BYTES, MAX_BODY_BYTES,
+    MAX_HDR_BYTES, MAX_MSG_BYTES,
 };
 use veen_overlays::meta::SchemaRegistry;
 use veen_overlays::revocation::{
@@ -412,27 +413,24 @@ impl HubPipeline {
         let SubmitRequest {
             stream,
             client_id,
-            payload,
+            msg,
             attachments,
             auth_ref,
-            expires_at,
-            schema,
             idem,
             pow_cookie,
         } = request;
 
         let (
             stream_id,
-            payload_json,
+            submit_msg,
             prepared_attachments,
             stored_attachments,
             submitted_at,
             submitted_at_ms,
+            label,
             client_target,
             auth_target,
-        ) = {
-            let _validation_span = tracing::info_span!("hub_submit.validation_parsing").entered();
-
+        ) = async {
             if let Some(required) = self.admission.pow_difficulty {
                 match pow_cookie {
                     Some(cookie) => {
@@ -459,13 +457,6 @@ impl HubPipeline {
                 }
             }
 
-            let stream_id = cap_stream_id_from_label(&stream).map_err(|err| {
-                anyhow::Error::new(CapabilityError::StreamInvalid {
-                    stream: stream.clone(),
-                    source: err,
-                })
-            })?;
-
             let attachments = attachments.unwrap_or_default();
             if attachments.len() > MAX_ATTACHMENTS_PER_MSG {
                 return Err(anyhow::Error::new(
@@ -476,52 +467,112 @@ impl HubPipeline {
                 ));
             }
 
-            let payload_json =
-                serde_json::to_string(&payload).context("serialising submit payload to JSON")?;
-            if payload_json.len() > MAX_BODY_BYTES {
-                return Err(anyhow::Error::new(CapabilityError::MessageBodyTooLarge {
-                    body_bytes: payload_json.len(),
-                    limit: MAX_BODY_BYTES,
+            let submit_msg_bytes = BASE64_STANDARD
+                .decode(msg.as_bytes())
+                .context("decoding submit msg from base64")?;
+            if submit_msg_bytes.len() > MAX_MSG_BYTES {
+                return Err(anyhow::Error::new(CapabilityError::MessageTotalTooLarge {
+                    total_bytes: submit_msg_bytes.len(),
+                    limit: MAX_MSG_BYTES,
                 }));
             }
+            let submit_msg = decode_submit_msg(&submit_msg_bytes).map_err(|err| {
+                anyhow::Error::new(CapabilityError::InvalidMessage {
+                    reason: err.to_string(),
+                })
+            })?;
+            if !submit_msg.has_valid_version() {
+                return Err(anyhow::Error::new(CapabilityError::InvalidMessage {
+                    reason: format!("unsupported msg version {}", submit_msg.ver),
+                }));
+            }
+            submit_msg.verify_signature().map_err(|err| {
+                anyhow::Error::new(CapabilityError::InvalidMessage {
+                    reason: format!("invalid msg signature: {err}"),
+                })
+            })?;
+            if !submit_msg.ct_hash_matches() {
+                return Err(anyhow::Error::new(CapabilityError::InvalidMessage {
+                    reason: "ciphertext hash mismatch in submit msg".to_string(),
+                }));
+            }
+            let label = submit_msg.label;
+            let expected_label = derive_label_for_stream(&stream)?;
+            if label != expected_label {
+                return Err(anyhow::Error::new(CapabilityError::InvalidMessage {
+                    reason: "msg label does not match stream".to_string(),
+                }));
+            }
+            let client_id_hex = hex::encode(submit_msg.client_id.as_ref());
+            if client_id_hex != client_id {
+                return Err(anyhow::Error::new(CapabilityError::InvalidMessage {
+                    reason: "msg client_id does not match request client_id".to_string(),
+                }));
+            }
+            if let Some(ref auth_hex) = auth_ref {
+                let msg_auth = submit_msg
+                    .auth_ref
+                    .as_ref()
+                    .map(|value| hex::encode(value.as_ref()));
+                if msg_auth.as_deref() != Some(auth_hex.as_str()) {
+                    return Err(anyhow::Error::new(CapabilityError::InvalidMessage {
+                        reason: "msg auth_ref does not match request auth_ref".to_string(),
+                    }));
+                }
+            }
+            if let Err(err) = CiphertextEnvelope::parse_with_limits(
+                &submit_msg.ciphertext,
+                pad_block_for_label(self, &label).await,
+                MAX_MSG_BYTES,
+                MAX_HDR_BYTES,
+                MAX_BODY_BYTES,
+            ) {
+                return Err(anyhow::Error::new(map_ciphertext_error(err)));
+            }
+            let stream_id = cap_stream_id_from_label(&stream).map_err(|err| {
+                anyhow::Error::new(CapabilityError::StreamInvalid {
+                    stream: stream.clone(),
+                    source: err,
+                })
+            })?;
             let prepared_attachments = prepare_attachments_for_storage(
                 &self.storage,
                 &stream,
                 &attachments,
-                payload_json.len(),
+                submit_msg_bytes.len(),
             )?;
             let stored_attachments = prepared_attachments.stored;
             let prepared_attachments = prepared_attachments.prepared;
             let submitted_at = current_unix_timestamp()?;
             let submitted_at_ms = current_unix_timestamp_millis()?;
-            let client_id_value = ClientId::from_str(&client_id).with_context(|| {
-                format!("parsing client_id {client_id} as hex-encoded identifier")
-            })?;
+            let client_id_value = submit_msg.client_id;
             let client_target = RevocationTarget::from_slice(client_id_value.as_ref())
                 .context("constructing client revocation target")?;
-            let auth_target = if let Some(ref auth_hex) = auth_ref {
-                let parsed = AuthRef::from_str(auth_hex).with_context(|| {
-                    format!("parsing auth_ref {auth_hex} as hex-encoded identifier")
-                })?;
+            let auth_target = if let Some(auth_ref) = submit_msg.auth_ref.as_ref() {
                 Some(
-                    RevocationTarget::from_slice(parsed.as_ref())
+                    RevocationTarget::from_slice(auth_ref.as_ref())
                         .context("constructing auth_ref revocation target")?,
                 )
             } else {
                 None
             };
 
-            (
+            Ok((
                 stream_id,
-                payload_json,
+                submit_msg,
                 prepared_attachments,
                 stored_attachments,
                 submitted_at,
                 submitted_at_ms,
+                label,
                 client_target,
                 auth_target,
-            )
-        };
+            ))
+        }
+        .instrument(tracing::info_span!("hub_submit.validation_parsing"))
+        .await?;
+        let submit_auth_ref = submit_msg.auth_ref;
+        let submit_auth_ref_hex = submit_auth_ref.map(|value| hex::encode(value.as_ref()));
 
         let (mut guard, mut capability_store_dirty, usage_update) = async {
             {
@@ -600,13 +651,16 @@ impl HubPipeline {
                     }));
                 }
 
-                if let (Some(auth_hex), Some(target)) = (auth_ref.as_ref(), auth_target) {
+                if let (Some(auth_hex), Some(target)) = (
+                    submit_auth_ref.map(|value| hex::encode(value.as_ref())),
+                    auth_target,
+                ) {
                     if guard
                         .revocations
                         .is_revoked(RevocationKind::AuthRef, target, submitted_at)
                     {
                         return Err(anyhow::Error::new(CapabilityError::AuthRefRevoked {
-                            auth_ref: auth_hex.clone(),
+                            auth_ref: auth_hex,
                         }));
                     }
                 }
@@ -615,8 +669,9 @@ impl HubPipeline {
             let mut guard = self.inner.write().await;
             let mut capability_store_dirty = false;
 
-            let token_revocation = if let Some(auth_hex) = auth_ref.as_ref() {
-                if let Some(record) = guard.capabilities.records.get(auth_hex) {
+            let token_revocation = if let Some(auth_ref) = submit_auth_ref {
+                let auth_hex = hex::encode(auth_ref.as_ref());
+                if let Some(record) = guard.capabilities.records.get(&auth_hex) {
                     if let Some(hash) = record.token_hash.as_ref() {
                         Some((hash.clone(), revocation_target_from_hex_str(hash)?))
                     } else {
@@ -629,10 +684,10 @@ impl HubPipeline {
                 None
             };
 
-            if let Some(cap) = auth_ref.as_ref() {
+            if let Some(cap) = submit_auth_ref.map(|value| hex::encode(value.as_ref())) {
                 let capability_dirty = match enforce_capability(
                     &mut guard.capabilities,
-                    cap,
+                    &cap,
                     &client_id,
                     &stream,
                     submitted_at,
@@ -701,14 +756,25 @@ impl HubPipeline {
             seq,
             sent_at: submitted_at,
             client_id: client_id.clone(),
-            schema,
-            expires_at,
+            schema: None,
+            expires_at: None,
             parent: None,
-            body: Some(payload_json),
+            body: None,
             body_digest: None,
             attachments: stored_attachments.clone(),
-            auth_ref: auth_ref.clone(),
+            auth_ref: submit_msg
+                .auth_ref
+                .as_ref()
+                .map(|value| hex::encode(value.as_ref())),
             idem,
+            ver: Some(submit_msg.ver),
+            profile_id: Some(hex::encode(submit_msg.profile_id.as_ref())),
+            label: Some(hex::encode(label.as_ref())),
+            client_seq: Some(submit_msg.client_seq),
+            prev_ack: Some(submit_msg.prev_ack),
+            ct_hash: Some(hex::encode(submit_msg.ct_hash.as_ref())),
+            ciphertext: Some(BASE64_STANDARD.encode(&submit_msg.ciphertext)),
+            sig: Some(hex::encode(submit_msg.sig.as_ref())),
         };
 
         let (leaf, leaf_hex, confirmed_duplicate, dedup_dirty) = async {
@@ -778,8 +844,11 @@ impl HubPipeline {
         };
         stream_runtime.push_proven(message_with_proof.clone());
 
-        let issued_at_dirty =
-            apply_capability_issued_at(&mut guard.capabilities, auth_ref.as_deref(), submitted_at);
+        let issued_at_dirty = apply_capability_issued_at(
+            &mut guard.capabilities,
+            submit_auth_ref_hex.as_deref(),
+            submitted_at,
+        );
         capability_store_dirty |= issued_at_dirty;
 
         let usage_applied_dirty =
@@ -1913,11 +1982,9 @@ impl PowCookieEnvelope {
 pub struct SubmitRequest {
     pub stream: String,
     pub client_id: String,
-    pub payload: JsonValue,
+    pub msg: String,
     pub attachments: Option<Vec<AttachmentUpload>>,
     pub auth_ref: Option<String>,
-    pub expires_at: Option<u64>,
-    pub schema: Option<String>,
     pub idem: Option<u64>,
     #[serde(default)]
     pub pow_cookie: Option<PowCookieEnvelope>,
@@ -2076,6 +2143,22 @@ pub struct StoredMessage {
     pub seq: u64,
     pub sent_at: u64,
     pub client_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ver: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_ack: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ct_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ciphertext: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sig: Option<String>,
     pub schema: Option<String>,
     pub expires_at: Option<u64>,
     pub parent: Option<String>,
@@ -2294,6 +2377,8 @@ pub enum CapabilityError {
     },
     #[error("E.SIZE payload body size {body_bytes} bytes exceeds limit {limit} bytes")]
     MessageBodyTooLarge { body_bytes: usize, limit: usize },
+    #[error("E.SIZE payload header size {hdr_bytes} bytes exceeds limit {limit} bytes")]
+    MessageHeaderTooLarge { hdr_bytes: usize, limit: usize },
     #[error("E.SIZE total message size {total_bytes} bytes exceeds limit {limit} bytes")]
     MessageTotalTooLarge { total_bytes: usize, limit: usize },
     #[error("E.SIZE attachment count {count} exceeds limit {limit}")]
@@ -2303,6 +2388,8 @@ pub enum CapabilityError {
         attachment_bytes: usize,
         limit: usize,
     },
+    #[error("E.MSG invalid submit message: {reason}")]
+    InvalidMessage { reason: String },
 }
 
 impl CapabilityError {
@@ -2334,9 +2421,11 @@ impl CapabilityError {
             | Self::ProofOfWorkInsufficient { .. }
             | Self::ProofOfWorkInvalid { .. } => "E.AUTH",
             Self::MessageBodyTooLarge { .. }
+            | Self::MessageHeaderTooLarge { .. }
             | Self::MessageTotalTooLarge { .. }
             | Self::AttachmentCountExceeded { .. }
             | Self::AttachmentTooLarge { .. } => "E.SIZE",
+            Self::InvalidMessage { .. } => "E.MSG",
         }
     }
 }
@@ -3831,6 +3920,70 @@ async fn load_label_classes(storage: &HubStorage) -> Result<Vec<LabelClassRecord
     Ok(records)
 }
 
+fn decode_submit_msg(bytes: &[u8]) -> Result<Msg> {
+    let mut cursor = Cursor::new(bytes);
+    let msg: Msg = ciborium::de::from_reader(&mut cursor).context("decoding submit msg")?;
+    ensure!(
+        cursor.position() as usize == bytes.len(),
+        "submit msg has trailing bytes"
+    );
+    let mut canonical = Vec::new();
+    ciborium::ser::into_writer(&msg, &mut canonical).context("serializing submit msg")?;
+    ensure!(
+        canonical == bytes,
+        "submit msg must use deterministic CBOR encoding"
+    );
+    Ok(msg)
+}
+
+fn derive_label_for_stream(stream: &str) -> Result<Label> {
+    let stream_id = cap_stream_id_from_label(stream).map_err(|err| {
+        anyhow::Error::new(CapabilityError::StreamInvalid {
+            stream: stream.to_string(),
+            source: err,
+        })
+    })?;
+    Ok(Label::derive([], stream_id, 0))
+}
+
+async fn pad_block_for_label(pipeline: &HubPipeline, label: &Label) -> u64 {
+    let record = {
+        let guard = pipeline.inner.read().await;
+        guard.label_class_index.get(label).cloned()
+    };
+    let class_text = record.as_ref().map(|record| record.class.clone());
+    let normalized = class_text
+        .as_deref()
+        .map(|value| value.to_ascii_lowercase());
+    pad_block_for_class(normalized.as_deref())
+}
+
+fn map_ciphertext_error(error: CiphertextParseError) -> CapabilityError {
+    match error {
+        CiphertextParseError::CiphertextTooLarge { length, limit } => {
+            CapabilityError::MessageTotalTooLarge {
+                total_bytes: length,
+                limit,
+            }
+        }
+        CiphertextParseError::HeaderTooLarge { hdr_len, limit } => {
+            CapabilityError::MessageHeaderTooLarge {
+                hdr_bytes: hdr_len,
+                limit,
+            }
+        }
+        CiphertextParseError::BodyTooLarge { body_len, limit } => {
+            CapabilityError::MessageBodyTooLarge {
+                body_bytes: body_len,
+                limit,
+            }
+        }
+        other => CapabilityError::InvalidMessage {
+            reason: other.to_string(),
+        },
+    }
+}
+
 fn pad_block_for_class(class: Option<&str>) -> u64 {
     match class {
         Some("wallet") => 1024,
@@ -3904,6 +4057,10 @@ async fn persist_revocations(storage: &HubStorage, records: &[RevocationRecord])
 }
 
 fn leaf_hash_for(message: &StoredMessage) -> Result<LeafHash> {
+    if let Some(leaf) = leaf_hash_from_wire(message)? {
+        return Ok(leaf);
+    }
+
     let mut hasher = Sha256::new();
     {
         let writer = HashingWriter::new(&mut hasher);
@@ -3916,6 +4073,44 @@ fn leaf_hash_for(message: &StoredMessage) -> Result<LeafHash> {
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(&digest);
     Ok(LeafHash::new(bytes))
+}
+
+fn leaf_hash_from_wire(message: &StoredMessage) -> Result<Option<LeafHash>> {
+    let Some(label_hex) = message.label.as_ref() else {
+        return Ok(None);
+    };
+    let Some(profile_hex) = message.profile_id.as_ref() else {
+        return Ok(None);
+    };
+    let Some(ct_hash_hex) = message.ct_hash.as_ref() else {
+        return Ok(None);
+    };
+    let Some(client_seq) = message.client_seq else {
+        return Ok(None);
+    };
+
+    let label_bytes =
+        hex::decode(label_hex).with_context(|| format!("decoding label {}", label_hex))?;
+    let profile_bytes =
+        hex::decode(profile_hex).with_context(|| format!("decoding profile_id {}", profile_hex))?;
+    let ct_hash_bytes =
+        hex::decode(ct_hash_hex).with_context(|| format!("decoding ct_hash {}", ct_hash_hex))?;
+
+    let label = Label::from_slice(&label_bytes).context("parsing label from stored message")?;
+    let profile_id =
+        ProfileId::from_slice(&profile_bytes).context("parsing profile_id from stored message")?;
+    let ct_hash =
+        CtHash::from_slice(&ct_hash_bytes).context("parsing ct_hash from stored message")?;
+    let client_id =
+        ClientId::from_str(&message.client_id).context("parsing client_id from stored message")?;
+
+    Ok(Some(LeafHash::derive(
+        &label,
+        &profile_id,
+        &ct_hash,
+        &client_id,
+        client_seq,
+    )))
 }
 
 struct HashingWriter<'a, D> {
@@ -3986,7 +4181,7 @@ mod tests {
     use super::*;
     use crate::runtime::HubConfigOverrides;
     use anyhow::Context;
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
     use serde_json::json;
     use std::net::SocketAddr;
@@ -3998,6 +4193,11 @@ mod tests {
     use veen_core::label::Label;
     use veen_core::realm::RealmId;
     use veen_core::HubId;
+    use veen_core::wire::message::MSG_VERSION;
+    use veen_core::{
+        AuthRef, ClientId, CtHash, Msg, Profile, Signature64, CIPHERTEXT_LEN_PREFIX, HPKE_ENC_LEN,
+        MAX_MSG_BYTES,
+    };
     use veen_overlays::federation::AuthorityPolicy;
     use veen_overlays::meta::SchemaId;
     use veen_overlays::revocation::{RevocationKind, RevocationRecord, RevocationTarget};
@@ -4093,6 +4293,129 @@ mod tests {
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&envelope, &mut buf).unwrap();
         buf
+    }
+
+    fn build_submit_request(
+        stream: &str,
+        client_signing: &SigningKey,
+        client_seq: u64,
+        prev_ack: u64,
+        payload: &[u8],
+        attachments: Option<Vec<AttachmentUpload>>,
+        auth_ref: Option<String>,
+        idem: Option<u64>,
+    ) -> Result<SubmitRequest> {
+        let msg_bytes = build_submit_msg_bytes(
+            stream,
+            client_signing,
+            client_seq,
+            prev_ack,
+            auth_ref.as_deref(),
+            payload,
+        )?;
+        let msg = BASE64_STANDARD.encode(msg_bytes);
+        Ok(SubmitRequest {
+            stream: stream.to_string(),
+            client_id: hex::encode(client_signing.verifying_key().to_bytes()),
+            msg,
+            attachments,
+            auth_ref,
+            idem,
+            pow_cookie: None,
+        })
+    }
+
+    fn build_submit_msg_bytes(
+        stream: &str,
+        client_signing: &SigningKey,
+        client_seq: u64,
+        prev_ack: u64,
+        auth_ref_hex: Option<&str>,
+        payload: &[u8],
+    ) -> Result<Vec<u8>> {
+        let msg = build_msg(
+            stream,
+            client_signing,
+            client_seq,
+            prev_ack,
+            auth_ref_hex,
+            payload,
+        )?;
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&msg, &mut encoded).context("encoding submit msg")?;
+        Ok(encoded)
+    }
+
+    fn build_msg(
+        stream: &str,
+        client_signing: &SigningKey,
+        client_seq: u64,
+        prev_ack: u64,
+        auth_ref_hex: Option<&str>,
+        payload: &[u8],
+    ) -> Result<Msg> {
+        let label = derive_label_for_stream(stream)?;
+        let profile_id = Profile::default()
+            .id()
+            .context("computing profile id for msg")?;
+        let client_id = ClientId::from(*client_signing.verifying_key().as_bytes());
+        let auth_ref = auth_ref_hex
+            .map(AuthRef::from_str)
+            .transpose()
+            .context("parsing auth_ref")?;
+        let ciphertext = build_ciphertext_envelope(&[], payload, 256)?;
+        if ciphertext.len() > MAX_MSG_BYTES {
+            bail!(
+                "ciphertext length {} exceeds limit {}",
+                ciphertext.len(),
+                MAX_MSG_BYTES
+            );
+        }
+        let ct_hash = CtHash::compute(&ciphertext);
+        let mut msg = Msg {
+            ver: MSG_VERSION,
+            profile_id,
+            label,
+            client_id,
+            client_seq,
+            prev_ack,
+            auth_ref,
+            ct_hash,
+            ciphertext,
+            sig: Signature64::new([0u8; 64]),
+        };
+        let digest = msg
+            .signing_tagged_hash()
+            .context("computing signing digest for msg")?;
+        let signature = client_signing.sign(digest.as_ref());
+        msg.sig = Signature64::from(signature.to_bytes());
+        Ok(msg)
+    }
+
+    fn build_ciphertext_envelope(header: &[u8], body: &[u8], pad_block: u64) -> Result<Vec<u8>> {
+        if header.len() > u32::MAX as usize || body.len() > u32::MAX as usize {
+            bail!("ciphertext lengths overflow u32");
+        }
+        let mut ciphertext =
+            Vec::with_capacity(HPKE_ENC_LEN + CIPHERTEXT_LEN_PREFIX + header.len() + body.len());
+        ciphertext.extend_from_slice(&[0u8; HPKE_ENC_LEN]);
+        ciphertext.extend_from_slice(&(header.len() as u32).to_be_bytes());
+        ciphertext.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        ciphertext.extend_from_slice(header);
+        ciphertext.extend_from_slice(body);
+        if pad_block > 0 {
+            let pad_block = usize::try_from(pad_block)
+                .map_err(|_| anyhow!("invalid pad_block size {pad_block}"))?;
+            if pad_block == 0 {
+                bail!("pad_block must be non-zero when enabled");
+            }
+            let remainder = ciphertext.len() % pad_block;
+            if remainder != 0 {
+                let padding = pad_block - remainder;
+                ciphertext.extend(std::iter::repeat(0u8).take(padding));
+            }
+        }
+        Ok(ciphertext)
     }
 
     #[test]
@@ -4348,17 +4671,20 @@ mod tests {
             let stream = "core/readiness";
             allow_stream_for_hub(&pipeline, stream, "ready").await?;
 
-            let request = SubmitRequest {
-                stream: stream.to_string(),
-                client_id: hex::encode([0x33; 32]),
-                payload: json!({"ok": true}),
-                attachments: None,
-                auth_ref: None,
-                expires_at: None,
-                schema: None,
-                idem: None,
-                pow_cookie: None,
-            };
+            let mut rng = OsRng;
+            let signing_key = SigningKey::generate(&mut rng);
+            let payload = serde_json::to_vec(&json!({"ok": true}))
+                .context("encoding submit payload")?;
+            let request = build_submit_request(
+                stream,
+                &signing_key,
+                1,
+                0,
+                &payload,
+                None,
+                None,
+                None,
+            )?;
             pipeline.submit(request).await.unwrap();
 
             {
@@ -4442,17 +4768,20 @@ mod tests {
             let payload = encode_envelope(schema_fed_authority(), record);
             pipeline.publish_authority(&payload).await.unwrap();
 
-            let request = SubmitRequest {
-                stream: stream_label.to_string(),
-                client_id: hex::encode([0x11; 32]),
-                payload: serde_json::json!({"text": "unauthorised"}),
-                attachments: None,
-                auth_ref: None,
-                expires_at: None,
-                schema: None,
-                idem: None,
-                pow_cookie: None,
-            };
+            let mut rng = OsRng;
+            let signing_key = SigningKey::generate(&mut rng);
+            let payload = serde_json::to_vec(&json!({"text": "unauthorised"}))
+                .context("encoding submit payload")?;
+            let request = build_submit_request(
+                stream_label,
+                &signing_key,
+                1,
+                0,
+                &payload,
+                None,
+                None,
+                None,
+            )?;
 
             let err = pipeline
                 .submit(request)
@@ -4496,17 +4825,20 @@ mod tests {
             let payload = encode_envelope(schema_fed_authority(), record);
             pipeline.publish_authority(&payload).await.unwrap();
 
-            let request = SubmitRequest {
-                stream: stream_label.to_string(),
-                client_id: hex::encode([0x22; 32]),
-                payload: serde_json::json!({"text": "multi-primary"}),
-                attachments: None,
-                auth_ref: None,
-                expires_at: None,
-                schema: None,
-                idem: None,
-                pow_cookie: None,
-            };
+            let mut rng = OsRng;
+            let signing_key = SigningKey::generate(&mut rng);
+            let payload = serde_json::to_vec(&json!({"text": "multi-primary"}))
+                .context("encoding submit payload")?;
+            let request = build_submit_request(
+                stream_label,
+                &signing_key,
+                1,
+                0,
+                &payload,
+                None,
+                None,
+                None,
+            )?;
 
             pipeline.submit(request).await.expect("submit to succeed");
             Ok::<(), anyhow::Error>(())
@@ -4526,17 +4858,20 @@ mod tests {
             let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
             allow_stream_for_hub(&pipeline, "core/dup", "dup").await?;
 
-            let request = SubmitRequest {
-                stream: "core/dup".to_string(),
-                client_id: hex::encode([0x33; 32]),
-                payload: serde_json::json!({"text": "deduplicate"}),
-                attachments: None,
-                auth_ref: None,
-                expires_at: None,
-                schema: None,
-                idem: None,
-                pow_cookie: None,
-            };
+            let mut rng = OsRng;
+            let signing_key = SigningKey::generate(&mut rng);
+            let payload = serde_json::to_vec(&json!({"text": "deduplicate"}))
+                .context("encoding submit payload")?;
+            let request = build_submit_request(
+                "core/dup",
+                &signing_key,
+                1,
+                0,
+                &payload,
+                None,
+                None,
+                None,
+            )?;
 
             pipeline.submit(request.clone()).await.unwrap();
             {
@@ -4567,6 +4902,54 @@ mod tests {
     }
 
     #[test]
+    fn submit_rejects_trailing_bytes_in_msg() -> Result<()> {
+        let rt = Runtime::new()?;
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let overrides = HubConfigOverrides {
+                capability_gating_enabled: Some(false),
+                ..HubConfigOverrides::default()
+            };
+            let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
+            allow_stream_for_hub(&pipeline, "core/extra-bytes", "extra-bytes").await?;
+
+            let mut rng = OsRng;
+            let signing_key = SigningKey::generate(&mut rng);
+            let request_payload = serde_json::to_vec(&json!({"text": "extra-bytes"}))
+                .context("encoding submit payload")?;
+            let mut request = build_submit_request(
+                "core/extra-bytes",
+                &signing_key,
+                1,
+                0,
+                &request_payload,
+                None,
+                None,
+                None,
+            )?;
+            let mut msg_bytes = BASE64_STANDARD
+                .decode(request.msg.as_bytes())
+                .context("decoding submit msg for tamper")?;
+            msg_bytes.push(0u8);
+            request.msg = BASE64_STANDARD.encode(msg_bytes);
+
+            let err = pipeline
+                .submit(request)
+                .await
+                .expect_err("submit should fail");
+            let capability_err = err.downcast::<CapabilityError>().expect("capability error");
+            match capability_err {
+                CapabilityError::InvalidMessage { reason } => {
+                    assert!(reason.contains("trailing bytes"));
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+            Ok::<(), anyhow::Error>(())
+        })?;
+        Ok(())
+    }
+
+    #[test]
     fn duplicate_detector_is_seeded_from_persisted_messages() -> Result<()> {
         let rt = Runtime::new()?;
         rt.block_on(async {
@@ -4578,17 +4961,20 @@ mod tests {
             let pipeline = init_pipeline_with_overrides(temp.path(), overrides.clone()).await;
             allow_stream_for_hub(&pipeline, "core/dup-seed", "dup-seed").await?;
 
-            let request = SubmitRequest {
-                stream: "core/dup-seed".to_string(),
-                client_id: hex::encode([0x44; 32]),
-                payload: serde_json::json!({"text": "persisted"}),
-                attachments: None,
-                auth_ref: None,
-                expires_at: None,
-                schema: None,
-                idem: None,
-                pow_cookie: None,
-            };
+            let mut rng = OsRng;
+            let signing_key = SigningKey::generate(&mut rng);
+            let payload = serde_json::to_vec(&json!({"text": "persisted"}))
+                .context("encoding submit payload")?;
+            let request = build_submit_request(
+                "core/dup-seed",
+                &signing_key,
+                1,
+                0,
+                &payload,
+                None,
+                None,
+                None,
+            )?;
 
             pipeline.submit(request.clone()).await.unwrap();
             let authority_path = pipeline.storage.authority_store_path();
@@ -4735,18 +5121,30 @@ mod tests {
             let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
             allow_stream_for_hub(&pipeline, "core/limit-body", "limit-body").await?;
 
+            let mut rng = OsRng;
+            let signing_key = SigningKey::generate(&mut rng);
             let body = "x".repeat(MAX_BODY_BYTES + 1);
-            let request = SubmitRequest {
-                stream: "core/limit-body".to_string(),
-                client_id: hex::encode([0xAB; 32]),
-                payload: serde_json::json!({"blob": body}),
-                attachments: None,
-                auth_ref: None,
-                expires_at: None,
-                schema: None,
-                idem: None,
-                pow_cookie: None,
-            };
+            let payload = serde_json::to_vec(&json!({"blob": body}))
+                .context("encoding submit payload")?;
+            let msg_bytes = build_submit_msg_bytes(
+                "core/limit-body",
+                &signing_key,
+                1,
+                0,
+                None,
+                &payload,
+            )?;
+            let exceeds_total = msg_bytes.len() > MAX_MSG_BYTES;
+            let request = build_submit_request(
+                "core/limit-body",
+                &signing_key,
+                1,
+                0,
+                &payload,
+                None,
+                None,
+                None,
+            )?;
 
             let err = pipeline
                 .submit(request)
@@ -4755,7 +5153,12 @@ mod tests {
             let capability_err = err.downcast::<CapabilityError>().expect("capability error");
             match capability_err {
                 CapabilityError::MessageBodyTooLarge { limit, .. } => {
+                    assert!(!exceeds_total, "message total should be within limit");
                     assert_eq!(limit, MAX_BODY_BYTES);
+                }
+                CapabilityError::MessageTotalTooLarge { limit, .. } => {
+                    assert!(exceeds_total, "message should exceed total limit");
+                    assert_eq!(limit, MAX_MSG_BYTES);
                 }
                 other => panic!("unexpected error: {other:?}"),
             }
@@ -4782,17 +5185,20 @@ mod tests {
             };
             let attachments = vec![attachment; MAX_ATTACHMENTS_PER_MSG + 1];
 
-            let request = SubmitRequest {
-                stream: "core/limit-attachments".to_string(),
-                client_id: hex::encode([0xBC; 32]),
-                payload: serde_json::json!({"ok": true}),
-                attachments: Some(attachments),
-                auth_ref: None,
-                expires_at: None,
-                schema: None,
-                idem: None,
-                pow_cookie: None,
-            };
+            let mut rng = OsRng;
+            let signing_key = SigningKey::generate(&mut rng);
+            let payload = serde_json::to_vec(&json!({"ok": true}))
+                .context("encoding submit payload")?;
+            let request = build_submit_request(
+                "core/limit-attachments",
+                &signing_key,
+                1,
+                0,
+                &payload,
+                Some(attachments),
+                None,
+                None,
+            )?;
 
             let err = pipeline
                 .submit(request)
@@ -4829,17 +5235,20 @@ mod tests {
                 data: BASE64_STANDARD.encode(vec![0u8; attachment_bytes]),
             };
 
-            let request = SubmitRequest {
-                stream: "core/limit-attachment-size".to_string(),
-                client_id: hex::encode([0xDD; 32]),
-                payload: serde_json::json!({"ok": true}),
-                attachments: Some(vec![attachment]),
-                auth_ref: None,
-                expires_at: None,
-                schema: None,
-                idem: None,
-                pow_cookie: None,
-            };
+            let mut rng = OsRng;
+            let signing_key = SigningKey::generate(&mut rng);
+            let payload = serde_json::to_vec(&json!({"ok": true}))
+                .context("encoding submit payload")?;
+            let request = build_submit_request(
+                "core/limit-attachment-size",
+                &signing_key,
+                1,
+                0,
+                &payload,
+                Some(vec![attachment]),
+                None,
+                None,
+            )?;
 
             let err = pipeline
                 .submit(request)
@@ -4869,30 +5278,39 @@ mod tests {
             let pipeline = init_pipeline_with_overrides(temp.path(), overrides).await;
             allow_stream_for_hub(&pipeline, "core/limit-total", "limit-total").await?;
 
-            // Body large enough to push the total over the limit alongside a max-sized attachment.
-            let body = serde_json::json!({"text": "a".repeat(300)});
-            let body_len = body.to_string().len();
+            let mut rng = OsRng;
+            let signing_key = SigningKey::generate(&mut rng);
             let attachment_bytes = MAX_ATTACHMENT_BYTES;
-            assert!(
-                body_len > (MAX_MSG_BYTES - MAX_ATTACHMENT_BYTES),
-                "body should exceed the remaining bytes needed to overflow total size"
-            );
+            let target = MAX_MSG_BYTES.saturating_sub(attachment_bytes) + 1;
+            let mut payload_bytes = vec![b'a'; target];
+            loop {
+                let msg_bytes = build_submit_msg_bytes(
+                    "core/limit-total",
+                    &signing_key,
+                    1,
+                    0,
+                    None,
+                    &payload_bytes,
+                )?;
+                if msg_bytes.len() > MAX_MSG_BYTES - attachment_bytes {
+                    break;
+                }
+                payload_bytes.push(b'a');
+            }
             let attachment = AttachmentUpload {
                 name: Some("large".into()),
                 data: BASE64_STANDARD.encode(vec![0u8; attachment_bytes]),
             };
-
-            let request = SubmitRequest {
-                stream: "core/limit-total".to_string(),
-                client_id: hex::encode([0xCD; 32]),
-                payload: body,
-                attachments: Some(vec![attachment]),
-                auth_ref: None,
-                expires_at: None,
-                schema: None,
-                idem: None,
-                pow_cookie: None,
-            };
+            let request = build_submit_request(
+                "core/limit-total",
+                &signing_key,
+                1,
+                0,
+                &payload_bytes,
+                Some(vec![attachment]),
+                None,
+                None,
+            )?;
 
             let err = pipeline
                 .submit(request)
