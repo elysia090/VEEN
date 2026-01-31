@@ -54,6 +54,9 @@ struct RunCommand {
     /// Disable structured log emission.
     #[arg(long = "disable-logs")]
     disable_logs: bool,
+    /// Enable non-core tooling endpoints (health, metrics, admission helpers).
+    #[arg(long = "enable-tooling")]
+    enable_tooling: bool,
     /// Maximum lifetime in seconds for any observed client_id before rotation is required.
     #[arg(long = "max-client-id-lifetime-sec")]
     max_client_id_lifetime_sec: Option<u64>,
@@ -151,6 +154,7 @@ impl RunCommand {
             anchor_backend: self.anchor_backend.clone(),
             enable_metrics: self.disable_metrics.then_some(false),
             enable_logs: self.disable_logs.then_some(false),
+            tooling_enabled: self.enable_tooling.then_some(true),
             bloom_capacity: None,
             bloom_false_positive_rate: None,
             lru_capacity: None,

@@ -100,6 +100,7 @@ async fn goals_core_pipeline() -> Result<()> {
         None,
         HubRole::Primary,
         HubConfigOverrides {
+            tooling_enabled: Some(true),
             capability_gating_enabled: Some(false),
             ..HubConfigOverrides::default()
         },
@@ -246,7 +247,10 @@ async fn goals_core_pipeline() -> Result<()> {
         *last ^= 0x01;
     }
     let tampered_response = http
-        .post(format!("http://{}/authorize", runtime.listen_addr()))
+        .post(format!(
+            "http://{}/tooling/authorize",
+            runtime.listen_addr()
+        ))
         .header("Content-Type", "application/cbor")
         .body(tampered)
         .send()
@@ -255,7 +259,10 @@ async fn goals_core_pipeline() -> Result<()> {
     assert!(tampered_response.status().is_client_error());
 
     let authorize_response_bytes = http
-        .post(format!("http://{}/authorize", runtime.listen_addr()))
+        .post(format!(
+            "http://{}/tooling/authorize",
+            runtime.listen_addr()
+        ))
         .header("Content-Type", "application/cbor")
         .body(cap_bytes.clone())
         .send()
@@ -416,7 +423,10 @@ async fn goals_core_pipeline() -> Result<()> {
     );
 
     let reauthorized_bytes = http
-        .post(format!("http://{}/authorize", runtime.listen_addr()))
+        .post(format!(
+            "http://{}/tooling/authorize",
+            runtime.listen_addr()
+        ))
         .header("Content-Type", "application/cbor")
         .body(cap_bytes.clone())
         .send()
@@ -455,7 +465,7 @@ async fn goals_core_pipeline() -> Result<()> {
         .context("parsing capability recovery response")?;
 
     let metrics: MetricsResponse = http
-        .get(format!("http://{}/metrics", runtime.listen_addr()))
+        .get(format!("http://{}/tooling/metrics", runtime.listen_addr()))
         .send()
         .await
         .context("fetching metrics")?
@@ -476,7 +486,7 @@ async fn goals_core_pipeline() -> Result<()> {
     );
 
     // Anchor log via HTTP
-    http.post(format!("http://{}/anchor", runtime.listen_addr()))
+    http.post(format!("http://{}/tooling/anchor", runtime.listen_addr()))
         .json(&AnchorRequest {
             stream: "core/main".into(),
             mmr_root: "mmr-root".into(),
@@ -489,7 +499,7 @@ async fn goals_core_pipeline() -> Result<()> {
         .context("anchor endpoint returned error")?;
 
     // Health endpoint
-    http.get(format!("http://{}/healthz", runtime.listen_addr()))
+    http.get(format!("http://{}/tooling/healthz", runtime.listen_addr()))
         .send()
         .await
         .context("fetching healthz")?
@@ -527,6 +537,7 @@ async fn goals_pow_prefilter_enforced() -> Result<()> {
         None,
         HubRole::Primary,
         HubConfigOverrides {
+            tooling_enabled: Some(true),
             capability_gating_enabled: Some(false),
             pow_difficulty: Some(10),
             ..HubConfigOverrides::default()
@@ -639,7 +650,10 @@ async fn goals_capability_gating_persists() -> Result<()> {
         hub_dir.path().to_path_buf(),
         None,
         HubRole::Primary,
-        HubConfigOverrides::default(),
+        HubConfigOverrides {
+            tooling_enabled: Some(true),
+            ..HubConfigOverrides::default()
+        },
     )
     .await?;
     ensure_hub_key(hub_dir.path()).await?;
@@ -653,7 +667,7 @@ async fn goals_capability_gating_persists() -> Result<()> {
         .map_err(|err| anyhow::anyhow!("issued capability failed verification: {err}"))?;
     let http = Client::builder().no_proxy().build()?;
     let authorize_response_bytes = http
-        .post(format!("{base_url}/authorize"))
+        .post(format!("{base_url}/tooling/authorize"))
         .header("Content-Type", "application/cbor")
         .body(cap_bytes.clone())
         .send()
@@ -695,7 +709,10 @@ async fn goals_capability_gating_persists() -> Result<()> {
         hub_dir.path().to_path_buf(),
         None,
         HubRole::Primary,
-        HubConfigOverrides::default(),
+        HubConfigOverrides {
+            tooling_enabled: Some(true),
+            ..HubConfigOverrides::default()
+        },
     )
     .await?;
     ensure_hub_key(hub_dir.path()).await?;
@@ -752,7 +769,10 @@ async fn goals_capability_gating_persists() -> Result<()> {
     );
 
     let restart_metrics: MetricsResponse = http
-        .get(format!("http://{}/metrics", restart_runtime.listen_addr()))
+        .get(format!(
+            "http://{}/tooling/metrics",
+            restart_runtime.listen_addr()
+        ))
         .send()
         .await
         .context("fetching restart hub metrics")?
@@ -846,6 +866,7 @@ async fn goals_admission_bounds() -> Result<()> {
         None,
         HubRole::Primary,
         HubConfigOverrides {
+            tooling_enabled: Some(true),
             capability_gating_enabled: Some(true),
             max_client_id_lifetime_sec: Some(CLIENT_LIFETIME_SEC),
             max_msgs_per_client_id_per_label: Some(2),
@@ -867,7 +888,7 @@ async fn goals_admission_bounds() -> Result<()> {
         .verify()
         .map_err(|err| anyhow::anyhow!("client A capability verification failed: {err}"))?;
     let auth_quota_bytes = http
-        .post(format!("{hub_url}/authorize"))
+        .post(format!("{hub_url}/tooling/authorize"))
         .header("Content-Type", "application/cbor")
         .body(cap_quota_bytes.clone())
         .send()
@@ -944,7 +965,7 @@ async fn goals_admission_bounds() -> Result<()> {
         .verify()
         .map_err(|err| anyhow::anyhow!("client B capability verification failed: {err}"))?;
     let auth_b_bytes = http
-        .post(format!("{hub_url}/authorize"))
+        .post(format!("{hub_url}/tooling/authorize"))
         .header("Content-Type", "application/cbor")
         .body(cap_b_bytes.clone())
         .send()

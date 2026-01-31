@@ -42,6 +42,8 @@ implementations, refer to [`doc/spec.md`](spec.md).
 - **Canonical CLI name:** `veen` is the primary CLI binary. References to `veen-cli` are legacy aliases of `veen`.
 - **Hub runtime:** `veen hub start` is the canonical hub start command. Legacy `veen-hub run` or `veen-hub start`
   are accepted aliases with equivalent flags and behavior.
+- **Tooling endpoints:** Non-core hub endpoints (health, metrics, admission helpers) are served under `/tooling/*`
+  and are disabled by default. Enable them with `--enable-tooling` or `[tooling].enabled = true` in hub config.
 - **Companion binaries:** `veen-bridge` and `veen-selftest` may ship as separate binaries. If a unified `veen bridge`
   or `veen selftest` command exists, it MUST behave equivalently to the standalone binaries.
 - **Path vs URL targets:** `--hub` accepts either an HTTP(S) URL or a local hub data directory path; `--data-dir`
@@ -615,7 +617,7 @@ allow.rate is optional. If absent, no rate limit is enforced for that capability
 allow.ttl is a validity duration in seconds. In v0.0.1 core (without KEX1+ issued_at), hubs MUST bind an issued_at timestamp to each auth_ref on first observation and MUST enforce expiry as now <= issued_at + ttl. issued_at is defined as:
 	•	the hub’s hub_ts in the RECEIPT for the first successful MSG admission using the auth_ref.
 The issued_at chosen for a given auth_ref MUST remain stable for the lifetime of the admission record; re-verifying a cap_token MUST NOT extend its ttl.
-issued_at MUST be reconstructable from logs/receipts; hubs MUST NOT rely on hidden state for TTL evaluation. v0.0.1 MUST NOT use /authorize unless it produces a log-replayable receipt with a hub_ts used as issued_at.
+issued_at MUST be reconstructable from logs/receipts; hubs MUST NOT rely on hidden state for TTL evaluation. v0.0.1 MUST NOT use /tooling/authorize unless it produces a log-replayable receipt with a hub_ts used as issued_at.
 
 Each link in sig_chain is an Ed25519 signature over:
 
@@ -640,7 +642,7 @@ If payload_hdr.cap_ref is present, MSG.auth_ref MUST be present and MUST equal p
 Hubs MUST, at admission time, verify every signature in sig_chain back to the root (prev_link_hash = zeros). Any verification failure yields E.CAP. Hubs MAY cache validated cap_tokens keyed by auth_ref for performance.
 All sig_chain links are verified with issuer_pk; v0.0.1 does not define delegation or per-link signer rotation.
 
-Hubs MAY enforce admission via /authorize (section 16). A successful authorization installs an admission record keyed by auth_ref.
+Hubs MAY enforce admission via /tooling/authorize (section 16). A successful authorization installs an admission record keyed by auth_ref.
 
 Stream scoping note: cap_token.allow.stream_ids refers to the stream_id inputs used to derive labels. Hub-side enforcement of allow.stream_ids requires a deployment-defined stream_id_for_label(label) mapping (for example by sharing routing_key with the hub or providing an out-of-band mapping service). If such a mapping is not available, hubs MUST document that they cannot enforce allow.stream_ids and MUST NOT claim OP0 admission gating for stream scoping; receivers SHOULD enforce stream scoping after decrypt by checking payload_hdr.cap_ref against the expected stream_id policy.
 	12.	Invariants (MUST on accepted (RECEIPT, MSG))
@@ -723,17 +725,33 @@ Portable WORM (write-once read-many) set:
 CBOR Sequence is as in RFC 8742.
 	16.	API surface (transport-agnostic)
 
+Core (SSOT) endpoints:
+
 submit:
 	•	Request: POST CBOR(MSG)
 	•	Response: CBOR(RECEIPT)
 	•	Errors: CBOR({ code: “E.*”, detail?: text })
 
 stream:
-	•	Request: GET with parameters label, from=stream_seq, with_proof=bool?
+	•	Request: GET with parameters label, from=stream_seq, to=stream_seq?, with_proof=bool?
 	•	Response: CBOR Sequence of items:
 { RECEIPT, MSG, mmr_proof? }
 
 where mmr_proof is present only if with_proof=1.
+
+receipt:
+	•	Request: GET label + stream_seq
+	•	Response: RECEIPT
+
+proof:
+	•	Request: GET label + stream_seq
+	•	Response: mmr_proof
+
+checkpoint:
+	•	Request: GET label + upto_seq
+	•	Response: CHECKPOINT
+
+Tooling endpoints (non-core; HTTP served under /tooling/* when enabled):
 
 checkpoint_latest:
 	•	Request: GET label
@@ -746,7 +764,7 @@ checkpoint_range:
 authorize:
 	•	Request: POST CBOR(cap_token)
 	•	Response: { auth_ref: bstr(32), expires_at: uint }
-	•	v0.0.1 MUST NOT use /authorize unless it produces a log-replayable receipt with a hub_ts used as issued_at.
+	•	v0.0.1 MUST NOT use /tooling/authorize unless it produces a log-replayable receipt with a hub_ts used as issued_at.
 
 report_equivocation:
 	•	Request: POST two RECEIPT with identical (label, stream_seq) and differing leaf_hash or mmr_root
@@ -825,7 +843,7 @@ On HTTP, hubs SHOULD map error codes as:
 
 OP0.2 Admission gating:
 
-Hubs SHOULD require /authorize for write access. The authorization record keyed by auth_ref contains:
+Hubs SHOULD require /tooling/authorize for write access. The authorization record keyed by auth_ref contains:
 	•	allowed_stream_ids: set of stream_id values
 	•	rate: { per_sec, burst }
 	•	expiry: Unix time seconds
@@ -1017,7 +1035,7 @@ Structured JSON per submit with fields:
 
 OBS0.3 Health:
 
-/healthz returns:
+/tooling/healthz returns:
 
 {
 ok: bool,
@@ -2524,11 +2542,11 @@ Authority namespace SHOULD have similar NetworkPolicy restricting access to:
 
 10.1 Health endpoints
 
-Each hub MUST expose:
-	•	/healthz
+Each hub SHOULD expose (when tooling endpoints are enabled):
+	•	/tooling/healthz
 	•	returns success if process is alive
 	•	MUST NOT perform expensive checks
-	•	/readyz
+	•	/tooling/readyz
 	•	returns success when:
 	•	local state directory is accessible
 	•	required indexes are initialized
@@ -2536,14 +2554,14 @@ Each hub MUST expose:
 
 Kubernetes Probes:
 	•	LivenessProbe:
-	•	HTTP GET /healthz.
+	•	HTTP GET /tooling/healthz.
 	•	ReadinessProbe:
-	•	HTTP GET /readyz.
+	•	HTTP GET /tooling/readyz.
 
 10.2 Metrics
 
 Each hub SHOULD expose:
-	•	/metrics endpoint with counters and histograms including:
+	•	/tooling/metrics endpoint with counters and histograms including:
 	•	message append count per stream
 	•	append latency distribution
 	•	checkpoint creation rate
@@ -2956,7 +2974,7 @@ For a selected service:
 	•	call an issuance RPC on an admin service; or
 	•	request an out-of-band cap_token from an operator.
 	3.	Once a cap_token is obtained:
-	•	POST it to /authorize on the chosen hub;
+	•	POST it to /tooling/authorize on the chosen hub;
 	•	receive auth_ref and expires_at.
 	4.	Cache:
 	•	service_id;
@@ -2998,7 +3016,7 @@ The connect application MUST NOT bypass VEEN invariants or modify core behavior.
 	•	expected overlay_ids and schemas.
 
 8.3 Capability and exposure control
-	•	Publishing a service descriptor does not grant write access. Actual access control is still via cap_token and /authorize.
+	•	Publishing a service descriptor does not grant write access. Actual access control is still via cap_token and /tooling/authorize.
 	•	Operators MAY use tags and regions to distinguish:
 	•	internal only services;
 	•	public beta endpoints;
@@ -4580,7 +4598,7 @@ AGB0 implementation SHOULD be expressed mainly as:
 	•	writes audit event to bridge/offline/log.
 	•	Hubs and anchors:
 	•	veen hub start/stop/status
-	•	veen hub anchor /anchor endpoint for anchoring checkpoints.
+	•	veen hub anchor /tooling/anchor endpoint for anchoring checkpoints.
 	•	Self-test:
 	•	goals_dr_cutover MUST be green when DR0 overlay is used.
 	•	goals_k8s_disposable_mesh SHOULD be green for k8s deployments.
@@ -5523,7 +5541,7 @@ Acceptance:
 GOAL: Core operational edges exist and behave as specified.
 
 Checks:
-	•	/healthz returns {ok, profile_id, peaks_count, last_stream_seq, last_mmr_root}.
+	•	/tooling/healthz returns {ok, profile_id, peaks_count, last_stream_seq, last_mmr_root}.
 	•	Metrics include veen_submit_ok_total, veen_submit_err_total{code}, latency histograms, etc.
 	•	Logs are structured JSON per submit (label, client_id_prefix, stream_seq, leaf_hash_prefix, code?, bytes_in, bytes_out, verify_ms, commit_ms).
 	•	Retention and file rotation work (receipts.cborseq, payloads.cborseq, checkpoints.cborseq + index sidecars).
@@ -5813,12 +5831,12 @@ Requirements:
 	•	Listens on the specified address for:
 	•	POST /submit
 	•	GET  /stream
-	•	GET  /checkpoint_latest
-	•	GET  /checkpoint_range
-	•	POST /authorize
+	•	GET  /tooling/checkpoint_latest
+	•	GET  /tooling/checkpoint_range
+	•	POST /tooling/authorize
 	•	POST /report_equivocation
-	•	GET  /healthz
-	•	GET  /metrics
+	•	GET  /tooling/healthz
+	•	GET  /tooling/metrics
 
 2.2 Stop hub
 
@@ -6073,7 +6091,7 @@ veen cap authorize
 –cap cap.cbor
 
 Behavior:
-	•	POST cap_token to /authorize.
+	•	POST cap_token to /tooling/authorize.
 	•	On success, read {auth_ref, expires_at}.
 	•	Display auth_ref as hex32.
 	•	Optionally cache mapping cap.cbor -> auth_ref for later sends.
@@ -6338,7 +6356,7 @@ veen hub health
 –hub http://host:port
 
 Behavior:
-	•	GET /healthz.
+	•	GET /tooling/healthz.
 	•	Print JSON:
 	•	ok: bool
 	•	profile_id: hex32
@@ -6355,7 +6373,7 @@ veen hub metrics
 [–raw]
 
 Behavior:
-	•	GET /metrics.
+	•	GET /tooling/metrics.
 	•	If –raw: print raw metrics text.
 	•	Else: print summarized counters and histograms:
 	•	submit_ok_total
@@ -7396,8 +7414,8 @@ veen hub start
 –config /etc/veen/hub-config.toml 
 –profile-id HEX32_FROM_CONFIG_OR_FLAG
 	•	Readiness and liveness:
-	•	Readiness probe: HTTP GET /healthz on port 8080, success on “ok: true”.
-	•	Liveness probe: HTTP GET /healthz with a higher failure threshold.
+	•	Readiness probe: HTTP GET /tooling/healthz on port 8080, success on “ok: true”.
+	•	Liveness probe: HTTP GET /tooling/healthz with a higher failure threshold.
 	•	These probe definitions MUST be present in rendered pods.
 	•	Security:
 	•	runAsNonRoot: true
@@ -7456,7 +7474,7 @@ veen kube status
 
 Behavior:
 	•	Read Kubernetes Deployment/StatefulSet status.
-	•	If hub pods are reachable, query each pod “/healthz”.
+	•	If hub pods are reachable, query each pod “/tooling/healthz”.
 	•	Output at least:
 	•	deployment_name
 	•	namespace
@@ -8401,10 +8419,10 @@ Log output SHOULD:
 	•	be structured as text or JSON lines
 	•	contain timestamps and severity levels
 
-OS9.2 Metrics endpoint
+OS9.2 Metrics endpoint (non-core tooling)
 
-The hub MUST expose:
-	•	GET /metrics on its HTTP port
+The hub SHOULD expose the non-core tooling endpoint:
+	•	GET /tooling/metrics on its HTTP port
 
 The CLI command:
 	•	veen hub metrics --hub http://127.0.0.1:8080
@@ -8414,16 +8432,16 @@ MUST:
 	•	print raw output with --raw
 	•	otherwise, summarize key counters and histograms
 
-OS9.3 Health endpoint
+OS9.3 Health endpoint (non-core tooling)
 
-The hub MUST expose:
-	•	GET /healthz
+The hub SHOULD expose the non-core tooling endpoint:
+	•	GET /tooling/healthz
 
 The CLI command:
 	•	veen hub health --hub http://127.0.0.1:8080
 
 MUST:
-	•	fetch /healthz
+	•	fetch /tooling/healthz
 	•	map the response to a simple JSON or text summary
 
 	10.	Security and OS-level hardening

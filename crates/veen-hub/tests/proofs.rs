@@ -44,6 +44,7 @@ async fn stream_proof_reuses_stored_entries() -> Result<()> {
         None,
         HubRole::Primary,
         HubConfigOverrides {
+            tooling_enabled: Some(true),
             capability_gating_enabled: Some(false),
             ..HubConfigOverrides::default()
         },
@@ -101,6 +102,7 @@ async fn legacy_bundles_are_migrated() -> Result<()> {
         None,
         HubRole::Primary,
         HubConfigOverrides {
+            tooling_enabled: Some(true),
             capability_gating_enabled: Some(false),
             ..HubConfigOverrides::default()
         },

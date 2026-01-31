@@ -27,7 +27,8 @@ impl HubRuntime {
     pub async fn start(config: HubRuntimeConfig) -> Result<Self> {
         let storage = HubStorage::bootstrap(&config).await?;
         let pipeline = HubPipeline::initialise(&config, &storage).await?;
-        let server = HubServerHandle::spawn(config.listen, pipeline.clone()).await?;
+        let server =
+            HubServerHandle::spawn(config.listen, pipeline.clone(), config.tooling_enabled).await?;
         Ok(Self {
             config,
             storage,

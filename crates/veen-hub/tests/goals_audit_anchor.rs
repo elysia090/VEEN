@@ -47,6 +47,7 @@ async fn goals_audit_anchor() -> Result<()> {
         None,
         HubRole::Primary,
         HubConfigOverrides {
+            tooling_enabled: Some(true),
             capability_gating_enabled: Some(false),
             anchor_backend: Some("pseudo-backend".into()),
             ..HubConfigOverrides::default()
@@ -56,7 +57,7 @@ async fn goals_audit_anchor() -> Result<()> {
     let runtime = HubRuntime::start(config).await?;
 
     let http = reqwest::Client::builder().no_proxy().build()?;
-    let stream = "audit/anchor";
+    let stream = "audit/tooling/anchor";
     let client_signing = generate_client_id();
     let client_id = client_id_hex(&client_signing);
     let msg = encode_submit_msg(
@@ -96,7 +97,7 @@ async fn goals_audit_anchor() -> Result<()> {
         .await
         .context("submitting checkpoint to pseudo backend")?;
 
-    http.post(format!("http://{}/anchor", runtime.listen_addr()))
+    http.post(format!("http://{}/tooling/anchor", runtime.listen_addr()))
         .json(&AnchorRequest {
             stream: stream.to_string(),
             mmr_root: submit.mmr_root.clone(),

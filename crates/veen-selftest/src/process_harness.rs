@@ -1198,7 +1198,7 @@ impl IntegrationHarness {
         let pow_descriptor: PowChallengeResponse = self
             .http
             .get(format!(
-                "{hub_base}/pow_request?difficulty={pow_difficulty}"
+                "{hub_base}/tooling/pow_request?difficulty={pow_difficulty}"
             ))
             .send()
             .await
@@ -1697,7 +1697,7 @@ impl IntegrationHarness {
     async fn fetch_latest_checkpoint(&self, hub_url: &str) -> Result<Checkpoint> {
         let response = self
             .http
-            .get(format!("{hub_url}/checkpoint_latest"))
+            .get(format!("{hub_url}/tooling/checkpoint_latest"))
             .send()
             .await
             .with_context(|| format!("fetching checkpoint_latest from {hub_url}"))?;
@@ -1759,6 +1759,7 @@ impl IntegrationHarness {
             OsString::from("--data-dir"),
             data_dir.as_os_str().to_os_string(),
             OsString::from("--disable-capability-gating"),
+            OsString::from("--enable-tooling"),
         ];
 
         if let Some(difficulty) = pow_difficulty {
@@ -1827,6 +1828,7 @@ impl IntegrationHarness {
             OsString::from("--data-dir"),
             data_dir.as_os_str().to_os_string(),
             OsString::from("--disable-capability-gating"),
+            OsString::from("--enable-tooling"),
         ];
         if role == HubRole::Replica {
             args.push(OsString::from("--role"));
@@ -1954,7 +1956,7 @@ impl IntegrationHarness {
     }
 
     pub(crate) async fn wait_for_health(&self, listen: SocketAddr) -> Result<()> {
-        let url = format!("http://{listen}/healthz");
+        let url = format!("http://{listen}/tooling/healthz");
         for attempt in 0..HUB_HEALTH_MAX_ATTEMPTS {
             match self.http.get(&url).send().await {
                 Ok(resp) if resp.status().is_success() => return Ok(()),
@@ -1975,7 +1977,7 @@ impl IntegrationHarness {
         for attempt in 0..REPLICATION_MAX_ATTEMPTS {
             let response = self
                 .http
-                .post(format!("{replica_url}/resync"))
+                .post(format!("{replica_url}/tooling/resync"))
                 .json(&serde_json::json!({ "stream": "fed/chat" }))
                 .send()
                 .await;
@@ -2032,7 +2034,7 @@ impl IntegrationHarness {
     async fn fetch_metrics(&self, base: &str) -> Result<serde_json::Value> {
         let response = self
             .http
-            .get(format!("{base}/metrics"))
+            .get(format!("{base}/tooling/metrics"))
             .send()
             .await
             .context("fetching hub metrics")?;
@@ -2057,7 +2059,7 @@ impl IntegrationHarness {
     async fn fetch_health(&self, base: &str) -> Result<()> {
         let response = self
             .http
-            .get(format!("{base}/healthz"))
+            .get(format!("{base}/tooling/healthz"))
             .send()
             .await
             .context("fetching hub healthz")?;

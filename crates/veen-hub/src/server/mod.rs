@@ -29,15 +29,24 @@ pub struct HubServerHandle {
 }
 
 impl HubServerHandle {
-    pub async fn spawn(listen: SocketAddr, pipeline: HubPipeline) -> Result<Self> {
+    pub async fn spawn(
+        listen: SocketAddr,
+        pipeline: HubPipeline,
+        tooling_enabled: bool,
+    ) -> Result<Self> {
         let listener = TcpListener::bind(listen)
             .await
             .with_context(|| format!("binding hub listener on {listen}"))?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-        let app = Router::new()
+        let core_routes = Router::new()
             .route("/submit", post(handle_submit))
             .route("/stream", get(handle_stream))
+            .route("/receipt", get(handle_receipt))
+            .route("/proof", get(handle_proof))
+            .route("/checkpoint", get(handle_checkpoint));
+
+        let tooling_routes = Router::new()
             .route("/commit_wait", get(handle_commit_wait))
             .route("/resync", post(handle_resync))
             .route("/authorize", post(handle_authorize))
@@ -54,8 +63,14 @@ impl HubServerHandle {
             .route("/cap_status", post(handle_cap_status))
             .route("/pow_request", get(handle_pow_request))
             .route("/checkpoint_latest", get(handle_checkpoint_latest))
-            .route("/checkpoint_range", get(handle_checkpoint_range))
-            .with_state(pipeline);
+            .route("/checkpoint_range", get(handle_checkpoint_range));
+
+        let app = if tooling_enabled {
+            core_routes.nest("/tooling", tooling_routes)
+        } else {
+            core_routes
+        }
+        .with_state(pipeline);
 
         let server = axum::serve(listener, app.into_make_service()).with_graceful_shutdown(async {
             let _ = shutdown_rx.await;
@@ -84,8 +99,28 @@ impl HubServerHandle {
 struct StreamQuery {
     stream: String,
     from: Option<u64>,
+    to: Option<u64>,
     #[serde(default)]
     with_proof: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReceiptQuery {
+    stream: String,
+    seq: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProofQuery {
+    stream: String,
+    seq: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckpointQuery {
+    stream: String,
+    #[serde(rename = "upto_seq")]
+    upto_seq: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -194,13 +229,64 @@ async fn handle_stream(
     Query(query): Query<StreamQuery>,
 ) -> impl IntoResponse {
     match pipeline
-        .stream(&query.stream, query.from.unwrap_or(0), query.with_proof)
+        .stream(
+            &query.stream,
+            query.from.unwrap_or(0),
+            query.to,
+            query.with_proof,
+        )
         .await
     {
         Ok(messages) => (StatusCode::OK, Json(messages)).into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "stream request failed");
             (StatusCode::NOT_FOUND, err.to_string()).into_response()
+        }
+    }
+}
+
+async fn handle_receipt(
+    State(pipeline): State<HubPipeline>,
+    Query(query): Query<ReceiptQuery>,
+) -> impl IntoResponse {
+    match pipeline.receipt(&query.stream, query.seq).await {
+        Ok(receipt) => (StatusCode::OK, Json(receipt)).into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "receipt request failed");
+            (StatusCode::NOT_FOUND, err.to_string()).into_response()
+        }
+    }
+}
+
+async fn handle_proof(
+    State(pipeline): State<HubPipeline>,
+    Query(query): Query<ProofQuery>,
+) -> impl IntoResponse {
+    match pipeline.proof(&query.stream, query.seq).await {
+        Ok(proof) => (StatusCode::OK, Json(proof)).into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "proof request failed");
+            (StatusCode::NOT_FOUND, err.to_string()).into_response()
+        }
+    }
+}
+
+async fn handle_checkpoint(
+    State(pipeline): State<HubPipeline>,
+    Query(query): Query<CheckpointQuery>,
+) -> impl IntoResponse {
+    match pipeline.checkpoint(&query.stream, query.upto_seq).await {
+        Ok(Some(checkpoint)) => match cbor_response(&checkpoint) {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(error = ?err, "serialising checkpoint response failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+            }
+        },
+        Ok(None) => (StatusCode::NOT_FOUND, "checkpoint not found".to_string()).into_response(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "checkpoint request failed");
+            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
         }
     }
 }

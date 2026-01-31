@@ -285,7 +285,7 @@ impl BridgeRuntime {
         let mut url = self.config.replica.base_url.clone();
         url.path_segments_mut()
             .map_err(|_| anyhow!("replica hub URL is not base"))?
-            .push("resync");
+            .extend(&["tooling", "resync"]);
 
         let request = self.client.post(url).json(&ResyncBody {
             stream: stream.to_string(),
@@ -317,7 +317,7 @@ impl BridgeRuntime {
         let mut url = self.config.primary.base_url.clone();
         url.path_segments_mut()
             .map_err(|_| anyhow!("primary hub URL is not base"))?
-            .push("metrics");
+            .extend(&["tooling", "metrics"]);
         let request = self.client.get(url);
         let request = self.config.primary.apply_auth(request);
         let response = request.send().await.context("fetching hub metrics")?;
@@ -341,7 +341,7 @@ impl BridgeRuntime {
         let mut url = self.config.replica.base_url.clone();
         url.path_segments_mut()
             .map_err(|_| anyhow!("replica hub URL is not base"))?
-            .push("bridge");
+            .extend(&["tooling", "bridge"]);
 
         let req = self.client.post(url).json(request);
         let req = self.config.replica.apply_auth(req);
@@ -424,7 +424,7 @@ mod tests {
         let _replica_resync_mock = replica
             .mock_async(|when, then| {
                 when.method(POST)
-                    .path("/resync")
+                    .path("/tooling/resync")
                     .json_body(json!({ "stream": "test/stream" }));
                 then.status(404);
             })
@@ -432,7 +432,7 @@ mod tests {
 
         let _primary_metrics_mock = primary
             .mock_async(|when, then| {
-                when.method(GET).path("/metrics");
+                when.method(GET).path("/tooling/metrics");
                 then.status(200)
                     .json_body(json!({ "last_stream_seq": { "test/stream": 1 } }));
             })
@@ -477,7 +477,7 @@ mod tests {
         let expected_root_response = expected_root_hex.clone();
         let bridge_mock = replica
             .mock_async(move |when, then| {
-                when.method(POST).path("/bridge").json_body(json!({
+                when.method(POST).path("/tooling/bridge").json_body(json!({
                     "message": sample_message(stream, 1),
                     "expected_mmr_root": expected_root_request,
                 }));
@@ -524,7 +524,7 @@ mod tests {
         let _replica_resync_mock = replica
             .mock_async(|when, then| {
                 when.method(POST)
-                    .path("/resync")
+                    .path("/tooling/resync")
                     .json_body(json!({ "stream": "dynamic/stream" }));
                 then.status(404);
             })
@@ -532,7 +532,7 @@ mod tests {
 
         let _primary_metrics_mock = primary
             .mock_async(|when, then| {
-                when.method(GET).path("/metrics");
+                when.method(GET).path("/tooling/metrics");
                 then.status(200)
                     .json_body(json!({ "last_stream_seq": { "dynamic/stream": 1 } }));
             })
@@ -555,7 +555,7 @@ mod tests {
         let expected_root_response = expected_root_hex.clone();
         let bridge_mock = replica
             .mock_async(move |when, then| {
-                when.method(POST).path("/bridge").json_body(json!({
+                when.method(POST).path("/tooling/bridge").json_body(json!({
                     "message": sample_message(stream, 1),
                     "expected_mmr_root": expected_root_request,
                 }));
