@@ -94,7 +94,14 @@ async fn stream_proof_reuses_stored_entries() -> Result<()> {
     let proof = response
         .mmr_proof
         .ok_or_else(|| anyhow::anyhow!("stream response missing mmr proof"))?;
-    assert_eq!(proof.peaks_after, vec!["deadbeef".to_string()]);
+    let peak_hex = hex::encode(
+        proof
+            .peaks_after
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("stream response missing proof peaks"))?
+            .as_bytes(),
+    );
+    assert_eq!(peak_hex, "deadbeef".repeat(8));
 
     runtime.shutdown().await?;
     Ok(())
@@ -159,7 +166,10 @@ async fn legacy_bundles_are_migrated() -> Result<()> {
         .receipt
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("missing receipt in stream response"))?;
-    assert!(!receipt.mmr_root.is_empty());
+    assert!(
+        receipt.mmr_root.as_bytes().iter().any(|value| *value != 0),
+        "receipt must carry a non-empty MMR root"
+    );
 
     let data = fs::read(&bundle)
         .await
@@ -230,7 +240,7 @@ async fn overwrite_proof_peaks(path: &Path, marker: &str) -> Result<()> {
         .context("bundle missing proof")?;
     proof.insert(
         "peaks_after".to_string(),
-        Value::Array(vec![Value::String(marker.to_string())]),
+        Value::Array(vec![Value::String(marker.repeat(8))]),
     );
     let encoded = serde_json::to_vec(&value).context("encoding patched bundle")?;
     fs::write(path, encoded)

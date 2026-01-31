@@ -379,7 +379,7 @@ impl PerfDriver {
             PerfMode::InProcess => {
                 if !self
                     .pipeline
-                    .commit_status(&self.stream_label, response.receipt.seq)
+                    .commit_status(&self.stream_label, response.receipt.stream_seq)
                     .await?
                 {
                     return Err(anyhow!("commit not yet available in process"));
@@ -392,7 +392,7 @@ impl PerfDriver {
                     .ok_or_else(|| anyhow!("missing HTTP context for perf run"))?;
                 let url = format!(
                     "{}/tooling/commit_wait?stream={}&seq={}",
-                    http.base_url, self.stream_label, response.receipt.seq
+                    http.base_url, self.stream_label, response.receipt.stream_seq
                 );
                 let response = http.client.get(url).send().await?;
                 if !response.status().is_success() {

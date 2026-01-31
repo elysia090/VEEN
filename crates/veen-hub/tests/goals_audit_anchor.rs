@@ -95,11 +95,12 @@ async fn goals_audit_anchor() -> Result<()> {
             .context("reading anchor submit response")?,
     )?;
 
+    let submit_mmr_root = hex::encode(submit.receipt.mmr_root.as_bytes());
     let checkpoint_bytes = create_signed_checkpoint(
         hub_dir.path(),
         stream,
-        submit.receipt.seq,
-        &submit.receipt.mmr_root,
+        submit.receipt.stream_seq,
+        &submit_mmr_root,
     )
     .await?;
     append_checkpoint(hub_dir.path(), &checkpoint_bytes).await?;
@@ -107,8 +108,8 @@ async fn goals_audit_anchor() -> Result<()> {
     pseudo_backend
         .submit(
             stream,
-            submit.receipt.seq,
-            &submit.receipt.mmr_root,
+            submit.receipt.stream_seq,
+            &submit_mmr_root,
             &checkpoint_bytes,
         )
         .await
@@ -117,7 +118,7 @@ async fn goals_audit_anchor() -> Result<()> {
     http.post(format!("http://{}/tooling/anchor", runtime.listen_addr()))
         .json(&AnchorRequest {
             stream: stream.to_string(),
-            mmr_root: submit.receipt.mmr_root.clone(),
+            mmr_root: submit_mmr_root.clone(),
             backend: Some("pseudo-backend".into()),
         })
         .send()
@@ -141,22 +142,22 @@ async fn goals_audit_anchor() -> Result<()> {
         .find(|entry| entry.stream == stream)
         .ok_or_else(|| anyhow!("pseudo backend missing record for {stream}"))?;
     ensure!(
-        stored.mmr_root == submit.receipt.mmr_root,
+        stored.mmr_root == submit_mmr_root,
         "pseudo backend recorded unexpected mmr root"
     );
     ensure!(
-        stored.upto_seq == submit.receipt.seq,
+        stored.upto_seq == submit.receipt.stream_seq,
         "pseudo backend recorded unexpected upto_seq"
     );
 
     let decoded: Checkpoint = from_reader(stored.checkpoint.as_slice())
         .context("decoding stored checkpoint for audit verification")?;
     ensure!(
-        hex::encode(decoded.mmr_root.as_bytes()) == submit.receipt.mmr_root,
+        hex::encode(decoded.mmr_root.as_bytes()) == submit_mmr_root,
         "decoded checkpoint mmr_root does not match submission"
     );
     ensure!(
-        decoded.upto_seq == submit.receipt.seq,
+        decoded.upto_seq == submit.receipt.stream_seq,
         "decoded checkpoint upto_seq does not match submission"
     );
 
@@ -167,7 +168,7 @@ async fn goals_audit_anchor() -> Result<()> {
         .find(|record| record.stream == stream)
         .ok_or_else(|| anyhow!("anchor log missing record for {stream}"))?;
     ensure!(
-        record.mmr_root == submit.receipt.mmr_root,
+        record.mmr_root == submit_mmr_root,
         "anchor log mmr root mismatch"
     );
     ensure!(
@@ -179,7 +180,7 @@ async fn goals_audit_anchor() -> Result<()> {
     let checkpoint_mmr_root = hex::encode(decoded.mmr_root.as_bytes());
     let report = format_goal_audit_anchor_report(
         stream,
-        submit.receipt.seq,
+        submit.receipt.stream_seq,
         &label_hex,
         &backend_url,
         &checkpoint_mmr_root,

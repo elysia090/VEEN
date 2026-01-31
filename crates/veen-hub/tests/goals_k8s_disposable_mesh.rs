@@ -107,18 +107,14 @@ async fn goals_k8s_disposable_mesh() -> Result<()> {
             .await
             .context("reading mesh stream response")?,
     )?;
-    let messages = stream_resp
-        .items
-        .into_iter()
-        .map(|item| item.msg)
-        .collect::<Vec<_>>();
-    let streamed_messages = messages.len();
+    let items = stream_resp.items;
+    let streamed_messages = items.len();
     ensure!(
         streamed_messages == 1,
         "expected single message in disposable mesh stream"
     );
     ensure!(
-        messages[0].seq == first.receipt.seq,
+        items[0].stream_seq == first.receipt.stream_seq,
         "streamed sequence does not match submission"
     );
 
@@ -143,8 +139,8 @@ async fn goals_k8s_disposable_mesh() -> Result<()> {
         pvc = pvc_dir.display(),
         hub_data = hub_data.display(),
         stream = stream,
-        seq = first.receipt.seq,
-        mmr_root = first.receipt.mmr_root,
+        seq = first.receipt.stream_seq,
+        mmr_root = hex::encode(first.receipt.mmr_root.as_bytes()),
         streamed = streamed_messages,
         state_exists = state_exists,
     );

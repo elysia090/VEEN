@@ -12,6 +12,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use bloomfilter::Bloom;
 use ciborium::de::from_reader;
+use ed25519_dalek::{Signer, SigningKey};
 use hex;
 use lru::LruCache;
 use serde::de::{Error as DeError, MapAccess, Visitor};
@@ -30,7 +31,8 @@ use veen_core::wire::checkpoint::Checkpoint;
 use veen_core::wire::{
     mmr::Mmr,
     proof::{Direction, MmrPathNode, MmrProof},
-    types::{AuthRef, ClientId, LeafHash, MmrNode},
+    receipt::{Receipt, RECEIPT_VERSION},
+    types::{AuthRef, ClientId, LeafHash, MmrNode, MmrRoot, Signature64},
 };
 use veen_core::wire::{CtHash, Msg};
 use veen_core::{
@@ -83,6 +85,7 @@ pub struct HubPipeline {
     admission: AdmissionConfig,
     federation: FederationConfig,
     identity: HubIdentity,
+    hub_signing_key: Arc<SigningKey>,
     dedup: Arc<Mutex<DuplicateDetector>>,
     dedup_dirty: Arc<AtomicBool>,
 }
@@ -335,6 +338,7 @@ impl HubPipeline {
         let capabilities = load_capabilities(storage).await?;
         let anchors = load_anchor_log(storage).await?;
         let identity = load_hub_identity(storage).await?;
+        let hub_signing_key = load_hub_signing_key(storage).await?;
         let mut dedup_detector = DuplicateDetector::new(&config.dedup);
         let recent_entries = match load_recent_dedup_cache(storage, &config.dedup).await? {
             Some(entries) => entries,
@@ -366,6 +370,7 @@ impl HubPipeline {
             admission: config.admission.clone(),
             federation: config.federation.clone(),
             identity,
+            hub_signing_key: Arc::new(hub_signing_key),
             dedup: Arc::new(Mutex::new(dedup_detector)),
             dedup_dirty: Arc::new(AtomicBool::new(false)),
         })
@@ -760,9 +765,12 @@ impl HubPipeline {
 
         self.observability.record_submit_ok();
 
+        let wire_receipt = self
+            .build_wire_receipt(&receipt, &label)
+            .context("building wire receipt for submit response")?;
         Ok(SubmitResponse {
             ver: 1,
-            receipt,
+            receipt: wire_receipt,
             server_version: None,
         })
     }
@@ -970,12 +978,20 @@ impl HubPipeline {
             };
             let items = messages
                 .into_iter()
-                .map(|message| StreamResponseItem {
-                    stream_seq: message.seq,
-                    msg: message,
-                    receipt: None,
+                .map(|message| {
+                    let msg = stored_message_to_wire_msg(&message).with_context(|| {
+                        format!(
+                            "encoding stream msg {}#{} as wire MSG",
+                            message.stream, message.seq
+                        )
+                    })?;
+                    Ok(StreamResponseItem {
+                        stream_seq: message.seq,
+                        msg,
+                        receipt: None,
+                    })
                 })
-                .collect();
+                .collect::<Result<Vec<_>>>()?;
             return Ok(StreamResponse {
                 ver: 1,
                 stream: stream.to_string(),
@@ -1008,18 +1024,54 @@ impl HubPipeline {
         }
 
         let mmr_proof = if with_mmr_proof {
-            proven.last().map(|entry| entry.proof.clone())
+            match proven.last() {
+                Some(entry) => Some(
+                    entry
+                        .proof
+                        .clone()
+                        .try_into_mmr()
+                        .context("decoding stored proof for stream response")?,
+                ),
+                None => None,
+            }
         } else {
             None
         };
         let items = proven
             .into_iter()
-            .map(|entry| StreamResponseItem {
-                stream_seq: entry.message.seq,
-                msg: entry.message,
-                receipt: with_receipts.then_some(entry.receipt),
+            .map(|entry| {
+                let label = stored_message_label(&entry.message).with_context(|| {
+                    format!(
+                        "parsing label for {}#{}",
+                        entry.message.stream, entry.message.seq
+                    )
+                })?;
+                let msg = stored_message_to_wire_msg(&entry.message).with_context(|| {
+                    format!(
+                        "encoding stream msg {}#{} as wire MSG",
+                        entry.message.stream, entry.message.seq
+                    )
+                })?;
+                let receipt = if with_receipts {
+                    Some(
+                        self.build_wire_receipt(&entry.receipt, &label)
+                            .with_context(|| {
+                                format!(
+                                    "building wire receipt for {}#{}",
+                                    entry.message.stream, entry.message.seq
+                                )
+                            })?,
+                    )
+                } else {
+                    None
+                };
+                Ok(StreamResponseItem {
+                    stream_seq: entry.message.seq,
+                    msg,
+                    receipt,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         Ok(StreamResponse {
             ver: 1,
             stream: stream.to_string(),
@@ -1032,14 +1084,51 @@ impl HubPipeline {
         })
     }
 
-    pub async fn receipt(&self, stream: &str, seq: u64) -> Result<StreamReceipt> {
+    pub async fn receipt(&self, stream: &str, seq: u64) -> Result<Receipt> {
         let entry = self.load_proven_entry(stream, seq).await?;
-        Ok(entry.receipt)
+        let label = stored_message_label(&entry.message).with_context(|| {
+            format!(
+                "parsing label for {}#{}",
+                entry.message.stream, entry.message.seq
+            )
+        })?;
+        self.build_wire_receipt(&entry.receipt, &label)
+            .with_context(|| {
+                format!(
+                    "building wire receipt for {}#{}",
+                    entry.message.stream, entry.message.seq
+                )
+            })
     }
 
-    pub async fn proof(&self, stream: &str, seq: u64) -> Result<StreamProof> {
+    pub async fn proof(&self, stream: &str, seq: u64) -> Result<MmrProof> {
         let entry = self.load_proven_entry(stream, seq).await?;
-        Ok(entry.proof)
+        entry
+            .proof
+            .try_into_mmr()
+            .context("decoding stored proof for proof response")
+    }
+
+    fn build_wire_receipt(&self, receipt: &StreamReceipt, label: &Label) -> Result<Receipt> {
+        let leaf_hash = LeafHash::from_str(&receipt.leaf_hash)
+            .with_context(|| format!("parsing receipt leaf hash {}", receipt.leaf_hash))?;
+        let mmr_root = MmrRoot::from_str(&receipt.mmr_root)
+            .with_context(|| format!("parsing receipt mmr root {}", receipt.mmr_root))?;
+        let mut receipt = Receipt {
+            ver: RECEIPT_VERSION,
+            label: *label,
+            stream_seq: receipt.seq,
+            leaf_hash,
+            mmr_root,
+            hub_ts: receipt.hub_ts,
+            hub_sig: Signature64::new([0u8; 64]),
+        };
+        let digest = receipt
+            .signing_tagged_hash()
+            .context("computing receipt signing digest")?;
+        let signature = self.hub_signing_key.sign(digest.as_ref());
+        receipt.hub_sig = Signature64::from(signature.to_bytes());
+        Ok(receipt)
     }
 
     pub async fn checkpoint(&self, stream: &str, upto_seq: u64) -> Result<Option<Checkpoint>> {
@@ -1577,7 +1666,7 @@ pub struct AttachmentUpload {
 #[derive(Debug, Clone)]
 pub struct SubmitResponse {
     pub ver: u64,
-    pub receipt: StreamReceipt,
+    pub receipt: Receipt,
     pub server_version: Option<String>,
 }
 
@@ -1614,28 +1703,28 @@ pub struct StreamResponse {
     pub to_seq: Option<u64>,
     pub items: Vec<StreamResponseItem>,
     pub next_cursor: Option<u64>,
-    pub mmr_proof: Option<StreamProof>,
+    pub mmr_proof: Option<MmrProof>,
     pub server_version: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StreamResponseItem {
     pub stream_seq: u64,
-    pub msg: StoredMessage,
-    pub receipt: Option<StreamReceipt>,
+    pub msg: Msg,
+    pub receipt: Option<Receipt>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ReceiptResponse {
     pub ver: u64,
-    pub receipt: StreamReceipt,
+    pub receipt: Receipt,
     pub server_version: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ProofResponse {
     pub ver: u64,
-    pub mmr_proof: StreamProof,
+    pub mmr_proof: MmrProof,
     pub server_version: Option<String>,
 }
 
@@ -2268,6 +2357,73 @@ impl StreamProof {
     }
 }
 
+fn stored_message_label(message: &StoredMessage) -> Result<Label> {
+    let label_hex = message
+        .label
+        .as_deref()
+        .ok_or_else(|| anyhow!("stored message missing label"))?;
+    Label::from_str(label_hex).with_context(|| format!("parsing label {}", label_hex))
+}
+
+fn stored_message_to_wire_msg(message: &StoredMessage) -> Result<Msg> {
+    let ver = message
+        .ver
+        .ok_or_else(|| anyhow!("stored message missing msg version"))?;
+    let profile_hex = message
+        .profile_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("stored message missing profile_id"))?;
+    let profile_id = ProfileId::from_str(profile_hex)
+        .with_context(|| format!("parsing profile_id {profile_hex}"))?;
+    let label = stored_message_label(message)?;
+    let client_id = ClientId::from_str(&message.client_id)
+        .with_context(|| format!("parsing client_id {}", message.client_id))?;
+    let client_seq = message
+        .client_seq
+        .ok_or_else(|| anyhow!("stored message missing client_seq"))?;
+    let prev_ack = message
+        .prev_ack
+        .ok_or_else(|| anyhow!("stored message missing prev_ack"))?;
+    let auth_ref = match message.auth_ref.as_deref() {
+        Some(value) => {
+            Some(AuthRef::from_str(value).with_context(|| format!("parsing auth_ref {value}"))?)
+        }
+        None => None,
+    };
+    let ct_hash_hex = message
+        .ct_hash
+        .as_deref()
+        .ok_or_else(|| anyhow!("stored message missing ct_hash"))?;
+    let ct_hash =
+        CtHash::from_str(ct_hash_hex).with_context(|| format!("parsing ct_hash {ct_hash_hex}"))?;
+    let ciphertext_b64 = message
+        .ciphertext
+        .as_deref()
+        .ok_or_else(|| anyhow!("stored message missing ciphertext"))?;
+    let ciphertext = BASE64_STANDARD
+        .decode(ciphertext_b64.as_bytes())
+        .with_context(|| format!("decoding ciphertext for {}", message.stream))?;
+    let sig_hex = message
+        .sig
+        .as_deref()
+        .ok_or_else(|| anyhow!("stored message missing signature"))?;
+    let sig =
+        Signature64::from_str(sig_hex).with_context(|| format!("parsing signature {sig_hex}"))?;
+
+    Ok(Msg {
+        ver,
+        profile_id,
+        label,
+        client_id,
+        client_seq,
+        prev_ack,
+        auth_ref,
+        ct_hash,
+        ciphertext,
+        sig,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredMessage {
     pub stream: String,
@@ -2298,6 +2454,36 @@ pub struct StoredMessage {
     pub attachments: Vec<StoredAttachment>,
     pub auth_ref: Option<String>,
     pub idem: Option<u64>,
+}
+
+impl StoredMessage {
+    pub fn from_wire(stream: &str, seq: u64, sent_at: u64, msg: &Msg) -> Self {
+        Self {
+            stream: stream.to_string(),
+            seq,
+            sent_at,
+            client_id: hex::encode(msg.client_id.as_bytes()),
+            ver: Some(msg.ver),
+            profile_id: Some(hex::encode(msg.profile_id.as_ref())),
+            label: Some(hex::encode(msg.label.as_ref())),
+            client_seq: Some(msg.client_seq),
+            prev_ack: Some(msg.prev_ack),
+            ct_hash: Some(hex::encode(msg.ct_hash.as_bytes())),
+            ciphertext: Some(BASE64_STANDARD.encode(&msg.ciphertext)),
+            sig: Some(hex::encode(msg.sig.as_ref())),
+            schema: None,
+            expires_at: None,
+            parent: None,
+            body: None,
+            body_digest: None,
+            attachments: Vec::new(),
+            auth_ref: msg
+                .auth_ref
+                .as_ref()
+                .map(|value| hex::encode(value.as_ref())),
+            idem: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2516,9 +2702,9 @@ impl CapabilityError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::RateLimited { .. } => "E.RATE",
-            Self::Unauthorized { .. }
-            | Self::StreamMismatch { .. }
-            | Self::StreamDenied { .. } => "E.CAP",
+            Self::Unauthorized { .. } | Self::StreamMismatch { .. } | Self::StreamDenied { .. } => {
+                "E.CAP"
+            }
             Self::SubjectMismatch { .. }
             | Self::ClientQuotaExceeded { .. }
             | Self::ClientUsageOverflow { .. } => "E.AUTH",
@@ -2817,6 +3003,41 @@ async fn load_hub_identity(storage: &HubStorage) -> Result<HubIdentity> {
         ),
         public_key_hex: hex::encode(public_key),
     })
+}
+
+async fn load_hub_signing_key(storage: &HubStorage) -> Result<SigningKey> {
+    let path = storage.hub_key_path();
+    if !fs::try_exists(&path)
+        .await
+        .with_context(|| format!("checking hub key at {}", path.display()))?
+    {
+        bail!(
+            "hub data directory at {} is missing hub_key.cbor",
+            storage.data_dir().display()
+        );
+    }
+
+    let bytes = fs::read(&path)
+        .await
+        .with_context(|| format!("reading hub key material from {}", path.display()))?;
+    let mut cursor = Cursor::new(bytes);
+    let material: HubKeyMaterial =
+        from_reader(&mut cursor).context("decoding hub key material from CBOR")?;
+
+    if material.version != HUB_KEY_VERSION {
+        bail!(
+            "unsupported hub key version {}; expected {}",
+            material.version,
+            HUB_KEY_VERSION
+        );
+    }
+
+    let secret_key: [u8; 32] = material
+        .secret_key
+        .as_ref()
+        .try_into()
+        .map_err(|_| anyhow!("hub secret key must be 32 bytes"))?;
+    Ok(SigningKey::from_bytes(&secret_key))
 }
 
 async fn load_existing_streams(storage: &HubStorage) -> Result<HashMap<String, StreamRuntime>> {

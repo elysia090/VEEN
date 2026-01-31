@@ -140,11 +140,17 @@ async fn goals_dr_cutover() -> Result<()> {
         let receipt = item
             .receipt
             .ok_or_else(|| anyhow!("stream response missing receipt for message"))?;
+        let expected_mmr_root = hex::encode(receipt.mmr_root.as_bytes());
         let ingest: BridgeIngestResponse = http
             .post(format!("{}/tooling/bridge", replica_base))
             .json(&BridgeIngestRequest {
-                message: item.msg.clone(),
-                expected_mmr_root: receipt.mmr_root.clone(),
+                message: veen_hub::pipeline::StoredMessage::from_wire(
+                    stream,
+                    item.stream_seq,
+                    receipt.hub_ts,
+                    &item.msg,
+                ),
+                expected_mmr_root: expected_mmr_root.clone(),
             })
             .send()
             .await
@@ -155,7 +161,7 @@ async fn goals_dr_cutover() -> Result<()> {
             .await
             .context("decoding bridge ingest response")?;
         ensure!(
-            ingest.mmr_root == receipt.mmr_root,
+            ingest.mmr_root == expected_mmr_root,
             "replica computed unexpected mmr root"
         );
         bridged_receipts += 1;
@@ -251,7 +257,7 @@ async fn goals_dr_cutover() -> Result<()> {
             .context("reading promoted submission response")?,
     )?;
     ensure!(
-        promote_response.receipt.seq as usize == submit_receipts.len() + 1,
+        promote_response.receipt.stream_seq as usize == submit_receipts.len() + 1,
         "promoted hub did not continue sequence"
     );
 
@@ -271,7 +277,7 @@ async fn goals_dr_cutover() -> Result<()> {
         .cloned()
         .ok_or_else(|| anyhow!("promoted hub missing mmr root"))?;
     ensure!(
-        promoted_root == promote_response.receipt.mmr_root,
+        promoted_root == hex::encode(promote_response.receipt.mmr_root.as_bytes()),
         "promoted hub reported inconsistent mmr root"
     );
 
@@ -281,7 +287,7 @@ async fn goals_dr_cutover() -> Result<()> {
         replica_addr,
         bridged_receipts,
         shared_mmr_root_before_cutover: primary_root.clone(),
-        post_promotion_seq: promote_response.receipt.seq,
+        post_promotion_seq: promote_response.receipt.stream_seq,
         post_promotion_root: promoted_root.clone(),
     });
 
