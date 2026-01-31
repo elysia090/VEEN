@@ -12,21 +12,120 @@ use axum::routing::{get, post};
 use axum::{body::Bytes, Json, Router};
 use ciborium::ser::into_writer;
 use serde::de::{DeserializeOwned, Error as DeError, MapAccess, Visitor};
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::pipeline::{
-    AnchorRequest, BridgeIngestRequest, CapabilityError, CheckpointResponse, HubPipeline,
-    HubProfileDescriptor, ObservabilityReport, ProofResponse, ReceiptResponse, SubmitError,
-    SubmitRequest,
+    AdmissionStage, AnchorRequest, BridgeIngestRequest, CapabilityError, CheckpointResponse,
+    HubPipeline, HubProfileDescriptor, ObservabilityReport, ProofResponse, ReceiptResponse,
+    SubmitError, SubmitRequest,
 };
 use std::str::FromStr;
 use veen_core::label::StreamId;
 use veen_core::RealmId;
 
 const DATA_PLANE_VERSION: u64 = 1;
+
+#[derive(Debug, Serialize)]
+struct ErrorDetail {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail_enum: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonErrorEnvelope {
+    ver: u64,
+    code: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<ErrorDetail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after: Option<u64>,
+}
+
+#[derive(Debug)]
+struct CborErrorEnvelope {
+    ver: u64,
+    code: String,
+    message: String,
+    detail: Option<ErrorDetail>,
+    retry_after: Option<u64>,
+}
+
+impl Serialize for CborErrorEnvelope {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry(&1u8, &self.ver)?;
+        map.serialize_entry(&2u8, &self.code)?;
+        map.serialize_entry(&3u8, &self.message)?;
+        if let Some(detail) = &self.detail {
+            map.serialize_entry(&4u8, detail)?;
+        }
+        if let Some(retry_after) = &self.retry_after {
+            map.serialize_entry(&5u8, retry_after)?;
+        }
+        map.end()
+    }
+}
+
+fn admission_detail(stage: AdmissionStage, detail_enum: Option<&'static str>) -> ErrorDetail {
+    ErrorDetail {
+        stage: Some(stage.as_str().to_string()),
+        detail_enum: detail_enum.map(|value| value.to_string()),
+    }
+}
+
+fn cbor_error_response(
+    status: StatusCode,
+    code: &str,
+    message: String,
+    detail: Option<ErrorDetail>,
+    retry_after: Option<u64>,
+) -> Response {
+    let envelope = CborErrorEnvelope {
+        ver: DATA_PLANE_VERSION,
+        code: code.to_string(),
+        message,
+        detail,
+        retry_after,
+    };
+    let mut body = Vec::new();
+    if let Err(err) = into_writer(&envelope, &mut body) {
+        tracing::warn!(error = ?err, "serialising error envelope failed");
+        return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+    }
+    (
+        status,
+        [(CONTENT_TYPE, HeaderValue::from_static("application/cbor"))],
+        body,
+    )
+        .into_response()
+}
+
+fn json_error_response(
+    status: StatusCode,
+    code: &str,
+    message: String,
+    detail: Option<ErrorDetail>,
+    retry_after: Option<u64>,
+) -> Response {
+    let envelope = JsonErrorEnvelope {
+        ver: DATA_PLANE_VERSION,
+        code: code.to_string(),
+        message,
+        detail,
+        retry_after,
+    };
+    (status, Json(envelope)).into_response()
+}
 
 pub struct HubServerHandle {
     shutdown: Option<oneshot::Sender<()>>,
@@ -584,19 +683,23 @@ async fn handle_submit(State(pipeline): State<HubPipeline>, body: Bytes) -> impl
     let request: SubmitRequestCbor = match decode_cbor_body(&body) {
         Ok(request) => request,
         Err(err) => {
-            return (
+            return cbor_error_response(
                 StatusCode::BAD_REQUEST,
+                "E.BAD_REQUEST",
                 format!("invalid submit request body: {err}"),
-            )
-                .into_response();
+                None,
+                None,
+            );
         }
     };
     if request.ver != DATA_PLANE_VERSION {
-        return (
+        return cbor_error_response(
             StatusCode::BAD_REQUEST,
+            "E.FORMAT",
             format!("unsupported submit version {}", request.ver),
-        )
-            .into_response();
+            None,
+            None,
+        );
     }
     let stream_label = request.stream.clone();
     let client_id = request.client_id.clone();
@@ -614,7 +717,13 @@ async fn handle_submit(State(pipeline): State<HubPipeline>, body: Bytes) -> impl
             Ok(response) => response,
             Err(err) => {
                 tracing::warn!(error = ?err, "serialising submit response failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+                cbor_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "E.UNAVAILABLE",
+                    err.to_string(),
+                    None,
+                    None,
+                )
             }
         },
         Err(err) => {
@@ -636,10 +745,17 @@ async fn handle_submit(State(pipeline): State<HubPipeline>, body: Bytes) -> impl
                 let status = match code {
                     "E.RATE" => StatusCode::TOO_MANY_REQUESTS,
                     "E.SIZE" => StatusCode::PAYLOAD_TOO_LARGE,
-                    "E.AUTH" | "E.CAP" => StatusCode::FORBIDDEN,
+                    "E.AUTH" | "E.CAP" | "E.SIG" => StatusCode::FORBIDDEN,
                     _ => StatusCode::BAD_REQUEST,
                 };
-                let mut response = (status, cap_err.to_string()).into_response();
+                let detail = admission_detail(cap_err.admission_stage(), cap_err.detail_enum());
+                let mut response = cbor_error_response(
+                    status,
+                    code,
+                    cap_err.to_string(),
+                    Some(detail),
+                    cap_err.retry_after(),
+                );
                 if let Some(wait) = cap_err.retry_after() {
                     if let Ok(value) = HeaderValue::from_str(&wait.to_string()) {
                         response.headers_mut().insert(RETRY_AFTER, value);
@@ -661,10 +777,24 @@ async fn handle_submit(State(pipeline): State<HubPipeline>, body: Bytes) -> impl
                 {
                     tracing::warn!(error = ?err, "recording admission failure failed");
                 }
-                (StatusCode::CONFLICT, submit_err.to_string()).into_response()
+                let detail =
+                    admission_detail(submit_err.admission_stage(), submit_err.detail_enum());
+                cbor_error_response(
+                    StatusCode::CONFLICT,
+                    code,
+                    submit_err.to_string(),
+                    Some(detail),
+                    None,
+                )
             } else {
                 tracing::warn!(error = ?err, "submit failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+                cbor_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "E.UNAVAILABLE",
+                    err.to_string(),
+                    None,
+                    None,
+                )
             }
         }
     }
@@ -674,19 +804,23 @@ async fn handle_stream(State(pipeline): State<HubPipeline>, body: Bytes) -> impl
     let query: StreamRequest = match decode_cbor_body(&body) {
         Ok(request) => request,
         Err(err) => {
-            return (
+            return cbor_error_response(
                 StatusCode::BAD_REQUEST,
+                "E.BAD_REQUEST",
                 format!("invalid stream request body: {err}"),
-            )
-                .into_response();
+                None,
+                None,
+            );
         }
     };
     if query.ver != DATA_PLANE_VERSION {
-        return (
+        return cbor_error_response(
             StatusCode::BAD_REQUEST,
+            "E.FORMAT",
             format!("unsupported stream version {}", query.ver),
-        )
-            .into_response();
+            None,
+            None,
+        );
     }
     if query.max_items.is_some() || query.cursor.is_some() {
         tracing::debug!(
@@ -705,12 +839,24 @@ async fn handle_stream(State(pipeline): State<HubPipeline>, body: Bytes) -> impl
             Ok(response) => response,
             Err(err) => {
                 tracing::warn!(error = ?err, "serialising stream response failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+                cbor_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "E.UNAVAILABLE",
+                    err.to_string(),
+                    None,
+                    None,
+                )
             }
         },
         Err(err) => {
             tracing::warn!(error = ?err, "stream request failed");
-            (StatusCode::NOT_FOUND, err.to_string()).into_response()
+            cbor_error_response(
+                StatusCode::NOT_FOUND,
+                "E.NOT_FOUND",
+                err.to_string(),
+                None,
+                None,
+            )
         }
     }
 }
@@ -719,19 +865,23 @@ async fn handle_receipt(State(pipeline): State<HubPipeline>, body: Bytes) -> imp
     let query: ReceiptRequest = match decode_cbor_body(&body) {
         Ok(request) => request,
         Err(err) => {
-            return (
+            return cbor_error_response(
                 StatusCode::BAD_REQUEST,
+                "E.BAD_REQUEST",
                 format!("invalid receipt request body: {err}"),
-            )
-                .into_response();
+                None,
+                None,
+            );
         }
     };
     if query.ver != DATA_PLANE_VERSION {
-        return (
+        return cbor_error_response(
             StatusCode::BAD_REQUEST,
+            "E.FORMAT",
             format!("unsupported receipt version {}", query.ver),
-        )
-            .into_response();
+            None,
+            None,
+        );
     }
     match pipeline.receipt(&query.stream, query.seq).await {
         Ok(receipt) => match cbor_response(&ReceiptResponse {
@@ -742,12 +892,24 @@ async fn handle_receipt(State(pipeline): State<HubPipeline>, body: Bytes) -> imp
             Ok(response) => response,
             Err(err) => {
                 tracing::warn!(error = ?err, "serialising receipt response failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+                cbor_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "E.UNAVAILABLE",
+                    err.to_string(),
+                    None,
+                    None,
+                )
             }
         },
         Err(err) => {
             tracing::warn!(error = ?err, "receipt request failed");
-            (StatusCode::NOT_FOUND, err.to_string()).into_response()
+            cbor_error_response(
+                StatusCode::NOT_FOUND,
+                "E.NOT_FOUND",
+                err.to_string(),
+                None,
+                None,
+            )
         }
     }
 }
@@ -756,19 +918,23 @@ async fn handle_proof(State(pipeline): State<HubPipeline>, body: Bytes) -> impl 
     let query: ProofRequest = match decode_cbor_body(&body) {
         Ok(request) => request,
         Err(err) => {
-            return (
+            return cbor_error_response(
                 StatusCode::BAD_REQUEST,
+                "E.BAD_REQUEST",
                 format!("invalid proof request body: {err}"),
-            )
-                .into_response();
+                None,
+                None,
+            );
         }
     };
     if query.ver != DATA_PLANE_VERSION {
-        return (
+        return cbor_error_response(
             StatusCode::BAD_REQUEST,
+            "E.FORMAT",
             format!("unsupported proof version {}", query.ver),
-        )
-            .into_response();
+            None,
+            None,
+        );
     }
     match pipeline.proof(&query.stream, query.seq).await {
         Ok(proof) => match cbor_response(&ProofResponse {
@@ -779,12 +945,24 @@ async fn handle_proof(State(pipeline): State<HubPipeline>, body: Bytes) -> impl 
             Ok(response) => response,
             Err(err) => {
                 tracing::warn!(error = ?err, "serialising proof response failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+                cbor_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "E.UNAVAILABLE",
+                    err.to_string(),
+                    None,
+                    None,
+                )
             }
         },
         Err(err) => {
             tracing::warn!(error = ?err, "proof request failed");
-            (StatusCode::NOT_FOUND, err.to_string()).into_response()
+            cbor_error_response(
+                StatusCode::NOT_FOUND,
+                "E.NOT_FOUND",
+                err.to_string(),
+                None,
+                None,
+            )
         }
     }
 }
@@ -793,19 +971,23 @@ async fn handle_checkpoint(State(pipeline): State<HubPipeline>, body: Bytes) -> 
     let query: CheckpointRequest = match decode_cbor_body(&body) {
         Ok(request) => request,
         Err(err) => {
-            return (
+            return cbor_error_response(
                 StatusCode::BAD_REQUEST,
+                "E.BAD_REQUEST",
                 format!("invalid checkpoint request body: {err}"),
-            )
-                .into_response();
+                None,
+                None,
+            );
         }
     };
     if query.ver != DATA_PLANE_VERSION {
-        return (
+        return cbor_error_response(
             StatusCode::BAD_REQUEST,
+            "E.FORMAT",
             format!("unsupported checkpoint version {}", query.ver),
-        )
-            .into_response();
+            None,
+            None,
+        );
     }
     match pipeline.checkpoint(&query.stream, query.upto_seq).await {
         Ok(Some(checkpoint)) => match cbor_response(&CheckpointResponse {
@@ -816,13 +998,31 @@ async fn handle_checkpoint(State(pipeline): State<HubPipeline>, body: Bytes) -> 
             Ok(response) => response,
             Err(err) => {
                 tracing::warn!(error = ?err, "serialising checkpoint response failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+                cbor_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "E.UNAVAILABLE",
+                    err.to_string(),
+                    None,
+                    None,
+                )
             }
         },
-        Ok(None) => (StatusCode::NOT_FOUND, "checkpoint not found".to_string()).into_response(),
+        Ok(None) => cbor_error_response(
+            StatusCode::NOT_FOUND,
+            "E.NOT_FOUND",
+            "checkpoint not found".to_string(),
+            None,
+            None,
+        ),
         Err(err) => {
             tracing::warn!(error = ?err, "checkpoint request failed");
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+            cbor_error_response(
+                StatusCode::BAD_REQUEST,
+                "E.BAD_REQUEST",
+                err.to_string(),
+                None,
+                None,
+            )
         }
     }
 }
@@ -833,10 +1033,22 @@ async fn handle_commit_wait(
 ) -> impl IntoResponse {
     match pipeline.commit_status(&query.stream, query.seq).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, "commit not available".to_string()).into_response(),
+        Ok(false) => json_error_response(
+            StatusCode::NOT_FOUND,
+            "E.NOT_FOUND",
+            "commit not available".to_string(),
+            None,
+            None,
+        ),
         Err(err) => {
             tracing::warn!(error = ?err, "commit wait failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+            json_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "E.UNAVAILABLE",
+                err.to_string(),
+                None,
+                None,
+            )
         }
     }
 }
@@ -849,7 +1061,13 @@ async fn handle_resync(
         Ok(state) => (StatusCode::OK, Json(state)).into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "resync failed");
-            (StatusCode::NOT_FOUND, err.to_string()).into_response()
+            json_error_response(
+                StatusCode::NOT_FOUND,
+                "E.NOT_FOUND",
+                err.to_string(),
+                None,
+                None,
+            )
         }
     }
 }
@@ -860,11 +1078,13 @@ async fn handle_authorize(State(pipeline): State<HubPipeline>, body: Bytes) -> i
             let mut encoded = Vec::new();
             if let Err(err) = into_writer(&response, &mut encoded) {
                 tracing::error!(error = ?err, "failed to encode authorize response as CBOR");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "failed to encode authorize response",
-                )
-                    .into_response();
+                return cbor_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "E.UNAVAILABLE",
+                    "failed to encode authorize response".to_string(),
+                    None,
+                    None,
+                );
             }
             let mut resp = (StatusCode::OK, encoded).into_response();
             resp.headers_mut()
@@ -873,7 +1093,13 @@ async fn handle_authorize(State(pipeline): State<HubPipeline>, body: Bytes) -> i
         }
         Err(err) => {
             tracing::warn!(error = ?err, "authorize failed");
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+            cbor_error_response(
+                StatusCode::BAD_REQUEST,
+                "E.BAD_REQUEST",
+                err.to_string(),
+                None,
+                None,
+            )
         }
     }
 }
@@ -916,7 +1142,13 @@ async fn handle_cap_status(
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "cap status failed");
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+            json_error_response(
+                StatusCode::BAD_REQUEST,
+                "E.BAD_REQUEST",
+                err.to_string(),
+                None,
+                None,
+            )
         }
     }
 }
@@ -929,7 +1161,13 @@ async fn handle_pow_request(
         Ok(descriptor) => (StatusCode::OK, Json(descriptor)).into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "pow request failed");
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+            json_error_response(
+                StatusCode::BAD_REQUEST,
+                "E.BAD_REQUEST",
+                err.to_string(),
+                None,
+                None,
+            )
         }
     }
 }
@@ -942,7 +1180,13 @@ async fn handle_anchor(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "anchor request failed");
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+            json_error_response(
+                StatusCode::BAD_REQUEST,
+                "E.BAD_REQUEST",
+                err.to_string(),
+                None,
+                None,
+            )
         }
     }
 }
@@ -955,7 +1199,13 @@ async fn handle_bridge(
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "bridge ingest failed");
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+            json_error_response(
+                StatusCode::BAD_REQUEST,
+                "E.BAD_REQUEST",
+                err.to_string(),
+                None,
+                None,
+            )
         }
     }
 }
@@ -1003,7 +1253,13 @@ async fn handle_ready(State(pipeline): State<HubPipeline>) -> impl IntoResponse 
         }
         Err(err) => {
             tracing::warn!(error = ?err, "readiness report failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+            json_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "E.UNAVAILABLE",
+                err.to_string(),
+                None,
+                None,
+            )
         }
     }
 }
@@ -1034,11 +1290,13 @@ async fn handle_role(
         Some(ref hex) => match RealmId::from_str(hex) {
             Ok(realm) => Some(realm),
             Err(_) => {
-                return (
+                return json_error_response(
                     StatusCode::BAD_REQUEST,
+                    "E.BAD_REQUEST",
                     "invalid realm_id; expected 64 hexadecimal characters".to_string(),
-                )
-                    .into_response();
+                    None,
+                    None,
+                );
             }
         },
         None => None,
@@ -1047,11 +1305,13 @@ async fn handle_role(
         Some(ref hex) => match StreamId::from_str(hex) {
             Ok(stream) => Some(stream),
             Err(_) => {
-                return (
+                return json_error_response(
                     StatusCode::BAD_REQUEST,
+                    "E.BAD_REQUEST",
                     "invalid stream_id; expected 64 hexadecimal characters".to_string(),
-                )
-                    .into_response();
+                    None,
+                    None,
+                );
             }
         },
         None => None,
@@ -1061,7 +1321,13 @@ async fn handle_role(
         Ok(descriptor) => (StatusCode::OK, Json(descriptor)).into_response(),
         Err(err) => {
             tracing::warn!(error = ?err, "role descriptor failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+            json_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "E.UNAVAILABLE",
+                err.to_string(),
+                None,
+                None,
+            )
         }
     }
 }
@@ -1072,17 +1338,31 @@ async fn handle_checkpoint_latest(State(pipeline): State<HubPipeline>) -> impl I
             Ok(response) => response,
             Err(err) => {
                 tracing::warn!(error = ?err, "serialising checkpoint response failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+                cbor_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "E.UNAVAILABLE",
+                    err.to_string(),
+                    None,
+                    None,
+                )
             }
         },
-        Ok(None) => (
+        Ok(None) => cbor_error_response(
             StatusCode::NOT_FOUND,
+            "E.NOT_FOUND",
             "no checkpoints available".to_string(),
-        )
-            .into_response(),
+            None,
+            None,
+        ),
         Err(err) => {
             tracing::warn!(error = ?err, "fetching latest checkpoint failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+            cbor_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "E.UNAVAILABLE",
+                err.to_string(),
+                None,
+                None,
+            )
         }
     }
 }
@@ -1099,12 +1379,24 @@ async fn handle_checkpoint_range(
             Ok(response) => response,
             Err(err) => {
                 tracing::warn!(error = ?err, "serialising checkpoint range failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+                cbor_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "E.UNAVAILABLE",
+                    err.to_string(),
+                    None,
+                    None,
+                )
             }
         },
         Err(err) => {
             tracing::warn!(error = ?err, "fetching checkpoint range failed");
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+            cbor_error_response(
+                StatusCode::BAD_REQUEST,
+                "E.BAD_REQUEST",
+                err.to_string(),
+                None,
+                None,
+            )
         }
     }
 }
