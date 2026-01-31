@@ -55,6 +55,9 @@ It targets the **intermediate space between CRUD, KV, and Queue**, while being *
 - **StreamID:** Application-defined logical stream identifier (bstr(32)).
 - **Label:** Physical routing identifier ordered by a Hub:
   `label = Ht("veen/label", routing_key || stream_id || u64be(epoch))`.
+- **RoutingKey:** Hub-scoped label salt used in label derivation; a static, per-hub value derived from the
+  hub identity (e.g., `routing_key = Ht("veen/routing_key", hub_id)`), fixed for the lifetime of a hub
+  identity and its deployment data directory.
 - **StreamSeq:** Monotonic sequence number per Label (1-based).
 - **ClientID:** Ed25519 public key that verifies `MSG.sig`.
 - **ClientSeq:** Monotonic sequence per `(label, client_id)`.
@@ -63,7 +66,8 @@ It targets the **intermediate space between CRUD, KV, and Queue**, while being *
 - **MsgID / leaf_hash:** `Ht("veen/leaf", label || profile_id || ct_hash || client_id || u64be(client_seq))`.
 - **Overlay:** A pure, deterministic fold from logs to typed state, defined by `schema`.
 - **Summary:** A compact associative digest of an overlay state used for merge or replay.
-- **Epoch:** A routing epoch used to rotate labels without altering StreamID.
+- **Epoch:** A routing epoch used to rotate labels without altering StreamID; derived from `epoch_sec` as
+  defined in §3.2 and enforced with `max_epoch_skew_sec`.
 
 ---
 
@@ -710,6 +714,28 @@ These behaviors are realized purely by overlays; hubs remain unchanged.
 - **Disposability:** hubs can be destroyed and rebuilt from logs at any time.
 - **Repairability:** corrupted indices MUST be rebuildable from logs/checkpoints only.
 - **Key rotation:** supported via epoch-based labels without breaking verification.
+- **Routing key derivation and stability (normative):**
+  - `routing_key` is **static per hub identity** and MUST NOT vary across restarts of the same hub data
+    directory. It SHOULD be derived from the hub identity as `routing_key = Ht("veen/routing_key", hub_id)`.
+  - If a deployment uses a different `hub_id` (new hub identity), it implicitly creates a new routing key
+    and thus a new label space; this is a **deployment change**, not an epoch transition.
+- **Epoch discovery (normative):**
+  - Clients learn `epoch_sec` from the hub’s advertised cryptographic `profile` (see §3.2) and compute
+    `epoch = floor(unix_time_sec / epoch_sec)` locally when `epoch_sec > 0`; otherwise `epoch = 0`.
+  - The hub MUST expose its current `epoch` and `hub_ts` via a status/introspection API or receipt metadata
+    so clients can align with the hub’s authoritative time base. Clients SHOULD prefer hub-provided values
+    over local clocks when submitting messages.
+- **Epoch acceptance and skew enforcement (normative):**
+  - A hub MAY accept messages that target a limited window around its current epoch derived from `hub_ts`.
+  - The hub MUST reject any message whose `epoch` is outside `current_epoch ± floor(max_epoch_skew_sec / epoch_sec)`
+    when `epoch_sec > 0`; if `epoch_sec = 0`, only `epoch = 0` is valid.
+  - When the hub’s `hub_ts` advances across an epoch boundary, it MUST begin accepting the new epoch while
+    continuing to accept the previous epoch only within the skew window above.
+- **In-flight messages at epoch boundaries (guidance):**
+  - Clients SHOULD target the hub’s reported current epoch and MAY retry with the next epoch if a submit
+    fails due to skew. Hubs SHOULD include the accepted `epoch` in receipts so clients can reconcile.
+  - If message delivery spans the boundary, labels derived with the previous epoch remain valid only within
+    the skew window; clients SHOULD plan for brief overlap and avoid long-lived batching across epochs.
 
 ---
 
