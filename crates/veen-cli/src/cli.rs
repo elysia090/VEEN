@@ -11953,7 +11953,7 @@ mod tests {
         let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let listen: SocketAddr = socket.local_addr()?;
         drop(socket);
-        let config = HubRuntimeConfig::from_sources(
+        let mut config = HubRuntimeConfig::from_sources(
             listen,
             hub_dir.path().to_path_buf(),
             None,
@@ -11965,9 +11965,10 @@ mod tests {
             },
         )
         .await?;
+        config.tooling_enabled = true;
         write_test_hub_key(hub_dir.path()).await?;
         let runtime = HubRuntime::start(config).await?;
-        let hub_url = format!("http://{}", listen);
+        let hub_url = format!("http://{}", runtime.listen_addr());
 
         sleep(Duration::from_millis(50)).await;
 
@@ -12165,7 +12166,7 @@ mod tests {
         let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let listen: SocketAddr = socket.local_addr()?;
         drop(socket);
-        let config = HubRuntimeConfig::from_sources(
+        let mut config = HubRuntimeConfig::from_sources(
             listen,
             hub_dir.path().to_path_buf(),
             None,
@@ -12177,9 +12178,10 @@ mod tests {
             },
         )
         .await?;
+        config.tooling_enabled = true;
         write_test_hub_key(hub_dir.path()).await?;
         let runtime = HubRuntime::start(config).await?;
-        let hub_url = format!("http://{}", listen);
+        let hub_url = format!("http://{}", runtime.listen_addr());
 
         sleep(Duration::from_millis(50)).await;
 
@@ -12250,7 +12252,7 @@ mod tests {
         let socket = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let listen: SocketAddr = socket.local_addr()?;
         drop(socket);
-        let config = HubRuntimeConfig::from_sources(
+        let mut config = HubRuntimeConfig::from_sources(
             listen,
             hub_dir.path().to_path_buf(),
             None,
@@ -12262,9 +12264,10 @@ mod tests {
             },
         )
         .await?;
+        config.tooling_enabled = true;
         write_test_hub_key(hub_dir.path()).await?;
         let runtime = HubRuntime::start(config).await?;
-        let hub_url = format!("http://{}", listen);
+        let hub_url = format!("http://{}", runtime.listen_addr());
 
         sleep(Duration::from_millis(50)).await;
 
