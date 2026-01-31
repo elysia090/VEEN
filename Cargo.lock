@@ -3380,6 +3380,7 @@ name = "veen-bridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ciborium",
  "clap",
  "hex",
  "httpmock",

@@ -36,7 +36,11 @@ use veen_core::{
     MAX_MSG_BYTES,
 };
 use veen_hub::pipeline::{HubStreamState, StoredMessage, StreamMessageWithProof, SubmitRequest};
-use veen_hub::pipeline::{PowCookieEnvelope, SubmitResponse};
+
+use crate::http_cbor::{
+    decode_stream_proofs, decode_submit_response, encode_stream_request, encode_submit_request,
+};
+use veen_hub::pipeline::PowCookieEnvelope;
 use veen_hub::storage::{CHECKPOINTS_FILE, HUB_PID_FILE};
 use veen_overlays::{schema_meta_schema, PowCookie, SchemaDescriptor, SchemaId, SchemaOwner};
 
@@ -310,7 +314,10 @@ impl IntegrationHarness {
             bins,
             scratch,
             logs_dir,
-            http: Client::new(),
+            http: Client::builder()
+                .no_proxy()
+                .build()
+                .context("building selftest http client")?,
         })
     }
 
@@ -328,7 +335,7 @@ impl IntegrationHarness {
             .await
             .context("spawning primary hub process")?;
 
-        self.wait_for_health(hub.listen).await?;
+        self.wait_for_hub_health(&hub).await?;
 
         let hub_url = format!("http://{}", hub.listen);
         let client_dir = self.base_dir().join("client-core");
@@ -997,9 +1004,11 @@ impl IntegrationHarness {
         let mut rng = OsRng;
         let signing_key = SigningKey::generate(&mut rng);
         let submit_request = build_submit_request(STREAM, &signing_key, 1, 0, http_payload, None)?;
+        let submit_body = encode_submit_request(&submit_request)?;
         self.http
-            .post(format!("{hub_url}/submit"))
-            .json(&submit_request)
+            .post(format!("{hub_url}/v1/submit"))
+            .header("Content-Type", "application/cbor")
+            .body(submit_body)
             .send()
             .await
             .context("submitting HTTP recorder event")?
@@ -1162,7 +1171,7 @@ impl IntegrationHarness {
         self.wait_for_health(hub.listen).await?;
 
         let hub_base = format!("http://{}", hub.listen);
-        let submit_endpoint = format!("{hub_base}/submit");
+        let submit_endpoint = format!("{hub_base}/v1/submit");
 
         let client_dir = self.base_dir().join("hardened-client");
         fs::create_dir_all(&client_dir)
@@ -1180,17 +1189,19 @@ impl IntegrationHarness {
 
         let mut rng = OsRng;
         let signing_key = SigningKey::generate(&mut rng);
+        let forbidden_request = build_submit_request(
+            "hardened/pow",
+            &signing_key,
+            1,
+            0,
+            json!({ "msg": "missing pow" }),
+            None,
+        )?;
         let forbidden = self
             .http
             .post(&submit_endpoint)
-            .json(&build_submit_request(
-                "hardened/pow",
-                &signing_key,
-                1,
-                0,
-                json!({ "msg": "missing pow" }),
-                None,
-            )?)
+            .header("Content-Type", "application/cbor")
+            .body(encode_submit_request(&forbidden_request)?)
             .send()
             .await
             .context("submitting hardened message without pow")?;
@@ -1221,37 +1232,42 @@ impl IntegrationHarness {
         .context("solving pow challenge")?;
         let pow_envelope = PowCookieEnvelope::from_cookie(&solved_cookie);
 
-        let accepted: SubmitResponse = self
+        let accepted_request = build_submit_request(
+            "hardened/pow",
+            &signing_key,
+            2,
+            0,
+            json!({ "msg": "with pow" }),
+            Some(pow_envelope.clone()),
+        )?;
+        let accepted_bytes = self
             .http
             .post(&submit_endpoint)
-            .json(&build_submit_request(
-                "hardened/pow",
-                &signing_key,
-                2,
-                0,
-                json!({ "msg": "with pow" }),
-                Some(pow_envelope.clone()),
-            )?)
+            .header("Content-Type", "application/cbor")
+            .body(encode_submit_request(&accepted_request)?)
             .send()
             .await
             .context("submitting hardened message with pow")?
             .error_for_status()
             .context("pow submission rejected")?
-            .json()
+            .bytes()
             .await
-            .context("decoding pow submission response")?;
+            .context("reading pow submission response")?;
+        let accepted = decode_submit_response(&accepted_bytes)?;
 
+        let rate_request = build_submit_request(
+            "hardened/pow",
+            &signing_key,
+            3,
+            0,
+            json!({ "msg": "quota" }),
+            Some(pow_envelope),
+        )?;
         let rate_limited = self
             .http
             .post(&submit_endpoint)
-            .json(&build_submit_request(
-                "hardened/pow",
-                &signing_key,
-                3,
-                0,
-                json!({ "msg": "quota" }),
-                Some(pow_envelope),
-            )?)
+            .header("Content-Type", "application/cbor")
+            .body(encode_submit_request(&rate_request)?)
             .send()
             .await
             .context("submitting hardened rate-limit probe")?;
@@ -1671,10 +1687,12 @@ impl IntegrationHarness {
         hub_url: &str,
         stream: &str,
     ) -> Result<Vec<StreamMessageWithProof>> {
+        let request_body = encode_stream_request(stream, 0, None)?;
         let response = self
             .http
-            .get(format!("{hub_url}/stream"))
-            .query(&[("stream", stream), ("with_proof", "true")])
+            .post(format!("{hub_url}/v1/stream"))
+            .header("Content-Type", "application/cbor")
+            .body(request_body)
             .send()
             .await
             .with_context(|| format!("streaming {stream} from {hub_url}"))?;
@@ -1687,11 +1705,11 @@ impl IntegrationHarness {
                 stream
             );
         }
-        let messages = response
-            .json::<Vec<StreamMessageWithProof>>()
+        let bytes = response
+            .bytes()
             .await
-            .context("decoding streamed messages with proofs")?;
-        Ok(messages)
+            .context("reading streamed messages with proofs")?;
+        decode_stream_proofs(&bytes)
     }
 
     async fn fetch_latest_checkpoint(&self, hub_url: &str) -> Result<Checkpoint> {
@@ -1970,6 +1988,33 @@ impl IntegrationHarness {
             sleep(Duration::from_millis(HUB_HEALTH_RETRY_DELAY_MS)).await;
         }
         bail!("hub at {url} did not become healthy within timeout");
+    }
+
+    pub(crate) async fn wait_for_hub_health(&self, hub: &HubProcess) -> Result<()> {
+        let url = format!("http://{}/tooling/healthz", hub.listen);
+        for attempt in 0..HUB_HEALTH_MAX_ATTEMPTS {
+            match self.http.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => return Ok(()),
+                Ok(resp) => {
+                    warn!("hub health attempt {} returned {}", attempt, resp.status());
+                }
+                Err(err) => {
+                    warn!("hub health attempt {} failed: {}", attempt, err);
+                }
+            }
+            sleep(Duration::from_millis(HUB_HEALTH_RETRY_DELAY_MS)).await;
+        }
+        let stdout = fs::read_to_string(&hub.handle.stdout_log)
+            .await
+            .unwrap_or_else(|_| "<unavailable>".into());
+        let stderr = fs::read_to_string(&hub.handle.stderr_log)
+            .await
+            .unwrap_or_else(|_| "<unavailable>".into());
+        bail!(
+            "hub at {url} did not become healthy within timeout\nstdout:{}\nstderr:{}",
+            stdout,
+            stderr
+        );
     }
 
     #[allow(dead_code)]

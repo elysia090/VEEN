@@ -7,11 +7,14 @@ use serde_bytes::ByteBuf;
 use tempfile::TempDir;
 use tokio::fs;
 
-use veen_hub::pipeline::{StreamResponse, SubmitRequest, SubmitResponse};
+use veen_hub::pipeline::SubmitRequest;
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 mod support;
-use support::{client_id_hex, encode_submit_msg};
+use support::{
+    client_id_hex, decode_stream_response_cbor, decode_submit_response_cbor,
+    encode_stream_request_cbor, encode_submit_msg, encode_submit_request_cbor,
+};
 
 /// Scenario acceptance covering disposable mesh deployments on Kubernetes.
 ///
@@ -64,42 +67,51 @@ async fn goals_k8s_disposable_mesh() -> Result<()> {
         &serde_json::to_vec(&serde_json::json!({"text":"disposable-mesh"}))?,
     )?;
 
-    let first: SubmitResponse = http
-        .post(format!("{}/submit", base))
-        .json(&SubmitRequest {
-            stream: stream.to_string(),
-            client_id: client_id.clone(),
-            msg,
-            attachments: None,
-            auth_ref: None,
-            idem: None,
-            pow_cookie: None,
-        })
-        .send()
-        .await
-        .context("submitting disposable mesh workload message")?
-        .error_for_status()
-        .context("mesh submit endpoint returned error")?
-        .json()
-        .await
-        .context("decoding mesh submit response")?;
-
-    let stream_resp: StreamResponse = http
-        .get(format!("{}/stream?stream={}&from=1", base, stream))
-        .send()
-        .await
-        .context("streaming messages from disposable mesh hub")?
-        .error_for_status()
-        .context("mesh stream endpoint returned error")?
-        .json()
-        .await
-        .context("decoding mesh stream response")?;
-    let messages = match stream_resp {
-        StreamResponse::Messages(messages) => messages,
-        StreamResponse::Proven(messages) => {
-            messages.into_iter().map(|entry| entry.message).collect()
-        }
+    let submit_request = SubmitRequest {
+        stream: stream.to_string(),
+        client_id: client_id.clone(),
+        msg,
+        attachments: None,
+        auth_ref: None,
+        idem: None,
+        pow_cookie: None,
     };
+    let submit_body = encode_submit_request_cbor(&submit_request)?;
+    let first = decode_submit_response_cbor(
+        &http
+            .post(format!("{}/v1/submit", base))
+            .header("Content-Type", "application/cbor")
+            .body(submit_body)
+            .send()
+            .await
+            .context("submitting disposable mesh workload message")?
+            .error_for_status()
+            .context("mesh submit endpoint returned error")?
+            .bytes()
+            .await
+            .context("reading mesh submit response")?,
+    )?;
+
+    let stream_body = encode_stream_request_cbor(stream, 1, None, false)?;
+    let stream_resp = decode_stream_response_cbor(
+        &http
+            .post(format!("{}/v1/stream", base))
+            .header("Content-Type", "application/cbor")
+            .body(stream_body)
+            .send()
+            .await
+            .context("streaming messages from disposable mesh hub")?
+            .error_for_status()
+            .context("mesh stream endpoint returned error")?
+            .bytes()
+            .await
+            .context("reading mesh stream response")?,
+    )?;
+    let messages = stream_resp
+        .items
+        .into_iter()
+        .map(|item| item.message)
+        .collect::<Vec<_>>();
     let streamed_messages = messages.len();
     ensure!(
         streamed_messages == 1,

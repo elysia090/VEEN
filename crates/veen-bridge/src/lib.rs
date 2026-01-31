@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::{Client, Url};
+use serde::de::{Error as DeError, MapAccess, Visitor};
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
@@ -14,6 +16,8 @@ use veen_core::wire::types::LeafHash;
 use veen_hub::pipeline::{
     BridgeIngestRequest, BridgeIngestResponse, HubStreamState, StoredMessage,
 };
+
+const DATA_PLANE_VERSION: u64 = 1;
 
 #[derive(Clone, Debug)]
 pub struct EndpointConfig {
@@ -57,6 +61,155 @@ impl BridgeConfig {
 struct StreamState {
     mmr: Mmr,
     next_seq: u64,
+}
+
+struct StreamRequestCbor<'a> {
+    stream: &'a str,
+    from: u64,
+}
+
+#[derive(Debug)]
+struct StreamResponseCbor {
+    ver: u64,
+    items: Vec<StreamItemCbor>,
+}
+
+#[derive(Debug)]
+struct StreamItemCbor {
+    message: StoredMessage,
+}
+
+impl Serialize for StreamRequestCbor<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry(&1u64, &DATA_PLANE_VERSION)?;
+        map.serialize_entry(&2u64, &self.stream)?;
+        map.serialize_entry(&3u64, &self.from)?;
+        map.serialize_entry(&7u64, &false)?;
+        map.serialize_entry(&8u64, &false)?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for StreamResponseCbor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StreamResponseVisitor;
+
+        impl<'de> Visitor<'de> for StreamResponseVisitor {
+            type Value = StreamResponseCbor;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("stream response CBOR map with integer keys")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut ver = None;
+                let mut items = None;
+
+                while let Some(key) = map.next_key::<u64>()? {
+                    match key {
+                        1 => {
+                            if ver.is_some() {
+                                return Err(DeError::duplicate_field("ver"));
+                            }
+                            ver = Some(map.next_value()?);
+                        }
+                        5 => {
+                            if items.is_some() {
+                                return Err(DeError::duplicate_field("items"));
+                            }
+                            items = Some(map.next_value()?);
+                        }
+                        _ => {
+                            return Err(DeError::custom(format!(
+                                "unknown stream response key {key}"
+                            )));
+                        }
+                    }
+                }
+
+                let ver = ver.ok_or_else(|| DeError::missing_field("ver"))?;
+                let items = items.ok_or_else(|| DeError::missing_field("items"))?;
+
+                Ok(StreamResponseCbor { ver, items })
+            }
+        }
+
+        deserializer.deserialize_map(StreamResponseVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for StreamItemCbor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StreamItemVisitor;
+
+        impl<'de> Visitor<'de> for StreamItemVisitor {
+            type Value = StreamItemCbor;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("stream item CBOR map with integer keys")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut message = None;
+                while let Some(key) = map.next_key::<u64>()? {
+                    match key {
+                        2 => {
+                            if message.is_some() {
+                                return Err(DeError::duplicate_field("message"));
+                            }
+                            message = Some(map.next_value()?);
+                        }
+                        _ => {
+                            return Err(DeError::custom(format!("unknown stream item key {key}")));
+                        }
+                    }
+                }
+                let message = message.ok_or_else(|| DeError::missing_field("message"))?;
+                Ok(StreamItemCbor { message })
+            }
+        }
+
+        deserializer.deserialize_map(StreamItemVisitor)
+    }
+}
+
+impl Serialize for StreamResponseCbor {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry(&1u64, &self.ver)?;
+        map.serialize_entry(&5u64, &self.items)?;
+        map.end()
+    }
+}
+
+impl Serialize for StreamItemCbor {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry(&2u64, &self.message)?;
+        map.end()
+    }
 }
 
 pub async fn run_bridge(config: BridgeConfig, shutdown: CancellationToken) -> Result<()> {
@@ -252,14 +405,18 @@ impl BridgeRuntime {
         let mut url = self.config.primary.base_url.clone();
         url.path_segments_mut()
             .map_err(|_| anyhow!("primary hub URL is not base"))?
-            .push("stream");
-        {
-            let mut query = url.query_pairs_mut();
-            query.append_pair("stream", stream);
-            query.append_pair("from", &from.to_string());
-        }
+            .extend(&["v1", "stream"]);
 
-        let request = self.client.get(url);
+        let request_body = StreamRequestCbor { stream, from };
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&request_body, &mut encoded)
+            .context("encoding stream request")?;
+
+        let request = self
+            .client
+            .post(url)
+            .header("Content-Type", "application/cbor")
+            .body(encoded);
         let request = self.config.primary.apply_auth(request);
         let response = request
             .send()
@@ -274,11 +431,24 @@ impl BridgeRuntime {
             );
         }
 
-        let messages = response
-            .json::<Vec<StoredMessage>>()
+        let bytes = response
+            .bytes()
             .await
-            .context("decoding primary stream payload")?;
-        Ok(messages)
+            .context("reading primary stream payload")?;
+        let mut cursor = std::io::Cursor::new(bytes);
+        let response: StreamResponseCbor =
+            ciborium::de::from_reader(&mut cursor).context("decoding primary stream payload")?;
+        if response.ver != DATA_PLANE_VERSION {
+            bail!(
+                "primary stream response version {} unsupported",
+                response.ver
+            );
+        }
+        Ok(response
+            .items
+            .into_iter()
+            .map(|item| item.message)
+            .collect())
     }
 
     async fn fetch_replica_state(&self, stream: &str) -> Result<HubStreamState> {
@@ -413,6 +583,19 @@ mod tests {
         }
     }
 
+    fn encode_stream_response(messages: Vec<StoredMessage>) -> Vec<u8> {
+        let response = StreamResponseCbor {
+            ver: DATA_PLANE_VERSION,
+            items: messages
+                .into_iter()
+                .map(|message| StreamItemCbor { message })
+                .collect(),
+        };
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&response, &mut encoded).expect("encoding stream response");
+        encoded
+    }
+
     async fn start_bridge_runtime(
         primary: &MockServer,
         replica: &MockServer,
@@ -463,13 +646,13 @@ mod tests {
 
         let mut runtime = start_bridge_runtime(&primary, &replica, config).await?;
 
+        let stream_body = encode_stream_response(vec![message.clone()]);
         primary
             .mock_async(move |when, then| {
-                when.method(GET)
-                    .path("/stream")
-                    .query_param("stream", stream)
-                    .query_param("from", "1");
-                then.status(200).json_body(json!([message]));
+                when.method(POST).path("/v1/stream");
+                then.status(200)
+                    .header("Content-Type", "application/cbor")
+                    .body(stream_body.clone());
             })
             .await;
 
@@ -541,13 +724,13 @@ mod tests {
         let mut runtime = BridgeRuntime::new(Client::builder().no_proxy().build()?, config);
         runtime.initialise().await?;
 
+        let stream_body = encode_stream_response(vec![message.clone()]);
         primary
             .mock_async(move |when, then| {
-                when.method(GET)
-                    .path("/stream")
-                    .query_param("stream", stream)
-                    .query_param("from", "1");
-                then.status(200).json_body(json!([message]));
+                when.method(POST).path("/v1/stream");
+                then.status(200)
+                    .header("Content-Type", "application/cbor")
+                    .body(stream_body.clone());
             })
             .await;
 

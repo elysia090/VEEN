@@ -11,12 +11,15 @@ use tokio::fs;
 
 use veen_hub::pipeline::{
     BridgeIngestRequest, BridgeIngestResponse, StreamMessageWithProof, SubmitRequest,
-    SubmitResponse,
 };
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 mod support;
-use support::{client_id_hex, encode_submit_msg};
+use support::{
+    client_id_hex, decode_stream_response_cbor, decode_submit_response_cbor,
+    encode_stream_request_cbor, encode_submit_msg, encode_submit_request_cbor,
+    stream_items_to_proofs,
+};
 
 /// Scenario acceptance covering disaster recovery cutover with replicated hubs.
 ///
@@ -88,41 +91,49 @@ async fn goals_dr_cutover() -> Result<()> {
             None,
             &serde_json::to_vec(&body)?,
         )?;
-        let response: SubmitResponse = http
-            .post(format!("{}/submit", primary_base))
-            .json(&SubmitRequest {
-                stream: stream.to_string(),
-                client_id: client_id.clone(),
-                msg,
-                attachments: None,
-                auth_ref: None,
-                idem: None,
-                pow_cookie: None,
-            })
-            .send()
-            .await
-            .context("submitting primary message")?
-            .error_for_status()
-            .context("primary submit returned error")?
-            .json()
-            .await
-            .context("decoding primary submit response")?;
+        let submit_request = SubmitRequest {
+            stream: stream.to_string(),
+            client_id: client_id.clone(),
+            msg,
+            attachments: None,
+            auth_ref: None,
+            idem: None,
+            pow_cookie: None,
+        };
+        let submit_body = encode_submit_request_cbor(&submit_request)?;
+        let response = decode_submit_response_cbor(
+            &http
+                .post(format!("{}/v1/submit", primary_base))
+                .header("Content-Type", "application/cbor")
+                .body(submit_body)
+                .send()
+                .await
+                .context("submitting primary message")?
+                .error_for_status()
+                .context("primary submit returned error")?
+                .bytes()
+                .await
+                .context("reading primary submit response")?,
+        )?;
         submit_roots.push(response);
     }
 
-    let proven: Vec<StreamMessageWithProof> = http
-        .get(format!(
-            "{}/stream?stream={}&from=1&with_proof=true",
-            primary_base, stream
-        ))
-        .send()
-        .await
-        .context("fetching proven stream messages from primary")?
-        .error_for_status()
-        .context("primary stream endpoint returned error")?
-        .json()
-        .await
-        .context("decoding proven stream response")?;
+    let stream_body = encode_stream_request_cbor(stream, 1, None, true)?;
+    let response = decode_stream_response_cbor(
+        &http
+            .post(format!("{}/v1/stream", primary_base))
+            .header("Content-Type", "application/cbor")
+            .body(stream_body)
+            .send()
+            .await
+            .context("fetching proven stream messages from primary")?
+            .error_for_status()
+            .context("primary stream endpoint returned error")?
+            .bytes()
+            .await
+            .context("reading primary stream response")?,
+    )?;
+    let proven: Vec<StreamMessageWithProof> = stream_items_to_proofs(response.items)?;
     ensure!(
         proven.len() == submit_roots.len(),
         "expected proven messages to match submissions"
@@ -215,25 +226,30 @@ async fn goals_dr_cutover() -> Result<()> {
         None,
         &serde_json::to_vec(&promote_body)?,
     )?;
-    let promote_response: SubmitResponse = http
-        .post(format!("{}/submit", promoted_base))
-        .json(&SubmitRequest {
-            stream: stream.to_string(),
-            client_id: client_id.clone(),
-            msg: promote_msg,
-            attachments: None,
-            auth_ref: None,
-            idem: None,
-            pow_cookie: None,
-        })
-        .send()
-        .await
-        .context("submitting message after cutover")?
-        .error_for_status()
-        .context("promoted hub rejected submission")?
-        .json()
-        .await
-        .context("decoding promoted submission response")?;
+    let promote_request = SubmitRequest {
+        stream: stream.to_string(),
+        client_id: client_id.clone(),
+        msg: promote_msg,
+        attachments: None,
+        auth_ref: None,
+        idem: None,
+        pow_cookie: None,
+    };
+    let promote_body = encode_submit_request_cbor(&promote_request)?;
+    let promote_response = decode_submit_response_cbor(
+        &http
+            .post(format!("{}/v1/submit", promoted_base))
+            .header("Content-Type", "application/cbor")
+            .body(promote_body)
+            .send()
+            .await
+            .context("submitting message after cutover")?
+            .error_for_status()
+            .context("promoted hub rejected submission")?
+            .bytes()
+            .await
+            .context("reading promoted submission response")?,
+    )?;
     ensure!(
         promote_response.seq as usize == submit_roots.len() + 1,
         "promoted hub did not continue sequence"

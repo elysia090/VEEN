@@ -1,91 +1,18 @@
-use std::path::Path;
-use std::str::FromStr;
+use std::fmt;
 
 use anyhow::{anyhow, Context, Result};
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey};
 use serde::de::{Error as DeError, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
-use serde_bytes::ByteBuf;
 
-use veen_core::wire::message::MSG_VERSION;
-use veen_core::{
-    cap_stream_id_from_label, AuthRef, ClientId, CtHash, Label, Msg, Profile, Signature64,
-    CIPHERTEXT_LEN_PREFIX, HPKE_ENC_LEN, MAX_MSG_BYTES,
+use veen_hub::pipeline::{
+    AttachmentUpload, PowCookieEnvelope, StoredAttachment, StoredMessage, StreamMessageWithProof,
+    StreamProof, StreamReceipt, SubmitRequest, SubmitResponse,
 };
-use veen_hub::pipeline::{StoredMessage, StreamMessageWithProof, StreamProof, StreamReceipt};
-use veen_hub::pipeline::{SubmitRequest, SubmitResponse};
 
-pub const DATA_PLANE_VERSION: u64 = 1;
+const DATA_PLANE_VERSION: u64 = 1;
 
-pub struct SubmitRequestCbor<'a> {
-    pub stream: &'a str,
-    pub client_id: &'a str,
-    pub msg: &'a str,
-    pub attachments: Option<&'a [veen_hub::pipeline::AttachmentUpload]>,
-    pub auth_ref: Option<&'a str>,
-    pub idem: Option<u64>,
-    pub pow_cookie: Option<&'a veen_hub::pipeline::PowCookieEnvelope>,
-}
-
-pub struct StreamRequestCbor<'a> {
-    pub stream: &'a str,
-    pub from: u64,
-    pub to: Option<u64>,
-    pub with_receipts: bool,
-    pub with_mmr_proof: bool,
-}
-
-#[derive(Debug)]
-pub struct StreamResponseCbor {
-    pub ver: u64,
-    pub stream: String,
-    pub from_seq: u64,
-    pub to_seq: Option<u64>,
-    pub items: Vec<StreamItemCbor>,
-}
-
-#[derive(Debug)]
-pub struct StreamItemCbor {
-    pub stream_seq: u64,
-    pub message: StoredMessage,
-    pub receipt: Option<StreamReceipt>,
-    pub proof: Option<StreamProof>,
-}
-
-#[derive(Debug)]
-pub struct SubmitResponseCbor {
-    pub ver: u64,
-    pub stream: String,
-    pub seq: u64,
-    pub mmr_root: String,
-    pub stored_attachments: Vec<veen_hub::pipeline::StoredAttachment>,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct ClientSecretBundle {
-    #[serde(with = "serde_bytes")]
-    signing_key: ByteBuf,
-}
-
-#[allow(dead_code)]
-pub fn read_signing_key(client_dir: &Path) -> Result<SigningKey> {
-    let path = client_dir.join("keystore.enc");
-    let file = std::fs::File::open(&path).with_context(|| format!("opening {}", path.display()))?;
-    let bundle: ClientSecretBundle = ciborium::de::from_reader(file)
-        .with_context(|| format!("decoding client keystore {}", path.display()))?;
-    let signing_key_bytes: [u8; 32] = bundle
-        .signing_key
-        .as_ref()
-        .try_into()
-        .map_err(|_| anyhow!("invalid signing key length"))?;
-    Ok(SigningKey::from_bytes(&signing_key_bytes))
-}
-
-pub fn encode_submit_request_cbor(request: &SubmitRequest) -> Result<Vec<u8>> {
+pub fn encode_submit_request(request: &SubmitRequest) -> Result<Vec<u8>> {
     let payload = SubmitRequestCbor {
         stream: &request.stream,
         client_id: &request.client_id,
@@ -100,10 +27,16 @@ pub fn encode_submit_request_cbor(request: &SubmitRequest) -> Result<Vec<u8>> {
     Ok(encoded)
 }
 
-pub fn decode_submit_response_cbor(body: &[u8]) -> Result<SubmitResponse> {
-    let mut cursor = std::io::Cursor::new(body);
+pub fn decode_submit_response(bytes: &[u8]) -> Result<SubmitResponse> {
+    let mut cursor = std::io::Cursor::new(bytes);
     let response: SubmitResponseCbor =
         ciborium::de::from_reader(&mut cursor).context("decoding submit response")?;
+    if response.ver != DATA_PLANE_VERSION {
+        return Err(anyhow!(
+            "unexpected submit response version {}",
+            response.ver
+        ));
+    }
     Ok(SubmitResponse {
         stream: response.stream,
         seq: response.seq,
@@ -112,31 +45,31 @@ pub fn decode_submit_response_cbor(body: &[u8]) -> Result<SubmitResponse> {
     })
 }
 
-pub fn encode_stream_request_cbor(
-    stream: &str,
-    from: u64,
-    to: Option<u64>,
-    with_proof: bool,
-) -> Result<Vec<u8>> {
+pub fn encode_stream_request(stream: &str, from: u64, to: Option<u64>) -> Result<Vec<u8>> {
     let payload = StreamRequestCbor {
         stream,
         from,
         to,
-        with_receipts: with_proof,
-        with_mmr_proof: with_proof,
+        with_receipts: true,
+        with_mmr_proof: true,
     };
     let mut encoded = Vec::new();
     ciborium::ser::into_writer(&payload, &mut encoded).context("encoding stream request")?;
     Ok(encoded)
 }
 
-pub fn decode_stream_response_cbor(body: &[u8]) -> Result<StreamResponseCbor> {
-    let mut cursor = std::io::Cursor::new(body);
-    ciborium::de::from_reader(&mut cursor).context("decoding stream response")
-}
-
-pub fn stream_items_to_proofs(items: Vec<StreamItemCbor>) -> Result<Vec<StreamMessageWithProof>> {
-    items
+pub fn decode_stream_proofs(bytes: &[u8]) -> Result<Vec<StreamMessageWithProof>> {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let response: StreamResponseCbor =
+        ciborium::de::from_reader(&mut cursor).context("decoding stream response")?;
+    if response.ver != DATA_PLANE_VERSION {
+        return Err(anyhow!(
+            "unexpected stream response version {}",
+            response.ver
+        ));
+    }
+    response
+        .items
         .into_iter()
         .map(|item| {
             Ok(StreamMessageWithProof {
@@ -155,108 +88,48 @@ pub fn stream_items_to_proofs(items: Vec<StreamItemCbor>) -> Result<Vec<StreamMe
         .collect()
 }
 
-pub fn encode_submit_msg(
-    stream: &str,
-    client_signing: &SigningKey,
-    client_seq: u64,
-    prev_ack: u64,
-    auth_ref_hex: Option<&str>,
-    payload: &[u8],
-) -> Result<String> {
-    let msg = build_msg(
-        stream,
-        client_signing,
-        client_seq,
-        prev_ack,
-        auth_ref_hex,
-        payload,
-    )?;
-    let mut encoded = Vec::new();
-    ciborium::ser::into_writer(&msg, &mut encoded).context("encoding submit msg")?;
-    Ok(BASE64_STANDARD.encode(encoded))
+struct SubmitRequestCbor<'a> {
+    stream: &'a str,
+    client_id: &'a str,
+    msg: &'a str,
+    attachments: Option<&'a [AttachmentUpload]>,
+    auth_ref: Option<&'a str>,
+    idem: Option<u64>,
+    pow_cookie: Option<&'a PowCookieEnvelope>,
 }
 
-pub fn client_id_hex(client_signing: &SigningKey) -> String {
-    let client_id = ClientId::from(*client_signing.verifying_key().as_bytes());
-    hex::encode(client_id.as_ref())
+struct StreamRequestCbor<'a> {
+    stream: &'a str,
+    from: u64,
+    to: Option<u64>,
+    with_receipts: bool,
+    with_mmr_proof: bool,
 }
 
-fn build_msg(
-    stream: &str,
-    client_signing: &SigningKey,
-    client_seq: u64,
-    prev_ack: u64,
-    auth_ref_hex: Option<&str>,
-    payload: &[u8],
-) -> Result<Msg> {
-    let label = derive_label_for_stream(stream)?;
-    let profile_id = Profile::default()
-        .id()
-        .context("computing profile id for msg")?;
-    let client_id = ClientId::from(*client_signing.verifying_key().as_bytes());
-    let auth_ref = auth_ref_hex
-        .map(AuthRef::from_str)
-        .transpose()
-        .context("parsing auth_ref")?;
-    let ciphertext = build_ciphertext_envelope(&[], payload, 256)?;
-    if ciphertext.len() > MAX_MSG_BYTES {
-        return Err(anyhow!(
-            "ciphertext length {} exceeds limit {}",
-            ciphertext.len(),
-            MAX_MSG_BYTES
-        ));
-    }
-    let ct_hash = CtHash::compute(&ciphertext);
-    let mut msg = Msg {
-        ver: MSG_VERSION,
-        profile_id,
-        label,
-        client_id,
-        client_seq,
-        prev_ack,
-        auth_ref,
-        ct_hash,
-        ciphertext,
-        sig: Signature64::new([0u8; 64]),
-    };
-    let digest = msg
-        .signing_tagged_hash()
-        .context("computing signing digest for msg")?;
-    let signature = client_signing.sign(digest.as_ref());
-    msg.sig = Signature64::from(signature.to_bytes());
-    Ok(msg)
+#[derive(Debug)]
+struct SubmitResponseCbor {
+    ver: u64,
+    stream: String,
+    seq: u64,
+    mmr_root: String,
+    stored_attachments: Vec<StoredAttachment>,
 }
 
-fn derive_label_for_stream(stream: &str) -> Result<Label> {
-    let stream_id = cap_stream_id_from_label(stream)
-        .with_context(|| format!("deriving stream identifier for {}", stream))?;
-    Ok(Label::derive([], stream_id, 0))
+#[derive(Debug)]
+struct StreamResponseCbor {
+    ver: u64,
+    stream: String,
+    from_seq: u64,
+    to_seq: Option<u64>,
+    items: Vec<StreamItemCbor>,
 }
 
-fn build_ciphertext_envelope(header: &[u8], body: &[u8], pad_block: u64) -> Result<Vec<u8>> {
-    if header.len() > u32::MAX as usize || body.len() > u32::MAX as usize {
-        return Err(anyhow!("ciphertext lengths overflow u32"));
-    }
-    let mut ciphertext =
-        Vec::with_capacity(HPKE_ENC_LEN + CIPHERTEXT_LEN_PREFIX + header.len() + body.len());
-    ciphertext.extend_from_slice(&[0u8; HPKE_ENC_LEN]);
-    ciphertext.extend_from_slice(&(header.len() as u32).to_be_bytes());
-    ciphertext.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    ciphertext.extend_from_slice(header);
-    ciphertext.extend_from_slice(body);
-    if pad_block > 0 {
-        let pad_block = usize::try_from(pad_block)
-            .map_err(|_| anyhow!("invalid pad_block size {pad_block}"))?;
-        if pad_block == 0 {
-            return Err(anyhow!("pad_block must be non-zero when enabled"));
-        }
-        let remainder = ciphertext.len() % pad_block;
-        if remainder != 0 {
-            let padding = pad_block - remainder;
-            ciphertext.extend(std::iter::repeat_n(0u8, padding));
-        }
-    }
-    Ok(ciphertext)
+#[derive(Debug)]
+struct StreamItemCbor {
+    stream_seq: u64,
+    message: StoredMessage,
+    receipt: Option<StreamReceipt>,
+    proof: Option<StreamProof>,
 }
 
 impl Serialize for SubmitRequestCbor<'_> {
@@ -313,7 +186,7 @@ impl<'de> Deserialize<'de> for SubmitResponseCbor {
         impl<'de> Visitor<'de> for SubmitResponseVisitor {
             type Value = SubmitResponseCbor;
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("submit response CBOR map with integer keys")
             }
 
@@ -398,7 +271,7 @@ impl<'de> Deserialize<'de> for StreamResponseCbor {
         impl<'de> Visitor<'de> for StreamResponseVisitor {
             type Value = StreamResponseCbor;
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("stream response CBOR map with integer keys")
             }
 
@@ -481,7 +354,7 @@ impl<'de> Deserialize<'de> for StreamItemCbor {
         impl<'de> Visitor<'de> for StreamItemVisitor {
             type Value = StreamItemCbor;
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("stream item CBOR map with integer keys")
             }
 

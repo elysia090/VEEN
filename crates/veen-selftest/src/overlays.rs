@@ -34,6 +34,7 @@ use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 use veen_hub::storage::HUB_KEY_FILE;
 use veen_overlays::{schema_fed_authority, schema_label_class, schema_revocation};
 
+use crate::http_cbor::encode_submit_request;
 use crate::{query, SelftestGoalReport, SelftestReporter};
 
 const FED_CHAT_STREAM: &str = "fed/chat";
@@ -342,8 +343,10 @@ async fn run_fed_auth() -> Result<()> {
         pow_cookie: None,
     };
 
-    http.post(format!("{primary_base}/submit"))
-        .json(&submit_request)
+    let submit_body = encode_submit_request(&submit_request)?;
+    http.post(format!("{primary_base}/v1/submit"))
+        .header("Content-Type", "application/cbor")
+        .body(submit_body.clone())
         .send()
         .await
         .context("submitting message to primary hub")?
@@ -351,8 +354,9 @@ async fn run_fed_auth() -> Result<()> {
         .context("primary hub rejected submit")?;
 
     let replica_result = http
-        .post(format!("{replica_base}/submit"))
-        .json(&submit_request)
+        .post(format!("{replica_base}/v1/submit"))
+        .header("Content-Type", "application/cbor")
+        .body(submit_body)
         .send()
         .await
         .context("submitting message directly to replica")?;
@@ -824,9 +828,11 @@ async fn submit_message(
         pow_cookie: None,
     };
 
+    let body = encode_submit_request(&request)?;
     client
-        .post(format!("{hub_base}/submit"))
-        .json(&request)
+        .post(format!("{hub_base}/v1/submit"))
+        .header("Content-Type", "application/cbor")
+        .body(body)
         .send()
         .await
         .context("submitting overlay message")?
