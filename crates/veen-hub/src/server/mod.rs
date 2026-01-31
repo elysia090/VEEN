@@ -15,7 +15,6 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-
 use crate::pipeline::{
     AnchorRequest, BridgeIngestRequest, CapabilityError, HubPipeline, HubProfileDescriptor,
     ObservabilityReport, SubmitError, SubmitRequest,
