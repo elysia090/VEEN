@@ -14,14 +14,13 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::fs;
 
-use veen_hub::pipeline::{StreamMessageWithProof, SubmitRequest, SubmitResponse};
+use veen_hub::pipeline::{SubmitRequest, SubmitResponse};
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
 mod support;
 use support::{
     client_id_hex, decode_stream_response_cbor, decode_submit_response_cbor,
     encode_stream_request_cbor, encode_submit_msg, encode_submit_request_cbor,
-    stream_items_to_proofs,
 };
 
 const HUB_KEY_VERSION: u8 = 1;
@@ -87,13 +86,15 @@ async fn stream_proof_reuses_stored_entries() -> Result<()> {
             .await
             .context("reading stream response")?,
     )?;
-    let proven: Vec<StreamMessageWithProof> = stream_items_to_proofs(response.items)?;
     assert_eq!(
-        proven.len(),
+        response.items.len(),
         1,
         "only the latest message should be returned"
     );
-    assert_eq!(proven[0].proof.peaks_after, vec!["deadbeef".to_string()]);
+    let proof = response
+        .mmr_proof
+        .ok_or_else(|| anyhow::anyhow!("stream response missing mmr proof"))?;
+    assert_eq!(proof.peaks_after, vec!["deadbeef".to_string()]);
 
     runtime.shutdown().await?;
     Ok(())
@@ -149,9 +150,16 @@ async fn legacy_bundles_are_migrated() -> Result<()> {
             .await
             .context("reading stream response")?,
     )?;
-    let proven: Vec<StreamMessageWithProof> = stream_items_to_proofs(response.items)?;
-    assert_eq!(proven.len(), 1, "single legacy message should remain");
-    assert!(!proven[0].receipt.mmr_root.is_empty());
+    assert_eq!(
+        response.items.len(),
+        1,
+        "single legacy message should remain"
+    );
+    let receipt = response.items[0]
+        .receipt
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing receipt in stream response"))?;
+    assert!(!receipt.mmr_root.is_empty());
 
     let data = fs::read(&bundle)
         .await

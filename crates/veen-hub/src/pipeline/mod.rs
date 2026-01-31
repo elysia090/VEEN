@@ -14,6 +14,8 @@ use bloomfilter::Bloom;
 use ciborium::de::from_reader;
 use hex;
 use lru::LruCache;
+use serde::de::{Error as DeError, MapAccess, Visitor};
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use sha2::{Digest, Sha256};
@@ -734,10 +736,9 @@ impl HubPipeline {
         self.observability.record_submit_ok();
 
         Ok(SubmitResponse {
-            stream,
-            seq,
-            mmr_root: mmr_root_hex,
-            stored_attachments,
+            ver: 1,
+            receipt,
+            server_version: None,
         })
     }
 
@@ -896,7 +897,8 @@ impl HubPipeline {
         stream: &str,
         from: u64,
         to: Option<u64>,
-        with_proof: bool,
+        with_receipts: bool,
+        with_mmr_proof: bool,
     ) -> Result<StreamResponse> {
         let (window_start, last_seq, proven_tail) = {
             let guard = self.inner.read().await;
@@ -918,32 +920,54 @@ impl HubPipeline {
             (window_start, last_seq, proven_tail)
         };
 
-        let to = to.unwrap_or(last_seq);
-        if to == 0 || from > to {
-            return Ok(if with_proof {
-                StreamResponse::Proven(Vec::new())
-            } else {
-                StreamResponse::Messages(Vec::new())
+        let effective_to = to.unwrap_or(last_seq);
+        if effective_to == 0 || from > effective_to {
+            return Ok(StreamResponse {
+                ver: 1,
+                stream: stream.to_string(),
+                from_seq: from,
+                to_seq: to,
+                items: Vec::new(),
+                next_cursor: None,
+                mmr_proof: None,
+                server_version: None,
             });
         }
 
-        if !with_proof {
+        if !with_receipts && !with_mmr_proof {
             let messages = {
                 let guard = self.inner.read().await;
                 let runtime = guard
                     .streams
                     .get(stream)
                     .ok_or_else(|| anyhow!("stream {stream} has no stored messages"))?;
-                runtime.messages_range(from, to)
+                runtime.messages_range(from, effective_to)
             };
-            return Ok(StreamResponse::Messages(messages));
+            let items = messages
+                .into_iter()
+                .map(|message| StreamResponseItem {
+                    stream_seq: message.seq,
+                    msg: message,
+                    receipt: None,
+                })
+                .collect();
+            return Ok(StreamResponse {
+                ver: 1,
+                stream: stream.to_string(),
+                from_seq: from,
+                to_seq: to,
+                items,
+                next_cursor: None,
+                mmr_proof: None,
+                server_version: None,
+            });
         }
 
         let mut proven = Vec::new();
         if let Some(window_start) = window_start {
             if from < window_start {
                 let end = window_start.saturating_sub(1);
-                let end = end.min(to);
+                let end = end.min(effective_to);
                 if from <= end {
                     proven.extend(
                         load_proven_messages_range(&self.storage, stream, from, end).await?,
@@ -951,16 +975,36 @@ impl HubPipeline {
                 }
             }
             let mut tail = proven_tail;
-            if to < u64::MAX {
-                tail.retain(|entry| entry.message.seq <= to);
-            }
+            tail.retain(|entry| entry.message.seq <= effective_to);
             proven.extend(tail);
         } else if from <= last_seq {
-            let end = to.min(last_seq);
+            let end = effective_to.min(last_seq);
             proven.extend(load_proven_messages_range(&self.storage, stream, from, end).await?);
         }
 
-        Ok(StreamResponse::Proven(proven))
+        let mmr_proof = if with_mmr_proof {
+            proven.last().map(|entry| entry.proof.clone())
+        } else {
+            None
+        };
+        let items = proven
+            .into_iter()
+            .map(|entry| StreamResponseItem {
+                stream_seq: entry.message.seq,
+                msg: entry.message,
+                receipt: with_receipts.then_some(entry.receipt),
+            })
+            .collect();
+        Ok(StreamResponse {
+            ver: 1,
+            stream: stream.to_string(),
+            from_seq: from,
+            to_seq: to,
+            items,
+            next_cursor: None,
+            mmr_proof,
+            server_version: None,
+        })
     }
 
     pub async fn receipt(&self, stream: &str, seq: u64) -> Result<StreamReceipt> {
@@ -1505,12 +1549,11 @@ pub struct AttachmentUpload {
     pub data: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SubmitResponse {
-    pub stream: String,
-    pub seq: u64,
-    pub mmr_root: String,
-    pub stored_attachments: Vec<StoredAttachment>,
+    pub ver: u64,
+    pub receipt: StreamReceipt,
+    pub server_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1538,11 +1581,575 @@ pub struct HubStreamState {
     pub messages: Vec<StoredMessage>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum StreamResponse {
-    Messages(Vec<StoredMessage>),
-    Proven(Vec<StreamMessageWithProof>),
+#[derive(Debug, Clone)]
+pub struct StreamResponse {
+    pub ver: u64,
+    pub stream: String,
+    pub from_seq: u64,
+    pub to_seq: Option<u64>,
+    pub items: Vec<StreamResponseItem>,
+    pub next_cursor: Option<u64>,
+    pub mmr_proof: Option<StreamProof>,
+    pub server_version: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamResponseItem {
+    pub stream_seq: u64,
+    pub msg: StoredMessage,
+    pub receipt: Option<StreamReceipt>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReceiptResponse {
+    pub ver: u64,
+    pub receipt: StreamReceipt,
+    pub server_version: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProofResponse {
+    pub ver: u64,
+    pub mmr_proof: StreamProof,
+    pub server_version: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckpointResponse {
+    pub ver: u64,
+    pub checkpoint: Checkpoint,
+    pub server_version: Option<String>,
+}
+
+impl Serialize for SubmitResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry(&1u64, &self.ver)?;
+        map.serialize_entry(&2u64, &self.receipt)?;
+        if let Some(ref server_version) = self.server_version {
+            map.serialize_entry(&3u64, server_version)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for SubmitResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct SubmitResponseVisitor;
+
+        impl<'de> Visitor<'de> for SubmitResponseVisitor {
+            type Value = SubmitResponse;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("submit response CBOR map with integer keys")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut ver = None;
+                let mut receipt = None;
+                let mut server_version = None;
+
+                while let Some(key) = map.next_key::<u64>()? {
+                    match key {
+                        1 => {
+                            if ver.is_some() {
+                                return Err(DeError::duplicate_field("ver"));
+                            }
+                            ver = Some(map.next_value()?);
+                        }
+                        2 => {
+                            if receipt.is_some() {
+                                return Err(DeError::duplicate_field("receipt"));
+                            }
+                            receipt = Some(map.next_value()?);
+                        }
+                        3 => {
+                            if server_version.is_some() {
+                                return Err(DeError::duplicate_field("server_version"));
+                            }
+                            server_version = Some(map.next_value()?);
+                        }
+                        _ => {
+                            return Err(DeError::custom(format!(
+                                "unknown submit response key {key}"
+                            )));
+                        }
+                    }
+                }
+
+                let ver = ver.ok_or_else(|| DeError::missing_field("ver"))?;
+                let receipt = receipt.ok_or_else(|| DeError::missing_field("receipt"))?;
+
+                Ok(SubmitResponse {
+                    ver,
+                    receipt,
+                    server_version,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(SubmitResponseVisitor)
+    }
+}
+
+impl Serialize for StreamResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry(&1u64, &self.ver)?;
+        map.serialize_entry(&2u64, &self.stream)?;
+        map.serialize_entry(&3u64, &self.from_seq)?;
+        if let Some(to_seq) = self.to_seq {
+            map.serialize_entry(&4u64, &to_seq)?;
+        }
+        map.serialize_entry(&5u64, &self.items)?;
+        if let Some(next_cursor) = self.next_cursor {
+            map.serialize_entry(&6u64, &next_cursor)?;
+        }
+        if let Some(ref mmr_proof) = self.mmr_proof {
+            map.serialize_entry(&7u64, mmr_proof)?;
+        }
+        if let Some(ref server_version) = self.server_version {
+            map.serialize_entry(&8u64, server_version)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for StreamResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StreamResponseVisitor;
+
+        impl<'de> Visitor<'de> for StreamResponseVisitor {
+            type Value = StreamResponse;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("stream response CBOR map with integer keys")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut ver = None;
+                let mut stream = None;
+                let mut from_seq = None;
+                let mut to_seq = None;
+                let mut items = None;
+                let mut next_cursor = None;
+                let mut mmr_proof = None;
+                let mut server_version = None;
+
+                while let Some(key) = map.next_key::<u64>()? {
+                    match key {
+                        1 => {
+                            if ver.is_some() {
+                                return Err(DeError::duplicate_field("ver"));
+                            }
+                            ver = Some(map.next_value()?);
+                        }
+                        2 => {
+                            if stream.is_some() {
+                                return Err(DeError::duplicate_field("stream"));
+                            }
+                            stream = Some(map.next_value()?);
+                        }
+                        3 => {
+                            if from_seq.is_some() {
+                                return Err(DeError::duplicate_field("from_seq"));
+                            }
+                            from_seq = Some(map.next_value()?);
+                        }
+                        4 => {
+                            if to_seq.is_some() {
+                                return Err(DeError::duplicate_field("to_seq"));
+                            }
+                            to_seq = Some(map.next_value()?);
+                        }
+                        5 => {
+                            if items.is_some() {
+                                return Err(DeError::duplicate_field("items"));
+                            }
+                            items = Some(map.next_value()?);
+                        }
+                        6 => {
+                            if next_cursor.is_some() {
+                                return Err(DeError::duplicate_field("next_cursor"));
+                            }
+                            next_cursor = Some(map.next_value()?);
+                        }
+                        7 => {
+                            if mmr_proof.is_some() {
+                                return Err(DeError::duplicate_field("mmr_proof"));
+                            }
+                            mmr_proof = Some(map.next_value()?);
+                        }
+                        8 => {
+                            if server_version.is_some() {
+                                return Err(DeError::duplicate_field("server_version"));
+                            }
+                            server_version = Some(map.next_value()?);
+                        }
+                        _ => {
+                            return Err(DeError::custom(format!(
+                                "unknown stream response key {key}"
+                            )));
+                        }
+                    }
+                }
+
+                let ver = ver.ok_or_else(|| DeError::missing_field("ver"))?;
+                let stream = stream.ok_or_else(|| DeError::missing_field("stream"))?;
+                let from_seq = from_seq.ok_or_else(|| DeError::missing_field("from_seq"))?;
+                let items = items.ok_or_else(|| DeError::missing_field("items"))?;
+
+                Ok(StreamResponse {
+                    ver,
+                    stream,
+                    from_seq,
+                    to_seq,
+                    items,
+                    next_cursor,
+                    mmr_proof,
+                    server_version,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(StreamResponseVisitor)
+    }
+}
+
+impl Serialize for StreamResponseItem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry(&1u64, &self.stream_seq)?;
+        map.serialize_entry(&2u64, &self.msg)?;
+        if let Some(ref receipt) = self.receipt {
+            map.serialize_entry(&3u64, receipt)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for StreamResponseItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StreamItemVisitor;
+
+        impl<'de> Visitor<'de> for StreamItemVisitor {
+            type Value = StreamResponseItem;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("stream item CBOR map with integer keys")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut stream_seq = None;
+                let mut msg = None;
+                let mut receipt = None;
+
+                while let Some(key) = map.next_key::<u64>()? {
+                    match key {
+                        1 => {
+                            if stream_seq.is_some() {
+                                return Err(DeError::duplicate_field("stream_seq"));
+                            }
+                            stream_seq = Some(map.next_value()?);
+                        }
+                        2 => {
+                            if msg.is_some() {
+                                return Err(DeError::duplicate_field("msg"));
+                            }
+                            msg = Some(map.next_value()?);
+                        }
+                        3 => {
+                            if receipt.is_some() {
+                                return Err(DeError::duplicate_field("receipt"));
+                            }
+                            receipt = Some(map.next_value()?);
+                        }
+                        _ => {
+                            return Err(DeError::custom(format!("unknown stream item key {key}")));
+                        }
+                    }
+                }
+
+                let stream_seq = stream_seq.ok_or_else(|| DeError::missing_field("stream_seq"))?;
+                let msg = msg.ok_or_else(|| DeError::missing_field("msg"))?;
+
+                Ok(StreamResponseItem {
+                    stream_seq,
+                    msg,
+                    receipt,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(StreamItemVisitor)
+    }
+}
+
+impl Serialize for ReceiptResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry(&1u64, &self.ver)?;
+        map.serialize_entry(&2u64, &self.receipt)?;
+        if let Some(ref server_version) = self.server_version {
+            map.serialize_entry(&3u64, server_version)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ReceiptResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ReceiptResponseVisitor;
+
+        impl<'de> Visitor<'de> for ReceiptResponseVisitor {
+            type Value = ReceiptResponse;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("receipt response CBOR map with integer keys")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut ver = None;
+                let mut receipt = None;
+                let mut server_version = None;
+
+                while let Some(key) = map.next_key::<u64>()? {
+                    match key {
+                        1 => {
+                            if ver.is_some() {
+                                return Err(DeError::duplicate_field("ver"));
+                            }
+                            ver = Some(map.next_value()?);
+                        }
+                        2 => {
+                            if receipt.is_some() {
+                                return Err(DeError::duplicate_field("receipt"));
+                            }
+                            receipt = Some(map.next_value()?);
+                        }
+                        3 => {
+                            if server_version.is_some() {
+                                return Err(DeError::duplicate_field("server_version"));
+                            }
+                            server_version = Some(map.next_value()?);
+                        }
+                        _ => {
+                            return Err(DeError::custom(format!(
+                                "unknown receipt response key {key}"
+                            )));
+                        }
+                    }
+                }
+
+                let ver = ver.ok_or_else(|| DeError::missing_field("ver"))?;
+                let receipt = receipt.ok_or_else(|| DeError::missing_field("receipt"))?;
+
+                Ok(ReceiptResponse {
+                    ver,
+                    receipt,
+                    server_version,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(ReceiptResponseVisitor)
+    }
+}
+
+impl Serialize for ProofResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry(&1u64, &self.ver)?;
+        map.serialize_entry(&2u64, &self.mmr_proof)?;
+        if let Some(ref server_version) = self.server_version {
+            map.serialize_entry(&3u64, server_version)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ProofResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ProofResponseVisitor;
+
+        impl<'de> Visitor<'de> for ProofResponseVisitor {
+            type Value = ProofResponse;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("proof response CBOR map with integer keys")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut ver = None;
+                let mut mmr_proof = None;
+                let mut server_version = None;
+
+                while let Some(key) = map.next_key::<u64>()? {
+                    match key {
+                        1 => {
+                            if ver.is_some() {
+                                return Err(DeError::duplicate_field("ver"));
+                            }
+                            ver = Some(map.next_value()?);
+                        }
+                        2 => {
+                            if mmr_proof.is_some() {
+                                return Err(DeError::duplicate_field("mmr_proof"));
+                            }
+                            mmr_proof = Some(map.next_value()?);
+                        }
+                        3 => {
+                            if server_version.is_some() {
+                                return Err(DeError::duplicate_field("server_version"));
+                            }
+                            server_version = Some(map.next_value()?);
+                        }
+                        _ => {
+                            return Err(DeError::custom(format!(
+                                "unknown proof response key {key}"
+                            )));
+                        }
+                    }
+                }
+
+                let ver = ver.ok_or_else(|| DeError::missing_field("ver"))?;
+                let mmr_proof = mmr_proof.ok_or_else(|| DeError::missing_field("mmr_proof"))?;
+
+                Ok(ProofResponse {
+                    ver,
+                    mmr_proof,
+                    server_version,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(ProofResponseVisitor)
+    }
+}
+
+impl Serialize for CheckpointResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry(&1u64, &self.ver)?;
+        map.serialize_entry(&2u64, &self.checkpoint)?;
+        if let Some(ref server_version) = self.server_version {
+            map.serialize_entry(&3u64, server_version)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CheckpointResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct CheckpointResponseVisitor;
+
+        impl<'de> Visitor<'de> for CheckpointResponseVisitor {
+            type Value = CheckpointResponse;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("checkpoint response CBOR map with integer keys")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut ver = None;
+                let mut checkpoint = None;
+                let mut server_version = None;
+
+                while let Some(key) = map.next_key::<u64>()? {
+                    match key {
+                        1 => {
+                            if ver.is_some() {
+                                return Err(DeError::duplicate_field("ver"));
+                            }
+                            ver = Some(map.next_value()?);
+                        }
+                        2 => {
+                            if checkpoint.is_some() {
+                                return Err(DeError::duplicate_field("checkpoint"));
+                            }
+                            checkpoint = Some(map.next_value()?);
+                        }
+                        3 => {
+                            if server_version.is_some() {
+                                return Err(DeError::duplicate_field("server_version"));
+                            }
+                            server_version = Some(map.next_value()?);
+                        }
+                        _ => {
+                            return Err(DeError::custom(format!(
+                                "unknown checkpoint response key {key}"
+                            )));
+                        }
+                    }
+                }
+
+                let ver = ver.ok_or_else(|| DeError::missing_field("ver"))?;
+                let checkpoint = checkpoint.ok_or_else(|| DeError::missing_field("checkpoint"))?;
+
+                Ok(CheckpointResponse {
+                    ver,
+                    checkpoint,
+                    server_version,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(CheckpointResponseVisitor)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
