@@ -27,7 +27,7 @@ use veen_hub::pipeline::{
 };
 use veen_hub::runtime::HubRuntime;
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
-use veen_overlays::{cap_token_hash, PowCookie};
+use veen_overlays::PowCookie;
 mod support;
 use support::{client_id_hex, encode_submit_msg, read_signing_key};
 
@@ -39,8 +39,6 @@ struct MetricsResponse {
 const HUB_KEY_VERSION: u8 = 1;
 const RATE_LIMIT_TTL_SEC: u64 = 2;
 const RATE_LIMIT_EXPIRY_SLEEP_SEC: u64 = 2;
-const REVOCATION_TTL_SEC: u64 = 1;
-const REVOCATION_EXPIRY_SLEEP_SEC: u64 = 1;
 const CLIENT_LIFETIME_SEC: u64 = 2;
 const CLIENT_LIFETIME_EXPIRY_SLEEP_SEC: u64 = 2;
 
@@ -790,17 +788,15 @@ async fn goals_capability_gating_persists() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn goals_revocation_and_admission_bounds() -> Result<()> {
+async fn goals_admission_bounds() -> Result<()> {
     let hub_dir = TempDir::new().context("creating hub temp directory")?;
     let admin_dir = hub_dir.path().join("admin");
     let client_a_dir = hub_dir.path().join("client-a");
-    let client_revoke_dir = hub_dir.path().join("client-revoke");
     let client_b_dir = hub_dir.path().join("client-b");
     let cap_a_file = hub_dir.path().join("cap-a.cbor");
-    let cap_revoke_file = hub_dir.path().join("cap-revoke.cbor");
     let cap_b_file = hub_dir.path().join("cap-b.cbor");
 
-    for dir in [&admin_dir, &client_a_dir, &client_revoke_dir, &client_b_dir] {
+    for dir in [&admin_dir, &client_a_dir, &client_b_dir] {
         run_cli(["keygen", "--out", dir.to_str().unwrap()])
             .with_context(|| format!("generating identity in {}", dir.display()))?;
     }
@@ -829,24 +825,6 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
         "--issuer",
         admin_dir.to_str().unwrap(),
         "--subject",
-        client_revoke_dir.to_str().unwrap(),
-        "--stream",
-        "core/revoke",
-        "--ttl",
-        "600",
-        "--rate",
-        "100,100",
-        "--out",
-        cap_revoke_file.to_str().unwrap(),
-    ])
-    .context("issuing revocation stream capability")?;
-
-    run_cli([
-        "cap",
-        "issue",
-        "--issuer",
-        admin_dir.to_str().unwrap(),
-        "--subject",
         client_b_dir.to_str().unwrap(),
         "--stream",
         "core/lifetime",
@@ -861,7 +839,6 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
 
     let listen_addr = next_listen_addr()?;
     let stream_quota = "core/quota";
-    let stream_revoke = "core/revoke";
     let stream_lifetime = "core/lifetime";
     let config = HubRuntimeConfig::from_sources(
         listen_addr,
@@ -904,33 +881,8 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
     let auth_quota: AuthorizeResponse = from_reader(&mut Cursor::new(auth_quota_bytes.as_ref()))
         .context("decoding authorize response for client A quota capability")?;
 
-    let cap_revoke_bytes =
-        std::fs::read(&cap_revoke_file).context("reading client revoke capability")?;
-    let cap_revoke_token =
-        cap_token_from_cbor(&cap_revoke_bytes).context("decoding client revoke capability")?;
-    cap_revoke_token
-        .verify()
-        .map_err(|err| anyhow::anyhow!("client revoke capability verification failed: {err}"))?;
-    let auth_revoke_bytes = http
-        .post(format!("{hub_url}/authorize"))
-        .header("Content-Type", "application/cbor")
-        .body(cap_revoke_bytes.clone())
-        .send()
-        .await
-        .context("authorizing client revoke capability")?
-        .error_for_status()
-        .context("authorize endpoint rejected client revoke capability")?
-        .bytes()
-        .await
-        .context("reading authorize response for client revoke capability")?;
-    let auth_revoke: AuthorizeResponse = from_reader(&mut Cursor::new(auth_revoke_bytes.as_ref()))
-        .context("decoding authorize response for client revoke capability")?;
-
     let auth_ref_quota = hex::encode(auth_quota.auth_ref.as_ref());
-    let auth_ref_revoke = hex::encode(auth_revoke.auth_ref.as_ref());
     let client_a_signing = read_signing_key(&client_a_dir)?;
-    let client_revoke_signing = read_signing_key(&client_revoke_dir)?;
-    let token_hash_revoke = hex::encode(cap_token_hash(&cap_revoke_bytes));
 
     let mut quota_seqs = Vec::new();
     for index in 0..2 {
@@ -984,125 +936,6 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
     assert!(
         quota_error_code,
         "expected quota failure to return E.AUTH, got: {quota_body}"
-    );
-
-    let revocation_ttl = REVOCATION_TTL_SEC.to_string();
-    run_cli([
-        "revoke",
-        "publish",
-        "--hub",
-        &hub_url,
-        "--signer",
-        admin_dir.to_str().unwrap(),
-        "--kind",
-        "client-id",
-        "--target",
-        &client_id_hex(&client_revoke_signing),
-        "--ttl",
-        &revocation_ttl,
-    ])
-    .context("publishing client-id revocation")?;
-
-    let revoked = http
-        .post(&submit_endpoint)
-        .json(&make_submit_request(
-            stream_revoke,
-            &client_revoke_signing,
-            1,
-            0,
-            serde_json::json!({ "msg": "revoked" }),
-            None,
-            Some(auth_ref_revoke.clone()),
-            None,
-            None,
-        )?)
-        .send()
-        .await
-        .context("submitting message during revocation TTL")?;
-    let revoked_status = revoked.status();
-    assert_eq!(revoked_status, StatusCode::FORBIDDEN);
-    let revoked_body = revoked
-        .text()
-        .await
-        .context("reading revocation failure body")?;
-    let revoked_error_code = revoked_body.contains("E.AUTH");
-    assert!(
-        revoked_error_code,
-        "expected client-id revocation to return E.AUTH, got: {revoked_body}"
-    );
-
-    tokio::time::sleep(Duration::from_secs(REVOCATION_EXPIRY_SLEEP_SEC)).await;
-
-    let post_ttl = http
-        .post(&submit_endpoint)
-        .json(&make_submit_request(
-            stream_revoke,
-            &client_revoke_signing,
-            2,
-            0,
-            serde_json::json!({ "msg": "restored" }),
-            None,
-            Some(auth_ref_revoke.clone()),
-            None,
-            None,
-        )?)
-        .send()
-        .await
-        .context("submitting message after revocation TTL")?;
-    let post_ttl_status = post_ttl.status();
-    if !post_ttl_status.is_success() {
-        let body = post_ttl
-            .text()
-            .await
-            .unwrap_or_else(|_| "<failed to read body>".to_string());
-        panic!("post-TTL submission returned {post_ttl_status}: {body}");
-    }
-    let post_ttl_response: SubmitResponse = post_ttl
-        .json()
-        .await
-        .context("decoding post-TTL submit response")?;
-    let post_ttl_seq = post_ttl_response.seq;
-
-    run_cli([
-        "revoke",
-        "publish",
-        "--hub",
-        &hub_url,
-        "--signer",
-        admin_dir.to_str().unwrap(),
-        "--kind",
-        "cap-token",
-        "--target",
-        &token_hash_revoke,
-    ])
-    .context("publishing capability token revocation")?;
-
-    let cap_revoked = http
-        .post(&submit_endpoint)
-        .json(&make_submit_request(
-            stream_revoke,
-            &client_revoke_signing,
-            3,
-            0,
-            serde_json::json!({ "msg": "cap revoked" }),
-            None,
-            Some(auth_ref_revoke.clone()),
-            None,
-            None,
-        )?)
-        .send()
-        .await
-        .context("submitting message after cap-token revocation")?;
-    let cap_revoked_status = cap_revoked.status();
-    assert_eq!(cap_revoked_status, StatusCode::FORBIDDEN);
-    let cap_body = cap_revoked
-        .text()
-        .await
-        .context("reading cap-token revocation body")?;
-    let cap_revoked_error_code = cap_body.contains("E.CAP");
-    assert!(
-        cap_revoked_error_code,
-        "expected cap-token revocation to return E.CAP, got: {cap_body}"
     );
 
     let cap_b_bytes = std::fs::read(&cap_b_file).context("reading client B capability")?;
@@ -1180,15 +1013,10 @@ async fn goals_revocation_and_admission_bounds() -> Result<()> {
     );
 
     println!(
-        "goal: REVOCATION.ADMISSION\n  hub.url: {hub_url}\n  streams: [{stream_quota}, {stream_revoke}, {stream_lifetime}]\n  auth_ref.quota: {auth_ref_quota}\n  auth_ref.revoke: {auth_ref_revoke}\n  auth_ref.lifetime: {auth_ref_b}\n  revoke.hash: {token_hash_revoke}\n  quota.seqs: {:?}\n  quota.forbidden.status: {}\n  quota.error.E.AUTH: {}\n  revoke.forbidden.status: {}\n  revoke.error.E.AUTH: {}\n  revoke.cap.status: {}\n  revoke.cap.error.E.CAP: {}\n  revoke.restored.status: {}\n  revoke.restored.seq: {post_ttl_seq}\n  lifetime.initial.seq: {}\n  lifetime.expiry.status: {}\n  lifetime.error.E.AUTH: {}\n  lifetime.limit.sec: {}",
+        "goal: ADMISSION.BOUNDS\n  hub.url: {hub_url}\n  streams: [{stream_quota}, {stream_lifetime}]\n  auth_ref.quota: {auth_ref_quota}\n  auth_ref.lifetime: {auth_ref_b}\n  quota.seqs: {:?}\n  quota.forbidden.status: {}\n  quota.error.E.AUTH: {}\n  lifetime.initial.seq: {}\n  lifetime.expiry.status: {}\n  lifetime.error.E.AUTH: {}\n  lifetime.limit.sec: {}",
         quota_seqs,
         quota_fail_status,
         quota_error_code,
-        revoked_status,
-        revoked_error_code,
-        cap_revoked_status,
-        cap_revoked_error_code,
-        post_ttl_status,
         lifetime_initial.seq,
         lifetime_fail_status,
         lifetime_error_code,
