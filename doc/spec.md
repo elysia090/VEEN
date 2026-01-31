@@ -427,6 +427,42 @@ Return deterministic error codes:
 - Linear scans or sequential replays on any external operation path.
 - Hidden state that cannot be reconstructed from logs and checkpoints.
 
+### 8.4 Hub identity, keys, and rotation
+The hub public key `hub_pk` used to verify `RECEIPT.hub_sig` (§4.3) and `CHECKPOINT.hub_sig` is discovered and
+anchored by one (or more) of the following deterministic mechanisms:
+- **Data directory identity:** a hub identity record stored in the data directory (see required artifacts below),
+  verified by a local trust root (e.g., OS trust store, provisioning secret, or explicit allow-list).
+- **Out-of-band fingerprint:** a pinned fingerprint (e.g., `H(hub_pk)` or certificate fingerprint) configured by
+  the client/operator.
+- **Certificate binding:** a certificate chain that binds `hub_pk` to an identity, validated by a configured trust
+  anchor (e.g., TLS PKI or a private CA).
+
+Multiple hub keys MAY be allowed, but the hub MUST define a deterministic selection/validation rule set:
+- Clients MUST accept only keys anchored by one of the configured mechanisms above.
+- If multiple keys are valid, clients MUST select deterministically (e.g., by `valid_from` then lexicographic
+  `hub_pk`), and MUST reject receipts/checkpoints signed by keys outside the active set.
+- The hub MUST include a key identifier in its metadata artifacts so clients can map signatures to the correct key.
+
+Rotation rules:
+- The hub MAY rotate `hub_pk` by adding a new key to the active set with a `valid_from` (and optional `valid_until`)
+  timestamp, while retaining previous keys in an archive set.
+- Clients MUST treat a receipt or checkpoint as valid if its signature verifies under any key that was active at the
+  corresponding `hub_ts` (for receipts) or `epoch` (for checkpoints).
+- Old receipts MUST remain verifiable as long as the hub identity record and archived keys remain available.
+
+Required metadata artifacts in the data directory (normative binding to logs/checkpoints):
+- **hub-identity.json (or CBOR equivalent):** includes `hub_id`, list of `hub_keys` with `key_id`, `hub_pk`,
+  `valid_from`, `valid_until` (optional), and the anchoring method used.
+- **hub-identity.sig:** signature over the canonical encoding of `hub-identity.*` using the current `hub_pk`
+  (or an offline root key if configured).
+- **hub-key-map:** a deterministic mapping from `key_id` to `hub_pk` used by receipt/checkpoint verification.
+- **checkpoint-binding:** a manifest that ties `checkpoint` files to `hub_id`, `key_id`, and the expected
+  `mmr_root` for each `epoch`.
+
+These artifacts MUST be sufficient to bind `hub_pk` to the log and checkpoint history without external mutable
+state. Clients MUST reject hubs that cannot provide a complete, verifiable chain from the anchored identity to the
+signatures in §4.3.
+
 ---
 
 ## 9. Client behavior (normative)
