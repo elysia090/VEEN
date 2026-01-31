@@ -454,6 +454,178 @@ The data plane is intentionally minimal and deterministic. All endpoints MUST sa
 - Proof generation MUST be deterministic and reproducible.
 - Stream replay order is strictly by `stream_seq`.
 
+### 10.3 Transport, versioning, and content types
+- **Transport:** v0.0.1 assumes HTTP/1.1 or HTTP/2 over TLS with request/response bodies encoded as CBOR.
+- **Content-Type:** `application/cbor` for CBOR payloads; `application/json` is permitted for debugging but MUST
+  be semantically equivalent to the CBOR shapes in this section.
+- **Versioning:** the API version is fixed by the URL prefix (`/v1/...`). Servers MUST reject unknown major
+  versions with `E.VERSION` and HTTP 400. Minor/patch changes are backward compatible and reflected in the
+  `server_version` response field (see §10.4).
+
+### 10.4 Request/response envelopes (CBOR + JSON)
+All data plane requests are CBOR maps with unsigned integer keys. The JSON shape uses string keys with the
+same names for readability. Unknown keys are rejected. Optional fields are omitted when absent; `null` is not
+permitted unless explicitly stated. Unless noted, all integers are unsigned.
+
+#### 10.4.1 submit
+**Request (CBOR map):**
+```
+{
+  1: ver,          // uint (MUST be 1)
+  2: msg           // CBOR array, MSG as defined in §4.1
+}
+```
+**JSON equivalent:**
+```
+{ "ver": 1, "msg": [ ... ] }
+```
+**Response (CBOR map):**
+```
+{
+  1: ver,          // uint (MUST be 1)
+  2: receipt,      // CBOR array, RECEIPT as defined in §4.3
+  3: server_version // tstr, optional (e.g., "0.0.1")
+}
+```
+
+#### 10.4.2 stream
+**Request (CBOR map):**
+```
+{
+  1: ver,              // uint (MUST be 1)
+  2: label,            // bstr32
+  3: from_seq,         // uint, inclusive lower bound
+  4: to_seq,           // uint, inclusive upper bound, optional
+  5: max_items,        // uint, optional (server-enforced upper bound)
+  6: cursor,           // uint, optional (next stream_seq to read)
+  7: with_receipts,    // bool, optional (default false)
+  8: with_mmr_proof    // bool, optional (default false)
+}
+```
+**JSON equivalent:**
+```
+{
+  "ver": 1,
+  "label": "<bstr32>",
+  "from_seq": 0,
+  "to_seq": 100,
+  "max_items": 1000,
+  "cursor": 42,
+  "with_receipts": true,
+  "with_mmr_proof": false
+}
+```
+**Response (CBOR map):**
+```
+{
+  1: ver,              // uint (MUST be 1)
+  2: label,            // bstr32
+  3: from_seq,         // uint (echoed effective lower bound)
+  4: to_seq,           // uint (echoed effective upper bound if present)
+  5: items,            // [ item, ... ]
+  6: next_cursor,      // uint, optional (absent if no more data)
+  7: mmr_proof,        // CBOR map per §5.2, optional
+  8: server_version    // tstr, optional
+}
+```
+Each `item` is a CBOR map:
+```
+{
+  1: stream_seq,       // uint
+  2: msg,              // CBOR array, MSG (§4.1)
+  3: receipt           // CBOR array, RECEIPT (§4.3), optional
+}
+```
+If `with_receipts` is false, `receipt` is omitted. If `with_mmr_proof` is true, `mmr_proof` is included once
+for the whole page and proves inclusion for the last `stream_seq` in `items`.
+
+#### 10.4.3 receipt
+**Request (CBOR map):**
+```
+{
+  1: ver,          // uint (MUST be 1)
+  2: label,        // bstr32
+  3: stream_seq    // uint
+}
+```
+**Response (CBOR map):**
+```
+{
+  1: ver,          // uint (MUST be 1)
+  2: receipt,      // CBOR array, RECEIPT (§4.3)
+  3: server_version // tstr, optional
+}
+```
+
+#### 10.4.4 proof
+**Request (CBOR map):**
+```
+{
+  1: ver,          // uint (MUST be 1)
+  2: label,        // bstr32
+  3: stream_seq    // uint
+}
+```
+**Response (CBOR map):**
+```
+{
+  1: ver,          // uint (MUST be 1)
+  2: mmr_proof,    // CBOR map per §5.2
+  3: server_version // tstr, optional
+}
+```
+
+#### 10.4.5 checkpoint
+**Request (CBOR map):**
+```
+{
+  1: ver,          // uint (MUST be 1)
+  2: label,        // bstr32
+  3: upto_seq      // uint
+}
+```
+**Response (CBOR map):**
+```
+{
+  1: ver,          // uint (MUST be 1)
+  2: checkpoint,   // CBOR array, CHECKPOINT (§4.4)
+  3: server_version // tstr, optional
+}
+```
+
+### 10.5 Stream pagination semantics
+- **Cursor vs. range:** `cursor` (if present) takes precedence over `from_seq` and represents the next
+  `stream_seq` to read. Servers MUST set `next_cursor` to `last_stream_seq + 1` when more data is available.
+- **Bounds:** `from_seq` and `to_seq` are inclusive bounds when `cursor` is absent. If `to_seq` is omitted, the
+  server reads forward until `max_items` or the end of the stream.
+- **Page size:** `max_items` is capped by the server’s configured maximum. Clients MUST handle truncation. A
+  response with `items` length `< max_items` and no `next_cursor` indicates end of range.
+
+### 10.6 Errors
+Errors are CBOR maps with unsigned integer keys (JSON equivalents use the string names). The error envelope is:
+```
+{
+  1: ver,         // uint (MUST be 1)
+  2: code,        // tstr (canonical error code)
+  3: message,     // tstr, human-readable
+  4: detail,      // map, optional (machine-readable fields)
+  5: retry_after, // uint seconds, optional
+  6: request_id   // tstr, optional
+}
+```
+Canonical code mapping (HTTP):
+- `E.BAD_REQUEST` → 400 (malformed CBOR, unknown fields, invalid types)
+- `E.UNAUTHORIZED` → 401 (missing/invalid auth)
+- `E.FORBIDDEN` → 403 (capability denied)
+- `E.NOT_FOUND` → 404 (unknown label/seq)
+- `E.CONFLICT` → 409 (sequence regression, duplicate submit)
+- `E.LIMIT` → 413 (exceeds size/limit registry)
+- `E.UNAVAILABLE` → 503 (temporary load or maintenance)
+- `E.VERSION` → 400 (unknown API version)
+
+`detail` fields are machine-readable and MUST use stable keys such as `field`, `expected`, `actual`,
+`max_allowed`, `label`, and `stream_seq`.
+
 ---
 
 ## 11. Overlay framework (v0.0.1)
