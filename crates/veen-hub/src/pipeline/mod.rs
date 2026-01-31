@@ -3579,18 +3579,10 @@ mod tests {
 
             let mut rng = OsRng;
             let signing_key = SigningKey::generate(&mut rng);
-            let payload = serde_json::to_vec(&json!({"ok": true}))
-                .context("encoding submit payload")?;
-            let request = build_submit_request(
-                stream,
-                &signing_key,
-                1,
-                0,
-                &payload,
-                None,
-                None,
-                None,
-            )?;
+            let payload =
+                serde_json::to_vec(&json!({"ok": true})).context("encoding submit payload")?;
+            let request =
+                build_submit_request(stream, &signing_key, 1, 0, &payload, None, None, None)?;
             pipeline.submit(request).await.unwrap();
 
             {
@@ -3631,16 +3623,8 @@ mod tests {
             let signing_key = SigningKey::generate(&mut rng);
             let payload = serde_json::to_vec(&json!({"text": "deduplicate"}))
                 .context("encoding submit payload")?;
-            let request = build_submit_request(
-                "core/dup",
-                &signing_key,
-                1,
-                0,
-                &payload,
-                None,
-                None,
-                None,
-            )?;
+            let request =
+                build_submit_request("core/dup", &signing_key, 1, 0, &payload, None, None, None)?;
 
             pipeline.submit(request.clone()).await.unwrap();
             {
@@ -3788,16 +3772,10 @@ mod tests {
             let mut rng = OsRng;
             let signing_key = SigningKey::generate(&mut rng);
             let body = "x".repeat(MAX_BODY_BYTES + 1);
-            let payload = serde_json::to_vec(&json!({"blob": body}))
-                .context("encoding submit payload")?;
-            let msg_bytes = build_submit_msg_bytes(
-                "core/limit-body",
-                &signing_key,
-                1,
-                0,
-                None,
-                &payload,
-            )?;
+            let payload =
+                serde_json::to_vec(&json!({"blob": body})).context("encoding submit payload")?;
+            let msg_bytes =
+                build_submit_msg_bytes("core/limit-body", &signing_key, 1, 0, None, &payload)?;
             let exceeds_total = msg_bytes.len() > MAX_MSG_BYTES;
             let request = build_submit_request(
                 "core/limit-body",
@@ -3850,8 +3828,8 @@ mod tests {
 
             let mut rng = OsRng;
             let signing_key = SigningKey::generate(&mut rng);
-            let payload = serde_json::to_vec(&json!({"ok": true}))
-                .context("encoding submit payload")?;
+            let payload =
+                serde_json::to_vec(&json!({"ok": true})).context("encoding submit payload")?;
             let request = build_submit_request(
                 "core/limit-attachments",
                 &signing_key,
@@ -3898,8 +3876,8 @@ mod tests {
 
             let mut rng = OsRng;
             let signing_key = SigningKey::generate(&mut rng);
-            let payload = serde_json::to_vec(&json!({"ok": true}))
-                .context("encoding submit payload")?;
+            let payload =
+                serde_json::to_vec(&json!({"ok": true})).context("encoding submit payload")?;
             let request = build_submit_request(
                 "core/limit-attachment-size",
                 &signing_key,
