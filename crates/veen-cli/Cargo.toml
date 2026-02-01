@@ -11,6 +11,12 @@ description = "Command-line client scaffold for the VEEN reference implementatio
 name = "veen"
 path = "src/main.rs"
 
+[features]
+default = ["hub", "selftest", "kube"]
+hub = ["dep:veen-hub", "dep:veen-selftest"]
+selftest = ["dep:veen-selftest"]
+kube = ["dep:kube", "dep:k8s-openapi"]
+
 [dependencies]
 anyhow.workspace = true
 ciborium.workspace = true
@@ -30,15 +36,15 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 veen-core = { path = "../veen-core" }
 veen-overlays = { path = "../veen-overlays" }
-veen-hub = { path = "../veen-hub" }
-veen-selftest = { path = "../veen-selftest" }
+veen-hub = { path = "../veen-hub", optional = true }
+veen-selftest = { path = "../veen-selftest", optional = true }
 x25519-dalek.workspace = true
 rand.workspace = true
 sha2.workspace = true
 humantime-serde.workspace = true
 humantime.workspace = true
-k8s-openapi.workspace = true
-kube.workspace = true
+k8s-openapi = { workspace = true, optional = true }
+kube = { workspace = true, optional = true }
 tempfile.workspace = true
 
 [dev-dependencies]

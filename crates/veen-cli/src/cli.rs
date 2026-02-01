@@ -34,7 +34,8 @@ use tokio::time::sleep;
 use tracing_subscriber::EnvFilter;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
-use crate::kube::{handle_kube_command, KubeCommand};
+#[cfg(feature = "kube")]
+use crate::kube::KubeCommand;
 
 use veen_core::CAP_TOKEN_VERSION;
 use veen_core::{
@@ -53,8 +54,11 @@ use veen_core::{
     HPKE_ENC_LEN, MAX_MSG_BYTES, REALM_ID_LEN,
 };
 use veen_core::{h, ht};
+#[cfg(feature = "hub")]
 use veen_hub::runtime::HubRuntime;
+#[cfg(feature = "hub")]
 use veen_hub::runtime::{HubConfigOverrides, HubRole, HubRuntimeConfig};
+#[cfg(feature = "hub")]
 use veen_hub::storage::{
     self, stream_index, ANCHORS_DIR, ATTACHMENTS_DIR, CHECKPOINTS_FILE, CRDT_DIR, HUB_KEY_FILE,
     HUB_PID_FILE, MESSAGES_DIR, PAYLOADS_FILE, RECEIPTS_FILE, REVOCATIONS_FILE, STATE_DIR,
@@ -79,6 +83,7 @@ use veen_overlays::{
     schema_fed_authority, schema_label_class, schema_meta_schema, schema_revocation,
     schema_wallet_transfer, REVOCATION_TARGET_LEN, SCHEMA_ID_LEN, TRANSFER_ID_LEN, WALLET_ID_LEN,
 };
+#[cfg(any(feature = "hub", feature = "selftest"))]
 use veen_selftest::metrics::{HistogramSnapshot, HubMetricsSnapshot};
 
 #[cfg(unix)]
@@ -91,6 +96,7 @@ use nix::unistd::Pid;
 use std::time::Instant;
 #[cfg(unix)]
 use tokio::signal::unix::{signal as unix_signal, SignalKind};
+#[cfg(feature = "hub")]
 use veen_hub::pipeline::{
     AnchorRequest, AttachmentUpload, AuthorizeResponse as RemoteAuthorizeResponse,
     HubStreamState as RemoteHubStreamState, PowCookieEnvelope,
@@ -98,6 +104,13 @@ use veen_hub::pipeline::{
     StreamResponse as RemoteStreamResponse, SubmitRequest as RemoteSubmitRequest,
     SubmitResponse as RemoteSubmitResponse,
 };
+
+#[cfg(feature = "hub")]
+mod hub_commands;
+#[cfg(feature = "kube")]
+mod kube_commands;
+#[cfg(feature = "selftest")]
+mod selftest_commands;
 
 const CLIENT_KEY_VERSION: u8 = 1;
 const CLIENT_STATE_VERSION: u8 = 1;
@@ -809,6 +822,7 @@ fn json_output_enabled_with(explicit: bool, global: &GlobalOptions) -> bool {
 #[derive(Subcommand)]
 enum Command {
     /// Hub lifecycle and tooling commands (non-core endpoints).
+    #[cfg(feature = "hub")]
     #[command(subcommand)]
     Hub(HubCommand),
     /// Show help for a command or subcommand.
@@ -890,12 +904,14 @@ enum Command {
     #[command(subcommand)]
     HubTls(HubTlsCommand),
     /// Run VEEN self-test suites.
+    #[cfg(feature = "selftest")]
     #[command(subcommand)]
     Selftest(SelftestCommand),
     /// Environment descriptor helpers.
     #[command(subcommand)]
     Env(EnvCommand),
     /// Render Kubernetes manifests for VEEN profiles.
+    #[cfg(feature = "kube")]
     #[command(subcommand)]
     Kube(KubeCommand),
     /// Audit and compliance helpers.
@@ -3193,27 +3209,8 @@ async fn run_cli(cli: Cli) -> Result<()> {
     init_tracing();
 
     match command {
-        Command::Hub(cmd) => match cmd {
-            HubCommand::Start(args) => handle_hub_start(args).await,
-            HubCommand::Stop(args) => handle_hub_stop(args).await,
-            HubCommand::Status(args) => handle_hub_status(args).await,
-            HubCommand::Key(args) => handle_hub_key(args).await,
-            HubCommand::VerifyRotation(args) => handle_hub_verify_rotation(args).await,
-            HubCommand::Health(args) => handle_hub_health(args).await,
-            HubCommand::Metrics(args) => handle_hub_metrics(args).await,
-            HubCommand::Profile(args) => handle_hub_profile(args).await,
-            HubCommand::Role(args) => handle_hub_role(args).await,
-            HubCommand::KexPolicy(args) => handle_hub_kex_policy(args).await,
-            HubCommand::TlsInfo(args) => handle_hub_tls_info(args).await,
-            HubCommand::Admission(args) => handle_hub_admission(args).await,
-            HubCommand::AdmissionLog(args) => handle_hub_admission_log(args).await,
-            HubCommand::CheckpointLatest(args) => {
-                handle_hub_checkpoint_latest(args).await.map(|_| ())
-            }
-            HubCommand::CheckpointRange(args) => {
-                handle_hub_checkpoint_range(args).await.map(|_| ())
-            }
-        },
+        #[cfg(feature = "hub")]
+        Command::Hub(cmd) => hub_commands::handle_hub_command(cmd).await,
         Command::Help(args) => handle_help(args),
         Command::Keygen(args) => handle_keygen(args).await,
         Command::Id(cmd) => match cmd {
@@ -3333,25 +3330,15 @@ async fn run_cli(cli: Cli) -> Result<()> {
             EnvCommand::AddTenant(args) => handle_env_add_tenant(args).await,
             EnvCommand::Show(args) => handle_env_show(args).await,
         },
-        Command::Kube(cmd) => handle_kube_command(cmd).await,
+        #[cfg(feature = "kube")]
+        Command::Kube(cmd) => kube_commands::handle_kube_command_wrapper(cmd).await,
         Command::Audit(cmd) => match cmd {
             AuditCommand::Queries(args) => handle_audit_queries(args).await,
             AuditCommand::Summary(args) => handle_audit_summary(args).await,
             AuditCommand::EnforceCheck(args) => handle_audit_enforce_check(args).await,
         },
-        Command::Selftest(cmd) => match cmd {
-            SelftestCommand::Core => handle_selftest_core().await,
-            SelftestCommand::Props => handle_selftest_props().await,
-            SelftestCommand::Fuzz => handle_selftest_fuzz().await,
-            SelftestCommand::All => handle_selftest_all().await,
-            SelftestCommand::Federated => handle_selftest_federated().await,
-            SelftestCommand::Kex1 => handle_selftest_kex1().await,
-            SelftestCommand::Hardened => handle_selftest_hardened().await,
-            SelftestCommand::Meta => handle_selftest_meta().await,
-            SelftestCommand::Recorder => handle_selftest_recorder().await,
-            SelftestCommand::Plus => handle_selftest_plus().await,
-            SelftestCommand::PlusPlus => handle_selftest_plus_plus().await,
-        },
+        #[cfg(feature = "selftest")]
+        Command::Selftest(cmd) => selftest_commands::handle_selftest_command(cmd).await,
     }
 }
 
