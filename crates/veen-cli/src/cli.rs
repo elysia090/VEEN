@@ -331,7 +331,8 @@ struct GlobalOptions {
     long_about = None,
     disable_help_subcommand = true
 )]
-struct Cli {
+#[allow(private_interfaces)]
+pub struct Cli {
     #[command(flatten)]
     global: GlobalOptions,
     #[command(subcommand)]
@@ -3178,8 +3179,7 @@ struct RenderedRevocation {
     active_now: bool,
 }
 
-pub async fn cli_main() {
-    let args: Vec<_> = env::args_os().collect();
+pub fn init_cli_binary_name(args: &[std::ffi::OsString]) {
     if let Some(binary) = args.first().and_then(|arg| {
         let path = Path::new(arg);
         path.file_name()
@@ -3187,23 +3187,50 @@ pub async fn cli_main() {
     }) {
         let _ = CLI_BINARY_NAME.set(binary);
     }
-    let exit_code = match Cli::try_parse_from(&args) {
-        Ok(cli) => match run_cli(cli).await {
-            Ok(()) => 0,
-            Err(err) => {
-                let classification = classify_error(&err);
-                let detail = err.to_string();
-                let use_json = json_output_enabled(false);
-                emit_cli_error(classification.label(), Some(&detail), use_json);
-                classification.exit_code()
-            }
-        },
-        Err(err) => handle_parse_error(err, &args),
-    };
-    process::exit(exit_code);
 }
 
-async fn run_cli(cli: Cli) -> Result<()> {
+pub fn parse_cli(args: &[std::ffi::OsString]) -> Result<Cli, clap::Error> {
+    Cli::try_parse_from(args)
+}
+
+pub fn cli_main_from_parsed(cli: Cli) -> i32 {
+    let result = if is_sync_command(&cli) {
+        run_cli_sync(cli)
+    } else {
+        match tokio::runtime::Runtime::new() {
+            Ok(runtime) => runtime.block_on(run_cli_async(cli)),
+            Err(err) => Err(anyhow::Error::new(err).context("building tokio runtime")),
+        }
+    };
+
+    match result {
+        Ok(()) => 0,
+        Err(err) => {
+            let classification = classify_error(&err);
+            let detail = err.to_string();
+            let use_json = json_output_enabled(false);
+            emit_cli_error(classification.label(), Some(&detail), use_json);
+            classification.exit_code()
+        }
+    }
+}
+
+fn is_sync_command(cli: &Cli) -> bool {
+    matches!(cli.command, Command::Help(_))
+}
+
+fn run_cli_sync(cli: Cli) -> Result<()> {
+    let Cli { global, command } = cli;
+    set_global_options(global);
+    init_tracing();
+
+    match command {
+        Command::Help(args) => handle_help(args),
+        _ => unreachable!("sync-only execution requested for async command"),
+    }
+}
+
+async fn run_cli_async(cli: Cli) -> Result<()> {
     let Cli { global, command } = cli;
     set_global_options(global);
     init_tracing();
@@ -3363,7 +3390,7 @@ fn handle_help(args: HelpArgs) -> Result<()> {
     Ok(())
 }
 
-fn handle_parse_error(err: clap::Error, args: &[std::ffi::OsString]) -> i32 {
+pub fn handle_parse_error(err: clap::Error, args: &[std::ffi::OsString]) -> i32 {
     match err.kind() {
         clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => {
             let _ = err.print();
