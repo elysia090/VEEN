@@ -177,6 +177,21 @@ The build produces the following binaries under `target/release/`:
 - `veen-selftest` – standalone test runner used by CI and by `veen selftest`
 - `veen-bridge` – log replication helper used in extended scenarios
 
+The `veen` CLI supports feature flags to trim heavy dependencies when you only
+need a subset of commands:
+
+- `hub` – enables hub lifecycle and tooling subcommands (and the runtime client
+  types they rely on).
+- `selftest` – enables the `veen selftest` command suite.
+- `kube` – enables Kubernetes manifest rendering (`veen kube`).
+
+By default all features are enabled. For a lighter client-only build, disable
+defaults and add back the features you need, for example:
+
+```shell
+cargo build -p veen-cli --release --no-default-features --features hub
+```
+
 ### Local developer quickstart
 
 Use the commands below to spin up a disposable hub, generate credentials, and
