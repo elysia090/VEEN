@@ -319,6 +319,8 @@ struct GlobalOptions {
     json: bool,
     #[arg(long, global = true)]
     quiet: bool,
+    #[arg(long, global = true)]
+    verbose: bool,
     #[arg(long, value_name = "MS", global = true)]
     timeout_ms: Option<u64>,
 }
@@ -342,6 +344,7 @@ pub struct Cli {
 static DEFAULT_GLOBAL_OPTIONS: GlobalOptions = GlobalOptions {
     json: false,
     quiet: false,
+    verbose: false,
     timeout_ms: None,
 };
 static GLOBAL_OPTIONS: OnceLock<GlobalOptions> = OnceLock::new();
@@ -3222,7 +3225,9 @@ fn is_sync_command(cli: &Cli) -> bool {
 fn run_cli_sync(cli: Cli) -> Result<()> {
     let Cli { global, command } = cli;
     set_global_options(global);
-    init_tracing();
+    if should_init_tracing(global_options(), &command) {
+        init_tracing();
+    }
 
     match command {
         Command::Help(args) => handle_help(args),
@@ -3233,7 +3238,9 @@ fn run_cli_sync(cli: Cli) -> Result<()> {
 async fn run_cli_async(cli: Cli) -> Result<()> {
     let Cli { global, command } = cli;
     set_global_options(global);
-    init_tracing();
+    if should_init_tracing(global_options(), &command) {
+        init_tracing();
+    }
 
     match command {
         #[cfg(feature = "hub")]
@@ -3483,6 +3490,27 @@ fn init_tracing() {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level)),
     );
     let _ = subscriber.try_init();
+}
+
+fn should_init_tracing(global: &GlobalOptions, command: &Command) -> bool {
+    if global.quiet {
+        return false;
+    }
+    if global.verbose {
+        return true;
+    }
+
+    match command {
+        Command::Help(_) => false,
+        #[cfg(feature = "hub")]
+        Command::Hub(_) => true,
+        Command::HubTls(_) => true,
+        #[cfg(feature = "selftest")]
+        Command::Selftest(_) => true,
+        #[cfg(feature = "kube")]
+        Command::Kube(_) => true,
+        _ => false,
+    }
 }
 
 fn validate_pow_difficulty(pow_difficulty: Option<u8>) -> Result<()> {
