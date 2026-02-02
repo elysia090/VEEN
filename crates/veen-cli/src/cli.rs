@@ -122,6 +122,9 @@ const ANCHOR_LOG_FILE: &str = "anchor_log.json";
 const RETENTION_CONFIG_FILE: &str = "retention.json";
 const ENV_DESCRIPTOR_VERSION: u64 = 1;
 
+static HTTP_CLIENT: OnceLock<HttpClient> = OnceLock::new();
+static HTTP_CLIENT_NO_PROXY: OnceLock<HttpClient> = OnceLock::new();
+
 type JsonMap = serde_json::Map<String, JsonValue>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13615,16 +13618,26 @@ fn is_loopback_host(url: &Url) -> bool {
 }
 
 fn build_http_client_for_url(url: &Url) -> Result<HttpClient> {
-    let mut builder = HttpClient::builder();
-    if let Some(timeout_ms) = global_options().timeout_ms {
-        builder = builder.timeout(Duration::from_millis(timeout_ms));
-    }
-    if is_loopback_host(url) {
-        builder = builder.no_proxy();
-    }
-    builder
-        .build()
-        .context("constructing HTTP client with global options")
+    let is_loopback = is_loopback_host(url);
+    let cache = if is_loopback {
+        &HTTP_CLIENT_NO_PROXY
+    } else {
+        &HTTP_CLIENT
+    };
+    cache
+        .get_or_try_init(|| {
+            let mut builder = HttpClient::builder();
+            if let Some(timeout_ms) = global_options().timeout_ms {
+                builder = builder.timeout(Duration::from_millis(timeout_ms));
+            }
+            if is_loopback {
+                builder = builder.no_proxy();
+            }
+            builder
+                .build()
+                .context("constructing HTTP client with global options")
+        })
+        .map(Clone::clone)
 }
 
 fn print_metrics_summary(metrics: &HubMetricsSnapshot) {
