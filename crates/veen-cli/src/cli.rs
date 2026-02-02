@@ -3243,6 +3243,23 @@ pub fn parse_cli(args: &[std::ffi::OsString]) -> Result<Cli, clap::Error> {
     Cli::try_parse_from(args)
 }
 
+/// Entry point for CLI execution, including a fast-path for top-level help/version.
+///
+/// Note: the fast-path returns a condensed help view for quick startup. For full
+/// help and subcommand details, run `help`.
+pub fn cli_main(args: &[std::ffi::OsString]) -> i32 {
+    init_cli_binary_name(args);
+
+    if let Some(exit_code) = try_fast_path(args) {
+        return exit_code;
+    }
+
+    match parse_cli(args) {
+        Ok(cli) => cli_main_from_parsed(cli),
+        Err(err) => handle_parse_error(err, args),
+    }
+}
+
 pub fn cli_main_from_parsed(cli: Cli) -> i32 {
     let result = if is_sync_command(&cli) {
         run_cli_sync(cli)
