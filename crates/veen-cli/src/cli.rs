@@ -352,6 +352,8 @@ static DEFAULT_GLOBAL_OPTIONS: GlobalOptions = GlobalOptions {
 };
 static GLOBAL_OPTIONS: OnceLock<GlobalOptions> = OnceLock::new();
 static CLI_BINARY_NAME: OnceLock<String> = OnceLock::new();
+static FAST_PATH_HELP: OnceLock<String> = OnceLock::new();
+static FAST_PATH_VERSION: OnceLock<String> = OnceLock::new();
 
 fn set_global_options(options: GlobalOptions) {
     let _ = GLOBAL_OPTIONS.set(options);
@@ -395,6 +397,25 @@ fn cli_binary_name() -> String {
         .get()
         .cloned()
         .unwrap_or_else(|| "veen-cli".to_string())
+}
+
+fn fast_path_help_text() -> &'static str {
+    FAST_PATH_HELP.get_or_init(|| {
+        let bin = cli_binary_name();
+        format!(
+            "{bin} - VEEN v0.0.1 command line interface\n\n\
+USAGE:\n    {bin} [OPTIONS] <COMMAND>\n\n\
+Note: this is a condensed help view for quick startup.\n\
+For full help and subcommand details, run '{bin} help'.\n"
+        )
+    })
+}
+
+fn fast_path_version_text() -> &'static str {
+    FAST_PATH_VERSION.get_or_init(|| {
+        let bin = cli_binary_name();
+        format!("{bin} {}\n", env!("CARGO_PKG_VERSION"))
+    })
 }
 
 fn emit_cli_error(code: &str, detail: Option<&str>, use_json: bool) {
@@ -3192,6 +3213,29 @@ pub fn init_cli_binary_name(args: &[std::ffi::OsString]) {
             .map(|name| name.to_string_lossy().into_owned())
     }) {
         let _ = CLI_BINARY_NAME.set(binary);
+    }
+}
+
+/// Fast-path handler for top-level help/version flags without building the clap command tree.
+pub fn try_fast_path(args: &[std::ffi::OsString]) -> Option<i32> {
+    let mut iter = args.iter();
+    let _bin = iter.next()?;
+    let arg = iter.next()?;
+    if iter.next().is_some() {
+        return None;
+    }
+
+    let arg = arg.to_string_lossy();
+    match arg.as_ref() {
+        "--help" | "help" => {
+            print!("{}", fast_path_help_text());
+            Some(0)
+        }
+        "--version" | "-V" => {
+            print!("{}", fast_path_version_text());
+            Some(0)
+        }
+        _ => None,
     }
 }
 
