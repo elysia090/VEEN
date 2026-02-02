@@ -11830,6 +11830,7 @@ mod tests {
         let global_json = GlobalOptions {
             json: true,
             quiet: false,
+            verbose: false,
             timeout_ms: None,
         };
         assert!(super::json_output_enabled_with(false, &global_json));
@@ -11837,6 +11838,7 @@ mod tests {
         let global_text = GlobalOptions {
             json: false,
             quiet: false,
+            verbose: false,
             timeout_ms: None,
         };
         assert!(super::json_output_enabled_with(true, &global_text));
@@ -11845,6 +11847,7 @@ mod tests {
         let global_quiet = GlobalOptions {
             json: false,
             quiet: true,
+            verbose: false,
             timeout_ms: None,
         };
         assert!(super::json_output_enabled_with(true, &global_quiet));
@@ -13685,20 +13688,22 @@ fn build_http_client_for_url(url: &Url) -> Result<HttpClient> {
     } else {
         &HTTP_CLIENT
     };
-    cache
-        .get_or_try_init(|| {
-            let mut builder = HttpClient::builder();
-            if let Some(timeout_ms) = global_options().timeout_ms {
-                builder = builder.timeout(Duration::from_millis(timeout_ms));
-            }
-            if is_loopback {
-                builder = builder.no_proxy();
-            }
-            builder
-                .build()
-                .context("constructing HTTP client with global options")
-        })
-        .map(Clone::clone)
+    if let Some(client) = cache.get() {
+        return Ok(client.clone());
+    }
+
+    let mut builder = HttpClient::builder();
+    if let Some(timeout_ms) = global_options().timeout_ms {
+        builder = builder.timeout(Duration::from_millis(timeout_ms));
+    }
+    if is_loopback {
+        builder = builder.no_proxy();
+    }
+    let client = builder
+        .build()
+        .context("constructing HTTP client with global options")?;
+    let _ = cache.set(client.clone());
+    Ok(client)
 }
 
 fn print_metrics_summary(metrics: &HubMetricsSnapshot) {
