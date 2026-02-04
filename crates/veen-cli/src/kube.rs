@@ -911,19 +911,21 @@ async fn wait_for_job_completion(job_api: Api<Job>, job_name: String) -> Result<
 }
 
 fn job_failure_message(status: &JobStatus) -> String {
-    if let Some(conditions) = status.conditions.as_ref() {
-        for condition in conditions {
-            if condition.type_ == "Failed" && condition.status == "True" {
-                if let Some(message) = condition.message.as_ref() {
-                    return message.clone();
-                }
-                if let Some(reason) = condition.reason.as_ref() {
-                    return reason.clone();
-                }
-            }
-        }
-    }
-    "job reported failure".to_string()
+    status
+        .conditions
+        .as_ref()
+        .and_then(|conditions| {
+            conditions
+                .iter()
+                .find(|condition| condition.type_ == "Failed" && condition.status == "True")
+        })
+        .and_then(|condition| {
+            condition
+                .message
+                .clone()
+                .or_else(|| condition.reason.clone())
+        })
+        .unwrap_or_else(|| "job reported failure".to_string())
 }
 
 async fn wait_for_job_pod(pod_api: &Api<Pod>, job_name: &str) -> Result<String> {
