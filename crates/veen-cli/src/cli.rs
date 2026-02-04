@@ -34,8 +34,20 @@ use tokio::time::sleep;
 use tracing_subscriber::EnvFilter;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
+use self::cap::{
+    CapAuthorizeArgs, CapCommand, CapIssueArgs, CapRevocationsArgs, CapStatusArgs,
+};
+#[cfg(feature = "hub")]
+use self::hub::{
+    HubAdmissionArgs, HubAdmissionLogArgs, HubCheckpointLatestArgs, HubCheckpointRangeArgs,
+    HubCommand, HubHealthArgs, HubKexPolicyArgs, HubKeyArgs, HubMetricsArgs, HubProfileArgs,
+    HubRoleArgs, HubStartArgs, HubStatusArgs, HubStopArgs, HubTlsCommand, HubTlsInfoArgs,
+    HubVerifyRotationArgs,
+};
 #[cfg(feature = "kube")]
-use crate::kube::KubeCommand;
+use self::kube::KubeCommand;
+#[cfg(feature = "selftest")]
+use self::selftest::{SelftestCommand, SelftestFailure};
 
 use veen_core::CAP_TOKEN_VERSION;
 use veen_core::{
@@ -107,8 +119,13 @@ use veen_hub::pipeline::{
 
 #[cfg(feature = "hub")]
 mod hub_commands;
+mod cap;
+#[cfg(feature = "hub")]
+mod hub;
 #[cfg(feature = "kube")]
-mod kube_commands;
+mod kube;
+#[cfg(feature = "selftest")]
+mod selftest;
 #[cfg(feature = "selftest")]
 mod selftest_commands;
 
@@ -255,29 +272,6 @@ impl fmt::Display for AuditPolicyViolationError {
 }
 
 impl std::error::Error for AuditPolicyViolationError {}
-
-#[derive(Debug)]
-struct SelftestFailure {
-    inner: anyhow::Error,
-}
-
-impl SelftestFailure {
-    fn new(inner: anyhow::Error) -> Self {
-        Self { inner }
-    }
-}
-
-impl fmt::Display for SelftestFailure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "self-test failure: {}", self.inner)
-    }
-}
-
-impl std::error::Error for SelftestFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.inner.as_ref())
-    }
-}
 
 #[derive(Debug)]
 struct ProtocolError {
@@ -979,53 +973,6 @@ enum AuditCommand {
 }
 
 #[derive(Subcommand)]
-enum HubCommand {
-    /// Start the VEEN hub runtime.
-    Start(HubStartArgs),
-    /// Stop a running VEEN hub instance.
-    Stop(HubStopArgs),
-    /// Fetch high level status from a hub (non-core tooling endpoints).
-    Status(HubStatusArgs),
-    /// Fetch the hub's public key information.
-    Key(HubKeyArgs),
-    /// Verify rotation witnesses between hub keys.
-    #[command(name = "verify-rotation")]
-    VerifyRotation(HubVerifyRotationArgs),
-    /// Fetch hub health information (non-core tooling endpoint).
-    Health(HubHealthArgs),
-    /// Fetch hub metrics (non-core tooling endpoint).
-    Metrics(HubMetricsArgs),
-    /// Fetch hub capability profile details (non-core tooling endpoint).
-    Profile(HubProfileArgs),
-    /// Inspect hub role information (non-core tooling endpoint).
-    Role(HubRoleArgs),
-    /// Inspect hub key and capability lifecycle policy (non-core tooling endpoint).
-    #[command(name = "kex-policy")]
-    KexPolicy(HubKexPolicyArgs),
-    /// Inspect TLS configuration for a hub endpoint (non-core tooling endpoint).
-    #[command(name = "tls-info")]
-    TlsInfo(HubTlsInfoArgs),
-    /// Inspect admission pipeline configuration and metrics (non-core tooling endpoint).
-    Admission(HubAdmissionArgs),
-    /// Inspect recent admission failures (non-core tooling endpoint).
-    #[command(name = "admission-log")]
-    AdmissionLog(HubAdmissionLogArgs),
-    /// Fetch the latest checkpoint from a hub (non-core tooling endpoint).
-    #[command(name = "checkpoint-latest")]
-    CheckpointLatest(HubCheckpointLatestArgs),
-    /// Fetch checkpoints within an epoch range from a hub (non-core tooling endpoint).
-    #[command(name = "checkpoint-range")]
-    CheckpointRange(HubCheckpointRangeArgs),
-}
-
-#[derive(Subcommand)]
-enum HubTlsCommand {
-    /// Inspect TLS configuration for a hub endpoint.
-    #[command(name = "tls-info")]
-    TlsInfo(HubTlsInfoArgs),
-}
-
-#[derive(Subcommand)]
 enum IdCommand {
     /// Show a client identity summary.
     Show(IdShowArgs),
@@ -1039,20 +986,6 @@ enum IdCommand {
 enum AttachmentCommand {
     /// Verify an attachment against a stored message bundle.
     Verify(AttachmentVerifyArgs),
-}
-
-#[derive(Subcommand)]
-enum CapCommand {
-    /// Issue a capability token.
-    Issue(CapIssueArgs),
-    /// Authorise a capability token with the hub (non-core tooling endpoint).
-    Authorize(CapAuthorizeArgs),
-    /// Inspect hub view for a capability token (non-core tooling endpoint).
-    Status(CapStatusArgs),
-    /// Publish a revocation record via the capability surface.
-    Revoke(RevokePublishArgs),
-    /// Inspect revocation records.
-    Revocations(CapRevocationsArgs),
 }
 
 #[derive(Subcommand)]
@@ -1261,53 +1194,6 @@ impl FromStr for RetentionValue {
     }
 }
 
-#[derive(Subcommand)]
-enum SelftestCommand {
-    /// Run the VEEN core self-test suite.
-    Core,
-    /// Run property-based tests.
-    Props,
-    /// Run fuzz tests against VEEN wire objects.
-    Fuzz,
-    /// Run the full test suite (core + props + fuzz).
-    All,
-    /// Exercise federated overlay scenarios (FED1/AUTH1).
-    Federated,
-    /// Exercise lifecycle and revocation checks (KEX1+).
-    Kex1,
-    /// Exercise hardening/PoW checks (SH1+).
-    Hardened,
-    /// Exercise label/schema overlays (META0+).
-    Meta,
-    /// Exercise recorder overlay scenarios.
-    Recorder,
-    /// Run every v0.0.1+ suite sequentially with aggregated reporting.
-    Plus,
-    /// Run the v0.0.1++ orchestration suite.
-    #[command(name = "plus-plus")]
-    PlusPlus,
-}
-
-#[derive(ValueEnum, Clone, Debug)]
-enum HubLogLevel {
-    Debug,
-    Info,
-    Warn,
-    Error,
-}
-
-impl fmt::Display for HubLogLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let level = match self {
-            HubLogLevel::Debug => "debug",
-            HubLogLevel::Info => "info",
-            HubLogLevel::Warn => "warn",
-            HubLogLevel::Error => "error",
-        };
-        f.write_str(level)
-    }
-}
-
 #[derive(Debug, Clone, Default, Args)]
 struct HubLocatorArgs {
     #[arg(long, value_name = "URL|PATH")]
@@ -1327,142 +1213,6 @@ impl HubLocatorArgs {
             hub_name: None,
         }
     }
-}
-
-#[derive(Args, Clone)]
-struct HubStartArgs {
-    #[arg(long, value_parser = clap::value_parser!(SocketAddr))]
-    listen: SocketAddr,
-    #[arg(long)]
-    data_dir: PathBuf,
-    #[arg(long)]
-    config: Option<PathBuf>,
-    #[arg(long, value_name = "HEX32")]
-    profile_id: Option<String>,
-    #[arg(long)]
-    foreground: bool,
-    #[arg(long, value_enum, value_name = "LEVEL")]
-    log_level: Option<HubLogLevel>,
-    /// Require proof-of-work from clients before accepting submissions.
-    #[arg(long, value_name = "BITS")]
-    pow_difficulty: Option<u8>,
-    /// Enable non-core tooling endpoints (health, metrics, admission helpers).
-    #[arg(long = "enable-tooling")]
-    enable_tooling: bool,
-}
-
-#[derive(Args)]
-struct HubStopArgs {
-    #[arg(long)]
-    data_dir: PathBuf,
-}
-
-#[derive(Args)]
-struct HubStatusArgs {
-    #[command(flatten)]
-    hub: HubLocatorArgs,
-}
-
-#[derive(Args)]
-struct HubKeyArgs {
-    #[command(flatten)]
-    hub: HubLocatorArgs,
-}
-
-#[derive(Args)]
-struct HubVerifyRotationArgs {
-    #[arg(long)]
-    checkpoint: PathBuf,
-    #[arg(long, value_name = "OLD_HEX32")]
-    old_key: String,
-    #[arg(long, value_name = "NEW_HEX32")]
-    new_key: String,
-}
-
-#[derive(Args)]
-struct HubHealthArgs {
-    #[command(flatten)]
-    hub: HubLocatorArgs,
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Args)]
-struct HubMetricsArgs {
-    #[command(flatten)]
-    hub: HubLocatorArgs,
-    #[arg(long)]
-    raw: bool,
-}
-
-#[derive(Args)]
-struct HubProfileArgs {
-    #[command(flatten)]
-    hub: HubLocatorArgs,
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Args)]
-struct HubRoleArgs {
-    #[command(flatten)]
-    hub: HubLocatorArgs,
-    #[arg(long, value_name = "HEX32")]
-    realm: Option<String>,
-    #[arg(long)]
-    stream: Option<String>,
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Args)]
-struct HubKexPolicyArgs {
-    #[command(flatten)]
-    hub: HubLocatorArgs,
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Args)]
-struct HubAdmissionArgs {
-    #[command(flatten)]
-    hub: HubLocatorArgs,
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Args)]
-struct HubAdmissionLogArgs {
-    #[command(flatten)]
-    hub: HubLocatorArgs,
-    #[arg(long)]
-    limit: Option<u64>,
-    #[arg(long)]
-    codes: Option<String>,
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Args)]
-struct HubCheckpointLatestArgs {
-    #[command(flatten)]
-    hub: HubLocatorArgs,
-}
-
-#[derive(Args)]
-struct HubCheckpointRangeArgs {
-    #[command(flatten)]
-    hub: HubLocatorArgs,
-    #[arg(long, value_name = "EPOCH")]
-    from_epoch: Option<u64>,
-    #[arg(long, value_name = "EPOCH")]
-    to_epoch: Option<u64>,
-}
-
-#[derive(Args)]
-struct HubTlsInfoArgs {
-    #[command(flatten)]
-    hub: HubLocatorArgs,
 }
 
 #[derive(Args)]
@@ -1703,56 +1453,6 @@ struct AttachmentVerifyArgs {
     file: PathBuf,
     #[arg(long)]
     index: u64,
-}
-
-#[derive(Args)]
-struct CapIssueArgs {
-    #[arg(long)]
-    issuer: PathBuf,
-    #[arg(long)]
-    subject: PathBuf,
-    #[arg(long)]
-    stream: String,
-    #[arg(long)]
-    ttl: u64,
-    #[arg(long)]
-    rate: Option<String>,
-    #[arg(long)]
-    out: PathBuf,
-}
-
-#[derive(Args)]
-struct CapAuthorizeArgs {
-    #[command(flatten)]
-    hub: HubLocatorArgs,
-    #[arg(long)]
-    cap: PathBuf,
-}
-
-#[derive(Args)]
-struct CapStatusArgs {
-    #[command(flatten)]
-    hub: HubLocatorArgs,
-    #[arg(long)]
-    cap: PathBuf,
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Args)]
-struct CapRevocationsArgs {
-    #[command(flatten)]
-    hub: HubLocatorArgs,
-    #[arg(long, value_enum)]
-    kind: Option<RevocationKindValue>,
-    #[arg(long)]
-    since: Option<u64>,
-    #[arg(long)]
-    active_only: bool,
-    #[arg(long)]
-    limit: Option<u64>,
-    #[arg(long)]
-    json: bool,
 }
 
 #[derive(Args)]
@@ -3429,7 +3129,7 @@ async fn run_cli_async(cli: Cli) -> Result<()> {
             EnvCommand::Show(args) => handle_env_show(args).await,
         },
         #[cfg(feature = "kube")]
-        Command::Kube(cmd) => kube_commands::handle_kube_command_wrapper(cmd).await,
+        Command::Kube(cmd) => kube::handle_kube_command_wrapper(cmd).await,
         Command::Audit(cmd) => match cmd {
             AuditCommand::Queries(args) => handle_audit_queries(args).await,
             AuditCommand::Summary(args) => handle_audit_summary(args).await,
@@ -3502,6 +3202,7 @@ fn classify_error(err: &anyhow::Error) -> ErrorClassification {
     if error_chain_contains::<CliUsageError>(err) {
         return ErrorClassification::new(CliExitKind::Usage);
     }
+    #[cfg(feature = "selftest")]
     if error_chain_contains::<SelftestFailure>(err) {
         return ErrorClassification::new(CliExitKind::Selftest);
     }
@@ -9586,6 +9287,7 @@ async fn handle_retention_show(args: RetentionShowArgs) -> Result<()> {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(feature = "selftest")]
 enum SelftestSuite {
     Core,
     Props,
@@ -9600,6 +9302,7 @@ enum SelftestSuite {
     PlusPlus,
 }
 
+#[cfg(feature = "selftest")]
 impl SelftestSuite {
     fn name(self) -> &'static str {
         match self {
@@ -9621,10 +9324,12 @@ impl SelftestSuite {
 const SELFTEST_STUB_ENV: &str = "VEEN_SELFTEST_STUB";
 const SELFTEST_STUB_FILE_ENV: &str = "VEEN_SELFTEST_STUB_FILE";
 
+#[cfg(feature = "selftest")]
 fn selftest_stub_enabled() -> bool {
     env::var_os(SELFTEST_STUB_ENV).is_some()
 }
 
+#[cfg(feature = "selftest")]
 fn record_selftest_stub_marker(suite: SelftestSuite) -> Result<()> {
     if selftest_stub_enabled() {
         let name = suite.name();
@@ -9641,6 +9346,7 @@ fn record_selftest_stub_marker(suite: SelftestSuite) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "selftest")]
 fn emit_selftest_report(suite: SelftestSuite, report: &veen_selftest::SelftestReport) {
     println!();
     println!("self-test suite {} report:", suite.name());
@@ -9967,6 +9673,7 @@ async fn handle_audit_enforce_check(args: AuditEnforceCheckArgs) -> Result<()> {
     }
 }
 
+#[cfg(feature = "selftest")]
 fn handle_selftest_stub(suite: SelftestSuite) -> Result<bool> {
     if selftest_stub_enabled() {
         record_selftest_stub_marker(suite)?;
@@ -10441,6 +10148,7 @@ fn prefix_range_end(prefix: &str) -> String {
     end
 }
 
+#[cfg(feature = "selftest")]
 async fn handle_selftest_core() -> Result<()> {
     if handle_selftest_stub(SelftestSuite::Core)? {
         return Ok(());
@@ -10469,6 +10177,7 @@ async fn handle_selftest_core() -> Result<()> {
     }
 }
 
+#[cfg(feature = "selftest")]
 async fn handle_selftest_props() -> Result<()> {
     if handle_selftest_stub(SelftestSuite::Props)? {
         return Ok(());
@@ -10492,6 +10201,7 @@ async fn handle_selftest_props() -> Result<()> {
     }
 }
 
+#[cfg(feature = "selftest")]
 async fn handle_selftest_fuzz() -> Result<()> {
     if handle_selftest_stub(SelftestSuite::Fuzz)? {
         return Ok(());
@@ -10515,6 +10225,7 @@ async fn handle_selftest_fuzz() -> Result<()> {
     }
 }
 
+#[cfg(feature = "selftest")]
 async fn handle_selftest_all() -> Result<()> {
     if handle_selftest_stub(SelftestSuite::All)? {
         return Ok(());
@@ -10538,6 +10249,7 @@ async fn handle_selftest_all() -> Result<()> {
     }
 }
 
+#[cfg(feature = "selftest")]
 async fn handle_selftest_federated() -> Result<()> {
     if handle_selftest_stub(SelftestSuite::Federated)? {
         return Ok(());
@@ -10561,6 +10273,7 @@ async fn handle_selftest_federated() -> Result<()> {
     }
 }
 
+#[cfg(feature = "selftest")]
 async fn handle_selftest_kex1() -> Result<()> {
     if handle_selftest_stub(SelftestSuite::Kex1)? {
         return Ok(());
@@ -10584,6 +10297,7 @@ async fn handle_selftest_kex1() -> Result<()> {
     }
 }
 
+#[cfg(feature = "selftest")]
 async fn handle_selftest_hardened() -> Result<()> {
     if handle_selftest_stub(SelftestSuite::Hardened)? {
         return Ok(());
@@ -10607,6 +10321,7 @@ async fn handle_selftest_hardened() -> Result<()> {
     }
 }
 
+#[cfg(feature = "selftest")]
 async fn handle_selftest_meta() -> Result<()> {
     if handle_selftest_stub(SelftestSuite::Meta)? {
         return Ok(());
@@ -10630,6 +10345,7 @@ async fn handle_selftest_meta() -> Result<()> {
     }
 }
 
+#[cfg(feature = "selftest")]
 async fn handle_selftest_recorder() -> Result<()> {
     if handle_selftest_stub(SelftestSuite::Recorder)? {
         return Ok(());
@@ -10653,6 +10369,7 @@ async fn handle_selftest_recorder() -> Result<()> {
     }
 }
 
+#[cfg(feature = "selftest")]
 async fn handle_selftest_plus() -> Result<()> {
     record_selftest_stub_marker(SelftestSuite::Plus)?;
     println!("running VEEN plus self-tests...");
@@ -10702,6 +10419,7 @@ async fn handle_selftest_plus() -> Result<()> {
     Err(anyhow::Error::new(SelftestFailure::new(err)))
 }
 
+#[cfg(feature = "selftest")]
 async fn handle_selftest_plus_plus() -> Result<()> {
     record_selftest_stub_marker(SelftestSuite::PlusPlus)?;
     println!("running VEEN plus-plus self-tests...");

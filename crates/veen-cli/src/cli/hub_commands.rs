@@ -2,7 +2,7 @@ use super::{
     handle_hub_admission, handle_hub_admission_log, handle_hub_checkpoint_latest,
     handle_hub_checkpoint_range, handle_hub_health, handle_hub_kex_policy, handle_hub_key,
     handle_hub_metrics, handle_hub_profile, handle_hub_role, handle_hub_start, handle_hub_status,
-    handle_hub_stop, handle_hub_tls_info, handle_hub_verify_rotation, HubCommand, Result,
+    handle_hub_stop, handle_hub_tls_info, handle_hub_verify_rotation, hub::HubCommand, Result,
 };
 
 pub(crate) async fn handle_hub_command(cmd: HubCommand) -> Result<()> {
