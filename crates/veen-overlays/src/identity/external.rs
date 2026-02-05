@@ -275,4 +275,135 @@ mod tests {
 
         assert_eq!(dir.len(), 1);
     }
+
+    #[test]
+    fn record_has_subject_with_ctx_or_org() {
+        let realm = RealmId::derive("realm");
+        let ctx = ContextId::new([0x31; 32]);
+        let org = OrgId::new([0x32; 32]);
+
+        let record_ctx = ExternalLinkRecord {
+            realm_id: realm,
+            ctx_id: Some(ctx),
+            org_id: None,
+            provider: "github".into(),
+            external_sub: "alice".into(),
+            attributes: None,
+            ts: 1,
+        };
+        assert!(record_ctx.has_subject());
+
+        let record_org = ExternalLinkRecord {
+            realm_id: realm,
+            ctx_id: None,
+            org_id: Some(org),
+            provider: "google".into(),
+            external_sub: "bob".into(),
+            attributes: None,
+            ts: 2,
+        };
+        assert!(record_org.has_subject());
+    }
+
+    #[test]
+    fn directory_len_and_clear_track_entries() {
+        let realm = RealmId::derive("realm");
+        let ctx = ContextId::new([0x41; 32]);
+        let mut dir = ExternalLinkDirectory::new();
+
+        assert!(dir.is_empty());
+
+        let record = ExternalLinkRecord {
+            realm_id: realm,
+            ctx_id: Some(ctx),
+            org_id: None,
+            provider: "github".into(),
+            external_sub: "alice".into(),
+            attributes: None,
+            ts: 1,
+        };
+
+        dir.upsert(record.clone(), 1);
+        dir.upsert(record, 2);
+        assert_eq!(dir.len(), 1);
+        assert!(!dir.is_empty());
+
+        dir.clear();
+        assert_eq!(dir.len(), 0);
+        assert!(dir.is_empty());
+    }
+
+    #[test]
+    fn directory_records_iterates_across_providers() {
+        let realm = RealmId::derive("realm");
+        let ctx = ContextId::new([0x51; 32]);
+        let org = OrgId::new([0x52; 32]);
+        let mut dir = ExternalLinkDirectory::new();
+
+        dir.upsert(
+            ExternalLinkRecord {
+                realm_id: realm,
+                ctx_id: Some(ctx),
+                org_id: None,
+                provider: "github".into(),
+                external_sub: "alice".into(),
+                attributes: None,
+                ts: 10,
+            },
+            1,
+        );
+        dir.upsert(
+            ExternalLinkRecord {
+                realm_id: realm,
+                ctx_id: None,
+                org_id: Some(org),
+                provider: "google".into(),
+                external_sub: "bob".into(),
+                attributes: None,
+                ts: 11,
+            },
+            1,
+        );
+
+        let mut subjects: Vec<_> = dir
+            .records()
+            .map(|record| (record.provider.as_str(), record.external_sub.as_str()))
+            .collect();
+        subjects.sort_unstable();
+
+        assert_eq!(subjects, vec![("github", "alice"), ("google", "bob")]);
+    }
+
+    #[test]
+    fn directory_tie_breaker_uses_stream_seq() {
+        let realm = RealmId::derive("realm");
+        let ctx_a = ContextId::new([0x61; 32]);
+        let ctx_b = ContextId::new([0x62; 32]);
+        let mut dir = ExternalLinkDirectory::new();
+
+        let record_a = ExternalLinkRecord {
+            realm_id: realm,
+            ctx_id: Some(ctx_a),
+            org_id: None,
+            provider: "github".into(),
+            external_sub: "alice".into(),
+            attributes: None,
+            ts: 10,
+        };
+        let record_b = ExternalLinkRecord {
+            realm_id: realm,
+            ctx_id: Some(ctx_b),
+            org_id: None,
+            provider: "github".into(),
+            external_sub: "alice".into(),
+            attributes: None,
+            ts: 10,
+        };
+
+        dir.upsert(record_a, 1);
+        dir.upsert(record_b.clone(), 2);
+
+        let resolved = dir.get("github", "alice").expect("link");
+        assert_eq!(resolved.ctx_id, record_b.ctx_id);
+    }
 }
