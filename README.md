@@ -60,9 +60,10 @@ the VEEN protocol stack:
 
 The current release targets the v0.0.1 protocol suite described in the SSOT
 specification document [`doc/spec.md`](doc/spec.md). Operational goals are
-captured in [`doc/CLI-GOALS-1.txt`](doc/CLI-GOALS-1.txt) through
-[`doc/CLI-GOALS-3.txt`](doc/CLI-GOALS-3.txt) and
-[`doc/OS-GOALS.txt`](doc/OS-GOALS.txt). Compatibility and minimum supported
+captured in the legacy reference ([CLI-GOALS-1](doc/reference.md#cli-goals-1txt)
+through [CLI-GOALS-3](doc/reference.md#cli-goals-3txt) and
+[OS-GOALS](doc/reference.md#os-goalstxt)). Legacy documents were consolidated
+into [`doc/reference.md`](doc/reference.md). Compatibility and minimum supported
 toolchain versions are pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
 
 ## Purpose and guaranteed properties
@@ -106,7 +107,10 @@ that line while continuing to load the remaining entries.
 
 The v0.0.1 protocol release focuses on verifiable message delivery and overlay
 support. Experimental features and incubating overlays are added behind feature
-flags or scoped subcommands in the CLI. See [`doc/Design-Philosophy.txt`](doc/Design-Philosophy.txt)
+flags or scoped subcommands in the CLI. See the
+[Design-Philosophy section](doc/reference.md#design-philosophytxt) in the legacy
+reference (legacy documents were consolidated into
+[`doc/reference.md`](doc/reference.md))
 for the guiding principles that shape stability decisions.
 
 ## Positioning and common use cases
@@ -377,7 +381,7 @@ audit flows without duplicating connection details.
 
 `veen kube` renders deterministic manifests and applies them directly through
 the Kubernetes API. The subcommands follow
-[`doc/CLI-GOALS-3.txt`](doc/CLI-GOALS-3.txt) (Namespace/ServiceAccount/RBAC/
+[CLI-GOALS-3](doc/reference.md#cli-goals-3txt) (Namespace/ServiceAccount/RBAC/
 ConfigMap/Secret/Deployment/Service) and accept `--json` when structured output
 is preferred.
 
@@ -525,7 +529,9 @@ Job fails to complete successfully.
 
 For an end-to-end catalogue of VEEN workflows—including container/Kubernetes
 operations, PoW handling, snapshot verification, environment descriptors, and
-commonly used helper commands—see [`doc/USAGE.md`](doc/USAGE.md).
+commonly used helper commands—see the [USAGE section](doc/reference.md#usagemd)
+in the legacy reference (legacy documents were consolidated into
+[`doc/reference.md`](doc/reference.md)).
 
 ## Manual installation
 
@@ -612,9 +618,11 @@ them automatically on success or failure.
 
 ## Further reading
 
-- [`doc/CLI-GOALS-1.txt`](doc/CLI-GOALS-1.txt),
-  [`doc/CLI-GOALS-2.txt`](doc/CLI-GOALS-2.txt), and
-  [`doc/CLI-GOALS-3.txt`](doc/CLI-GOALS-3.txt) – operational contract for the CLI
-- [`doc/OS-GOALS.txt`](doc/OS-GOALS.txt) – host operating system expectations
-- [`doc/Design-Philosophy.txt`](doc/Design-Philosophy.txt) – guiding principles
+- [CLI-GOALS-1](doc/reference.md#cli-goals-1txt),
+  [CLI-GOALS-2](doc/reference.md#cli-goals-2txt), and
+  [CLI-GOALS-3](doc/reference.md#cli-goals-3txt) – operational contract for the CLI
+- [OS-GOALS](doc/reference.md#os-goalstxt) – host operating system expectations
+- [Design-Philosophy](doc/reference.md#design-philosophytxt) – guiding principles
 - [`doc/spec.md`](doc/spec.md) – SSOT for protocol and overlay specifications.
+
+Legacy documents were consolidated into [`doc/reference.md`](doc/reference.md).
