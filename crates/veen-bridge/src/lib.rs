@@ -196,7 +196,9 @@ impl BridgeRuntime {
         let mut next_seq = 1;
         for message in replica_state.messages {
             let leaf = leaf_hash_for(&message)?;
-            let (seq, _) = mmr.append(leaf);
+            let (seq, _) = mmr
+                .append(leaf)
+                .with_context(|| format!("appending leaf to replica MMR for stream {stream}"))?;
             if seq != message.seq {
                 bail!(
                     "replica stream {} has inconsistent sequence numbers",
@@ -225,7 +227,9 @@ impl BridgeRuntime {
 
         let leaf = leaf_hash_for(&message)?;
         let mut preview_mmr = entry.mmr.clone();
-        let (_, mmr_root) = preview_mmr.append(leaf);
+        let (_, mmr_root) = preview_mmr
+            .append(leaf)
+            .with_context(|| format!("previewing MMR root for stream {stream}"))?;
         let expected_root_hex = hex::encode(mmr_root.as_bytes());
 
         let request = BridgeIngestRequest {
@@ -549,7 +553,7 @@ mod tests {
 
         let leaf = leaf_hash_for(&message)?;
         let mut mmr = Mmr::new();
-        let (_, root) = mmr.append(leaf);
+        let (_, root) = mmr.append(leaf).context("building expected MMR root")?;
         let expected_root_hex = hex::encode(root.as_bytes());
 
         let config = BridgeConfig {
@@ -610,7 +614,7 @@ mod tests {
 
         let leaf = leaf_hash_for(&message)?;
         let mut mmr = Mmr::new();
-        let (_, root) = mmr.append(leaf);
+        let (_, root) = mmr.append(leaf).context("building expected MMR root")?;
         let expected_root_hex = hex::encode(root.as_bytes());
 
         let config = BridgeConfig {

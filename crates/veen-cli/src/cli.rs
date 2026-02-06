@@ -4942,7 +4942,9 @@ fn compute_local_stream_receipt(stream_state: &HubStreamState, seq: u64) -> Resu
     let mut receipt = None;
     for message in &stream_state.messages {
         let leaf = compute_message_leaf_hash(message)?;
-        let (_, root) = mmr.append(leaf);
+        let (_, root) = mmr
+            .append(leaf)
+            .with_context(|| format!("appending leaf for stream receipt seq {}", message.seq))?;
         if message.seq == seq {
             receipt = Some(StreamReceipt {
                 stream_seq: seq,
@@ -5361,7 +5363,9 @@ async fn handle_stream(args: StreamArgs) -> Result<()> {
                         }
                     }
                     let leaf = compute_message_leaf_hash(message)?;
-                    let (_, root, mmr_proof) = mmr.append_with_proof(leaf);
+                    let (_, root, mmr_proof) = mmr.append_with_proof(leaf).with_context(|| {
+                        format!("appending leaf to MMR for stream {}", args.stream)
+                    })?;
                     if message.seq >= args.from {
                         emitted = true;
                         print_stream_message(message);
@@ -8825,7 +8829,9 @@ where
             break;
         }
         let leaf = compute_message_leaf_hash(message)?;
-        let (seq, root) = mmr.append(leaf);
+        let (seq, root) = mmr
+            .append(leaf)
+            .with_context(|| format!("appending leaf for stream seq {}", message.seq))?;
         last_seq = seq;
         last_root = Some(root);
     }
@@ -10689,7 +10695,12 @@ async fn compute_local_stream_mmr_root(data_dir: &Path, stream: &str) -> Result<
     let mut mmr = Mmr::new();
     for message in &state.messages {
         let leaf = compute_message_leaf_hash(message)?;
-        mmr.append(leaf);
+        mmr.append(leaf).with_context(|| {
+            format!(
+                "appending leaf for stream {} while computing local MMR root",
+                stream
+            )
+        })?;
     }
     Ok(mmr.root().map(|root| hex::encode(root.as_bytes())))
 }
@@ -12778,7 +12789,9 @@ mod tests {
         let mut expected = None;
         for message in &messages {
             let leaf = compute_message_leaf_hash(message)?;
-            let (_, root) = manual.append(leaf);
+            let (_, root) = manual
+                .append(leaf)
+                .context("appending leaf for manual MMR root")?;
             expected = Some(root);
         }
 
