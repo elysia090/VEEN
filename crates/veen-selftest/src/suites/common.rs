@@ -71,7 +71,9 @@ impl SampleData {
         };
 
         let mut mmr = veen_core::Mmr::new();
-        let (stream_seq, mmr_root) = mmr.append(msg.leaf_hash());
+        let (stream_seq, mmr_root) = mmr
+            .append(msg.leaf_hash())
+            .context("appending leaf hash to MMR for sample data")?;
 
         let mut receipt = Receipt {
             ver: veen_core::wire::receipt::RECEIPT_VERSION,
@@ -166,7 +168,9 @@ impl SequenceHarness {
         msg.sig = veen_core::Signature64::from(signature.to_bytes());
 
         let leaf = msg.leaf_hash();
-        let (stream_seq, mmr_root) = mmr.append(leaf);
+        let (stream_seq, mmr_root) = mmr
+            .append(leaf)
+            .context("appending leaf hash to harness MMR")?;
 
         let mut receipt = Receipt {
             ver: veen_core::wire::receipt::RECEIPT_VERSION,

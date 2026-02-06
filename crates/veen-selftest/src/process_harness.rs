@@ -1568,7 +1568,9 @@ impl IntegrationHarness {
         for remote in &remote_messages {
             let leaf = message_leaf_hash(&remote.message)
                 .context("computing leaf hash for streamed message")?;
-            let (seq, root) = recovery_mmr.append(leaf);
+            let (seq, root) = recovery_mmr
+                .append(leaf)
+                .context("appending leaf to recovery MMR")?;
             ensure!(
                 seq == remote.message.seq,
                 "stream {} sequence mismatch while rebuilding MMR",
@@ -2707,7 +2709,9 @@ async fn compute_stream_mmr_root(data_dir: &Path, stream: &str) -> Result<Option
     let mut mmr = Mmr::new();
     for message in &state.messages {
         let leaf = message_leaf_hash(message)?;
-        let (seq, _) = mmr.append(leaf);
+        let (seq, _) = mmr
+            .append(leaf)
+            .with_context(|| format!("appending leaf for stream {stream}"))?;
         ensure!(
             seq == message.seq,
             "stream {stream} sequence mismatch while recomputing MMR"

@@ -146,7 +146,12 @@ impl StreamRuntime {
         let mut message_index = HashMap::with_capacity(state.messages.len());
         let mut leaf_index = HashSet::with_capacity(state.messages.len());
         for (idx, (message, leaf)) in state.messages.iter().zip(leaf_hashes.iter()).enumerate() {
-            mmr.append(*leaf);
+            mmr.append(*leaf).with_context(|| {
+                format!(
+                    "appending leaf to stream MMR for {} at index {idx}",
+                    message.seq
+                )
+            })?;
             message_index.insert(message.seq, idx);
             leaf_index.insert(*leaf);
         }
@@ -690,7 +695,8 @@ impl HubPipeline {
             }));
         }
         let (computed_seq, mmr_root, proof) = tracing::info_span!("hub_submit.mmr_append")
-            .in_scope(|| stream_runtime.mmr.append_with_proof(leaf));
+            .in_scope(|| stream_runtime.mmr.append_with_proof(leaf))
+            .with_context(|| format!("appending leaf to MMR for stream {}", stream))?;
         debug_assert_eq!(computed_seq, seq, "stream mmr seq must match message seq");
         stream_runtime.insert_message_with_leaf(stored_message.clone(), leaf);
         let mmr_root_hex = hex::encode(mmr_root.as_bytes());
@@ -877,7 +883,10 @@ impl HubPipeline {
         }
 
         let leaf = leaf_hash_for(&message)?;
-        let (_, mmr_root, proof) = stream_runtime.mmr.append_with_proof(leaf);
+        let (_, mmr_root, proof) = stream_runtime
+            .mmr
+            .append_with_proof(leaf)
+            .with_context(|| format!("appending leaf to MMR for stream {}", stream))?;
         let computed_root = hex::encode(mmr_root.as_bytes());
         if !expected_mmr_root.is_empty() && expected_mmr_root != computed_root {
             bail!(
@@ -3322,7 +3331,9 @@ async fn load_stream_state_from_index(
                     bundle_path.display()
                 );
             }
-            let (seq, root) = mmr.append(leaf);
+            let (seq, root) = mmr
+                .append(leaf)
+                .with_context(|| format!("rebuilding MMR for {}", bundle_path.display()))?;
             ensure!(
                 seq == message.seq,
                 "stored message seq {} diverges from mmr seq {} for {}",
@@ -3351,7 +3362,9 @@ async fn load_stream_state_from_index(
                 proof,
             });
         } else {
-            let (seq, root, proof) = mmr.append_with_proof(leaf);
+            let (seq, root, proof) = mmr
+                .append_with_proof(leaf)
+                .with_context(|| format!("building MMR proof for {}", bundle_path.display()))?;
             ensure!(
                 seq == message.seq,
                 "legacy message seq {} diverges from mmr seq {} for {}",
@@ -3448,7 +3461,9 @@ fn build_proven_messages(
     let mut leaf_hashes = Vec::with_capacity(messages.len());
     for message in messages {
         let leaf = leaf_hash_for(message)?;
-        let (seq, root, proof) = mmr.append_with_proof(leaf);
+        let (seq, root, proof) = mmr
+            .append_with_proof(leaf)
+            .context("building MMR proof for stored messages")?;
         ensure!(
             seq == message.seq,
             "stream message seq {} diverges from mmr seq {}",

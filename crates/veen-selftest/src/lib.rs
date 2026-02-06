@@ -649,8 +649,10 @@ fn check_mmr_index_consistency_under_resync() -> Result<()> {
     }
 
     let mut rebuilt = Mmr::new();
-    for (index, leaf) in leaves.iter().enumerate() {
-        let (stream_seq, _) = rebuilt.append(*leaf);
+    for (index, leaf) in leaves.into_iter().enumerate() {
+        let (stream_seq, _) = rebuilt
+            .append(leaf)
+            .with_context(|| format!("rebuilding MMR at index {index}"))?;
         ensure!(
             stream_seq == (index as u64) + 1,
             "rebuilt MMR stream_seq must match stored leaf index",
@@ -889,7 +891,9 @@ fn check_mmr_fold_invariance() -> Result<()> {
             let mut mmr = Mmr::new();
             let (left, right) = leaves.split_at(split);
             for leaf in left.iter().chain(right.iter()) {
-                mmr.append(*leaf);
+                mmr.append(*leaf).with_context(|| {
+                    format!("appending leaf during fold check len={len} split={split}")
+                })?;
             }
             ensure!(
                 mmr.root() == Some(reference_root),
@@ -904,7 +908,9 @@ fn check_mmr_fold_invariance() -> Result<()> {
 fn mmr_root_for(leaves: &[LeafHash]) -> Option<MmrRoot> {
     let mut mmr = Mmr::new();
     for leaf in leaves {
-        mmr.append(*leaf);
+        if mmr.append(*leaf).is_err() {
+            return None;
+        }
     }
     mmr.root()
 }
