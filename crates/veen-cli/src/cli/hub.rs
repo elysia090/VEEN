@@ -70,135 +70,135 @@ impl fmt::Display for HubLogLevel {
 #[derive(Args, Clone)]
 pub(crate) struct HubStartArgs {
     #[arg(long, value_parser = clap::value_parser!(SocketAddr))]
-    listen: SocketAddr,
+    pub(crate) listen: SocketAddr,
     #[arg(long)]
-    data_dir: PathBuf,
+    pub(crate) data_dir: PathBuf,
     #[arg(long)]
-    config: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
     #[arg(long, value_name = "HEX32")]
-    profile_id: Option<String>,
+    pub(crate) profile_id: Option<String>,
     #[arg(long)]
-    foreground: bool,
+    pub(crate) foreground: bool,
     #[arg(long, value_enum, value_name = "LEVEL")]
-    log_level: Option<HubLogLevel>,
+    pub(crate) log_level: Option<HubLogLevel>,
     /// Require proof-of-work from clients before accepting submissions.
     #[arg(long, value_name = "BITS")]
-    pow_difficulty: Option<u8>,
+    pub(crate) pow_difficulty: Option<u8>,
     /// Enable non-core tooling endpoints (health, metrics, admission helpers).
     #[arg(long = "enable-tooling")]
-    enable_tooling: bool,
+    pub(crate) enable_tooling: bool,
 }
 
 #[derive(Args)]
 pub(crate) struct HubStopArgs {
     #[arg(long)]
-    data_dir: PathBuf,
+    pub(crate) data_dir: PathBuf,
 }
 
 #[derive(Args)]
 pub(crate) struct HubStatusArgs {
     #[command(flatten)]
-    hub: HubLocatorArgs,
+    pub(crate) hub: HubLocatorArgs,
 }
 
 #[derive(Args)]
 pub(crate) struct HubKeyArgs {
     #[command(flatten)]
-    hub: HubLocatorArgs,
+    pub(crate) hub: HubLocatorArgs,
 }
 
 #[derive(Args)]
 pub(crate) struct HubVerifyRotationArgs {
     #[arg(long)]
-    checkpoint: PathBuf,
+    pub(crate) checkpoint: PathBuf,
     #[arg(long, value_name = "OLD_HEX32")]
-    old_key: String,
+    pub(crate) old_key: String,
     #[arg(long, value_name = "NEW_HEX32")]
-    new_key: String,
+    pub(crate) new_key: String,
 }
 
 #[derive(Args)]
 pub(crate) struct HubHealthArgs {
     #[command(flatten)]
-    hub: HubLocatorArgs,
+    pub(crate) hub: HubLocatorArgs,
     #[arg(long)]
-    json: bool,
+    pub(crate) json: bool,
 }
 
 #[derive(Args)]
 pub(crate) struct HubMetricsArgs {
     #[command(flatten)]
-    hub: HubLocatorArgs,
+    pub(crate) hub: HubLocatorArgs,
     #[arg(long)]
-    raw: bool,
+    pub(crate) raw: bool,
 }
 
 #[derive(Args)]
 pub(crate) struct HubProfileArgs {
     #[command(flatten)]
-    hub: HubLocatorArgs,
+    pub(crate) hub: HubLocatorArgs,
     #[arg(long)]
-    json: bool,
+    pub(crate) json: bool,
 }
 
 #[derive(Args)]
 pub(crate) struct HubRoleArgs {
     #[command(flatten)]
-    hub: HubLocatorArgs,
+    pub(crate) hub: HubLocatorArgs,
     #[arg(long, value_name = "HEX32")]
-    realm: Option<String>,
+    pub(crate) realm: Option<String>,
     #[arg(long)]
-    stream: Option<String>,
+    pub(crate) stream: Option<String>,
     #[arg(long)]
-    json: bool,
+    pub(crate) json: bool,
 }
 
 #[derive(Args)]
 pub(crate) struct HubKexPolicyArgs {
     #[command(flatten)]
-    hub: HubLocatorArgs,
+    pub(crate) hub: HubLocatorArgs,
     #[arg(long)]
-    json: bool,
+    pub(crate) json: bool,
 }
 
 #[derive(Args)]
 pub(crate) struct HubAdmissionArgs {
     #[command(flatten)]
-    hub: HubLocatorArgs,
+    pub(crate) hub: HubLocatorArgs,
     #[arg(long)]
-    json: bool,
+    pub(crate) json: bool,
 }
 
 #[derive(Args)]
 pub(crate) struct HubAdmissionLogArgs {
     #[command(flatten)]
-    hub: HubLocatorArgs,
+    pub(crate) hub: HubLocatorArgs,
     #[arg(long)]
-    limit: Option<u64>,
+    pub(crate) limit: Option<u64>,
     #[arg(long)]
-    codes: Option<String>,
+    pub(crate) codes: Option<String>,
     #[arg(long)]
-    json: bool,
+    pub(crate) json: bool,
 }
 
 #[derive(Args)]
 pub(crate) struct HubCheckpointLatestArgs {
     #[command(flatten)]
-    hub: HubLocatorArgs,
+    pub(crate) hub: HubLocatorArgs,
 }
 
 #[derive(Args)]
 pub(crate) struct HubCheckpointRangeArgs {
     #[command(flatten)]
-    hub: HubLocatorArgs,
+    pub(crate) hub: HubLocatorArgs,
     #[arg(long, value_name = "EPOCH")]
-    from_epoch: Option<u64>,
+    pub(crate) from_epoch: Option<u64>,
     #[arg(long, value_name = "EPOCH")]
-    to_epoch: Option<u64>,
+    pub(crate) to_epoch: Option<u64>,
 }
 
 #[derive(Args)]
 pub(crate) struct HubTlsInfoArgs {
     #[command(flatten)]
-    hub: HubLocatorArgs,
+    pub(crate) hub: HubLocatorArgs,
 }

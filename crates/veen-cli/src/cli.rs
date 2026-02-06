@@ -34,9 +34,7 @@ use tokio::time::sleep;
 use tracing_subscriber::EnvFilter;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
-use self::cap::{
-    CapAuthorizeArgs, CapCommand, CapIssueArgs, CapRevocationsArgs, CapStatusArgs,
-};
+use self::cap::{CapAuthorizeArgs, CapCommand, CapIssueArgs, CapRevocationsArgs, CapStatusArgs};
 #[cfg(feature = "hub")]
 use self::hub::{
     HubAdmissionArgs, HubAdmissionLogArgs, HubCheckpointLatestArgs, HubCheckpointRangeArgs,
@@ -117,11 +115,11 @@ use veen_hub::pipeline::{
     SubmitResponse as RemoteSubmitResponse,
 };
 
-#[cfg(feature = "hub")]
-mod hub_commands;
 mod cap;
 #[cfg(feature = "hub")]
 mod hub;
+#[cfg(feature = "hub")]
+mod hub_commands;
 #[cfg(feature = "kube")]
 mod kube;
 #[cfg(feature = "selftest")]
