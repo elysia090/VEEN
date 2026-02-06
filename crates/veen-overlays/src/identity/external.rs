@@ -275,4 +275,211 @@ mod tests {
 
         assert_eq!(dir.len(), 1);
     }
+
+    #[test]
+    fn record_has_subject_with_ctx_or_org() {
+        let realm = RealmId::derive("realm");
+        let ctx = ContextId::new([0x31; 32]);
+        let org = OrgId::new([0x32; 32]);
+
+        let record_ctx = ExternalLinkRecord {
+            realm_id: realm,
+            ctx_id: Some(ctx),
+            org_id: None,
+            provider: "github".into(),
+            external_sub: "alice".into(),
+            attributes: None,
+            ts: 1,
+        };
+        assert!(record_ctx.has_subject());
+
+        let record_org = ExternalLinkRecord {
+            realm_id: realm,
+            ctx_id: None,
+            org_id: Some(org),
+            provider: "google".into(),
+            external_sub: "bob".into(),
+            attributes: None,
+            ts: 2,
+        };
+        assert!(record_org.has_subject());
+    }
+
+    #[test]
+    fn directory_len_and_clear_track_entries() {
+        let realm = RealmId::derive("realm");
+        let ctx = ContextId::new([0x41; 32]);
+        let mut dir = ExternalLinkDirectory::new();
+
+        assert!(dir.is_empty());
+
+        let record = ExternalLinkRecord {
+            realm_id: realm,
+            ctx_id: Some(ctx),
+            org_id: None,
+            provider: "github".into(),
+            external_sub: "alice".into(),
+            attributes: None,
+            ts: 1,
+        };
+
+        dir.upsert(record.clone(), 1);
+        dir.upsert(record, 2);
+        assert_eq!(dir.len(), 1);
+        assert!(!dir.is_empty());
+
+        dir.clear();
+        assert_eq!(dir.len(), 0);
+        assert!(dir.is_empty());
+    }
+
+    #[test]
+    fn directory_records_iterates_across_providers() {
+        let realm = RealmId::derive("realm");
+        let ctx = ContextId::new([0x51; 32]);
+        let org = OrgId::new([0x52; 32]);
+        let mut dir = ExternalLinkDirectory::new();
+
+        dir.upsert(
+            ExternalLinkRecord {
+                realm_id: realm,
+                ctx_id: Some(ctx),
+                org_id: None,
+                provider: "github".into(),
+                external_sub: "alice".into(),
+                attributes: None,
+                ts: 10,
+            },
+            1,
+        );
+        dir.upsert(
+            ExternalLinkRecord {
+                realm_id: realm,
+                ctx_id: None,
+                org_id: Some(org),
+                provider: "google".into(),
+                external_sub: "bob".into(),
+                attributes: None,
+                ts: 11,
+            },
+            1,
+        );
+
+        let mut subjects: Vec<_> = dir
+            .records()
+            .map(|record| (record.provider.as_str(), record.external_sub.as_str()))
+            .collect();
+        subjects.sort_unstable();
+
+        assert_eq!(subjects, vec![("github", "alice"), ("google", "bob")]);
+    }
+
+    #[test]
+    fn directory_tie_breaker_uses_stream_seq() {
+        let realm = RealmId::derive("realm");
+        let ctx_a = ContextId::new([0x61; 32]);
+        let ctx_b = ContextId::new([0x62; 32]);
+        let mut dir = ExternalLinkDirectory::new();
+
+        let record_a = ExternalLinkRecord {
+            realm_id: realm,
+            ctx_id: Some(ctx_a),
+            org_id: None,
+            provider: "github".into(),
+            external_sub: "alice".into(),
+            attributes: None,
+            ts: 10,
+        };
+        let record_b = ExternalLinkRecord {
+            realm_id: realm,
+            ctx_id: Some(ctx_b),
+            org_id: None,
+            provider: "github".into(),
+            external_sub: "alice".into(),
+            attributes: None,
+            ts: 10,
+        };
+
+        dir.upsert(record_a, 1);
+        dir.upsert(record_b.clone(), 2);
+
+        let resolved = dir.get("github", "alice").expect("link");
+        assert_eq!(resolved.ctx_id, record_b.ctx_id);
+    }
+
+    #[test]
+    fn directory_does_not_replace_with_lower_precedence() {
+        let realm = RealmId::derive("realm");
+        let ctx_a = ContextId::new([0x71; 32]);
+        let ctx_b = ContextId::new([0x72; 32]);
+        let mut dir = ExternalLinkDirectory::new();
+
+        let record_a = ExternalLinkRecord {
+            realm_id: realm,
+            ctx_id: Some(ctx_a),
+            org_id: None,
+            provider: "github".into(),
+            external_sub: "alice".into(),
+            attributes: None,
+            ts: 10,
+        };
+        let record_b = ExternalLinkRecord {
+            realm_id: realm,
+            ctx_id: Some(ctx_b),
+            org_id: None,
+            provider: "github".into(),
+            external_sub: "alice".into(),
+            attributes: None,
+            ts: 9,
+        };
+
+        dir.upsert(record_a.clone(), 1);
+        dir.upsert(record_b, 99);
+
+        let resolved = dir.get("github", "alice").expect("link");
+        assert_eq!(resolved.ctx_id, record_a.ctx_id);
+    }
+
+    #[test]
+    fn directory_get_returns_none_when_missing() {
+        let dir = ExternalLinkDirectory::new();
+        assert!(dir.get("github", "missing").is_none());
+    }
+
+    #[test]
+    fn record_deserializes_with_attributes_map() {
+        let realm = RealmId::derive("realm");
+        let ctx = ContextId::new([0x81; 32]);
+        let value = Value::Map(vec![
+            (
+                Value::Text("realm_id".into()),
+                Value::Bytes(realm.as_ref().to_vec()),
+            ),
+            (
+                Value::Text("ctx_id".into()),
+                Value::Bytes(ctx.as_ref().to_vec()),
+            ),
+            (Value::Text("provider".into()), Value::Text("github".into())),
+            (
+                Value::Text("external_sub".into()),
+                Value::Text("alice".into()),
+            ),
+            (
+                Value::Text("attributes".into()),
+                Value::Map(vec![(
+                    Value::Text("role".into()),
+                    Value::Text("owner".into()),
+                )]),
+            ),
+            (Value::Text("ts".into()), Value::Integer(5u8.into())),
+        ]);
+
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&value, &mut buf).expect("serialize value");
+        let record: ExternalLinkRecord = ciborium::de::from_reader(buf.as_slice()).expect("record");
+
+        assert_eq!(record.provider, "github");
+        assert_eq!(record.external_sub, "alice");
+        assert!(record.attributes.is_some());
+    }
 }

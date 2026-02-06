@@ -17,49 +17,49 @@ pub(crate) enum CapCommand {
 #[derive(Args)]
 pub(crate) struct CapIssueArgs {
     #[arg(long)]
-    issuer: PathBuf,
+    pub(crate) issuer: PathBuf,
     #[arg(long)]
-    subject: PathBuf,
+    pub(crate) subject: PathBuf,
     #[arg(long)]
-    stream: String,
+    pub(crate) stream: String,
     #[arg(long)]
-    ttl: u64,
+    pub(crate) ttl: u64,
     #[arg(long)]
-    rate: Option<String>,
+    pub(crate) rate: Option<String>,
     #[arg(long)]
-    out: PathBuf,
+    pub(crate) out: PathBuf,
 }
 
 #[derive(Args)]
 pub(crate) struct CapAuthorizeArgs {
     #[command(flatten)]
-    hub: HubLocatorArgs,
+    pub(crate) hub: HubLocatorArgs,
     #[arg(long)]
-    cap: PathBuf,
+    pub(crate) cap: PathBuf,
 }
 
 #[derive(Args)]
 pub(crate) struct CapStatusArgs {
     #[command(flatten)]
-    hub: HubLocatorArgs,
+    pub(crate) hub: HubLocatorArgs,
     #[arg(long)]
-    cap: PathBuf,
+    pub(crate) cap: PathBuf,
     #[arg(long)]
-    json: bool,
+    pub(crate) json: bool,
 }
 
 #[derive(Args)]
 pub(crate) struct CapRevocationsArgs {
     #[command(flatten)]
-    hub: HubLocatorArgs,
+    pub(crate) hub: HubLocatorArgs,
     #[arg(long, value_enum)]
-    kind: Option<RevocationKindValue>,
+    pub(crate) kind: Option<RevocationKindValue>,
     #[arg(long)]
-    since: Option<u64>,
+    pub(crate) since: Option<u64>,
     #[arg(long)]
-    active_only: bool,
+    pub(crate) active_only: bool,
     #[arg(long)]
-    limit: Option<u64>,
+    pub(crate) limit: Option<u64>,
     #[arg(long)]
-    json: bool,
+    pub(crate) json: bool,
 }
