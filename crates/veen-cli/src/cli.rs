@@ -11404,9 +11404,16 @@ mod tests {
                     let tx = tx.clone();
                     async move {
                         assert_eq!(req.uri().path(), path);
-                        let body = to_bytes(req.body_mut()).await.unwrap().to_vec();
-                        tx.send(body).await.unwrap();
-                        Ok::<_, Infallible>(
+                        let body = to_bytes(req.body_mut())
+                            .await
+                            .context("capture server failed to read request body")
+                            .map_err(|err| ProtocolError::new(err.to_string()))?
+                            .to_vec();
+                        tx.send(body)
+                            .await
+                            .context("capture server failed to forward request body")
+                            .map_err(|err| ProtocolError::new(err.to_string()))?;
+                        Ok::<_, anyhow::Error>(
                             HyperResponse::builder()
                                 .status(StatusCode::OK)
                                 .body(Body::from("null"))
@@ -11442,8 +11449,15 @@ mod tests {
                     async move {
                         assert_eq!(req.method(), Method::POST);
                         assert_eq!(req.uri().path(), "/v1/submit");
-                        let body = to_bytes(req.body_mut()).await.unwrap().to_vec();
-                        tx.send(body).await.unwrap();
+                        let body = to_bytes(req.body_mut())
+                            .await
+                            .context("submit capture server failed to read request body")
+                            .map_err(|err| ProtocolError::new(err.to_string()))?
+                            .to_vec();
+                        tx.send(body)
+                            .await
+                            .context("submit capture server failed to forward request body")
+                            .map_err(|err| ProtocolError::new(err.to_string()))?;
                         let response = RemoteSubmitResponse {
                             ver: DATA_PLANE_VERSION,
                             receipt: response.receipt.clone(),
@@ -11451,7 +11465,7 @@ mod tests {
                         };
                         let mut cbor = Vec::new();
                         ciborium::ser::into_writer(&response, &mut cbor).unwrap();
-                        Ok::<_, Infallible>(
+                        Ok::<_, anyhow::Error>(
                             HyperResponse::builder()
                                 .status(StatusCode::OK)
                                 .header("Content-Type", "application/cbor")
@@ -11649,7 +11663,7 @@ mod tests {
     }
 
     #[test]
-    fn hub_profile_output_matches_cli_goals() {
+    fn hub_profile_output_matches_cli_goals() -> anyhow::Result<()> {
         let features = RemoteHubProfileFeatures {
             core: true,
             fed1: true,
@@ -11689,16 +11703,19 @@ mod tests {
             &features,
             true,
         );
-        let value: Value = serde_json::from_str(&json).expect("valid json");
+        let value: Value = serde_json::from_str(&json)
+            .context("hub profile JSON output should be valid")
+            .map_err(|err| ProtocolError::new(err.to_string()))?;
         assert_eq!(value["version"], "veen-0.0.1+");
         assert_eq!(value["profile_id"], "abcd");
         assert_eq!(value["hub_id"], "hub-0001");
         assert_eq!(value["features"]["core"], Value::Bool(true));
         assert_eq!(value["features"]["sh1_plus"], Value::Bool(false));
+        Ok(())
     }
 
     #[test]
-    fn hub_role_output_matches_cli_goals() {
+    fn hub_role_output_matches_cli_goals() -> anyhow::Result<()> {
         let stream = RemoteHubRoleStream {
             realm_id: Some("aaaa".to_string()),
             stream_id: "bbbb".to_string(),
@@ -11740,12 +11757,15 @@ mod tests {
             Some(&stream_without_defaults),
             true,
         );
-        let value: Value = serde_json::from_str(&json).expect("valid json");
+        let value: Value = serde_json::from_str(&json)
+            .context("hub role JSON output should be valid")
+            .map_err(|err| ProtocolError::new(err.to_string()))?;
         assert_eq!(value["hub_id"], "hub-observer");
         assert_eq!(value["role"], "observer");
         assert_eq!(value["stream"]["realm_id"], Value::Null);
         assert_eq!(value["stream"]["primary_hub"], Value::Null);
         assert_eq!(value["stream"]["local_is_primary"], Value::Bool(false));
+        Ok(())
     }
 
     #[test]
@@ -11777,7 +11797,7 @@ mod tests {
     }
 
     #[test]
-    fn authority_record_json_output_matches_cli_goals() {
+    fn authority_record_json_output_matches_cli_goals() -> anyhow::Result<()> {
         let descriptor = RemoteAuthorityRecordDescriptor {
             ok: true,
             realm_id: "ffff".to_string(),
@@ -11792,7 +11812,9 @@ mod tests {
         };
 
         let json = super::format_authority_record_output(&descriptor, true);
-        let value: Value = serde_json::from_str(&json).expect("valid json");
+        let value: Value = serde_json::from_str(&json)
+            .context("authority record JSON output should be valid")
+            .map_err(|err| ProtocolError::new(err.to_string()))?;
         assert_eq!(value["realm_id"], "ffff");
         assert_eq!(value["stream_id"], "eeee");
         assert_eq!(value["primary_hub"], Value::Null);
@@ -11802,6 +11824,7 @@ mod tests {
         assert_eq!(value["ttl"], 0);
         assert_eq!(value["expires_at"], Value::Null);
         assert_eq!(value["active_now"], Value::Bool(false));
+        Ok(())
     }
 
     #[test]
@@ -11840,7 +11863,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_show_json_output_matches_cli_goals() {
+    fn schema_show_json_output_matches_cli_goals() -> anyhow::Result<()> {
         let descriptor = RemoteSchemaDescriptorEntry {
             schema_id: "a1b2".to_string(),
             name: "audit.record.v1".to_string(),
@@ -11859,7 +11882,9 @@ mod tests {
         };
 
         let json = super::format_schema_descriptor_output(&descriptor, Some(&usage), true);
-        let value: Value = serde_json::from_str(&json).expect("valid json");
+        let value: Value = serde_json::from_str(&json)
+            .context("schema descriptor JSON output should be valid")
+            .map_err(|err| ProtocolError::new(err.to_string()))?;
         assert_eq!(value["schema_id"], "a1b2");
         assert_eq!(value["name"], "audit.record.v1");
         assert_eq!(value["doc_url"], Value::Null);
@@ -11868,10 +11893,11 @@ mod tests {
         assert_eq!(value["usage"]["used_count"], 1);
         assert_eq!(value["usage"]["first_used_ts"], 10);
         assert_eq!(value["usage"]["last_used_ts"], 20);
+        Ok(())
     }
 
     #[test]
-    fn label_authority_output_matches_cli_goals() {
+    fn label_authority_output_matches_cli_goals() -> anyhow::Result<()> {
         let descriptor = RemoteLabelAuthorityDescriptor {
             ok: true,
             label: "fed/chat".to_string(),
@@ -11885,13 +11911,16 @@ mod tests {
         };
 
         let json = super::format_label_authority_output(&descriptor, true);
-        let value: Value = serde_json::from_str(&json).expect("valid json");
+        let value: Value = serde_json::from_str(&json)
+            .context("label authority JSON output should be valid")
+            .map_err(|err| ProtocolError::new(err.to_string()))?;
         assert_eq!(value["label"], "fed/chat");
         assert_eq!(value["realm_id"], Value::Null);
         assert_eq!(value["stream_id"], "bbbb");
         assert_eq!(value["primary_hub"], Value::Null);
         assert_eq!(value["replica_hubs"], json!(["hub-replica"]));
         assert_eq!(value["locally_authorized"], Value::Bool(true));
+        Ok(())
     }
 
     #[test]
@@ -12352,9 +12381,16 @@ mod tests {
                     async move {
                         match (req.method(), req.uri().path()) {
                             (&Method::POST, "/authority") => {
-                                let body = to_bytes(req.body_mut()).await.unwrap().to_vec();
-                                tx.send(body).await.unwrap();
-                                Ok::<_, Infallible>(
+                                let body = to_bytes(req.body_mut())
+                                    .await
+                                    .context("authority test server failed to read body")
+                                    .map_err(|err| ProtocolError::new(err.to_string()))?
+                                    .to_vec();
+                                tx.send(body)
+                                    .await
+                                    .context("authority test server failed to forward body")
+                                    .map_err(|err| ProtocolError::new(err.to_string()))?;
+                                Ok::<_, anyhow::Error>(
                                     HyperResponse::builder()
                                         .status(StatusCode::OK)
                                         .body(Body::from("null"))
@@ -12375,14 +12411,14 @@ mod tests {
                                     "active_now": true,
                                 });
                                 let body = serde_json::to_string(&payload).unwrap();
-                                Ok::<_, Infallible>(
+                                Ok::<_, anyhow::Error>(
                                     HyperResponse::builder()
                                         .status(StatusCode::OK)
                                         .body(Body::from(body))
                                         .unwrap(),
                                 )
                             }
-                            _ => Ok::<_, Infallible>(
+                            _ => Ok::<_, anyhow::Error>(
                                 HyperResponse::builder()
                                     .status(StatusCode::NOT_FOUND)
                                     .body(Body::empty())
