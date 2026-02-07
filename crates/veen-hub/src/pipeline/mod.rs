@@ -576,6 +576,7 @@ impl HubPipeline {
                     &stream,
                     submitted_at,
                     submitted_at_ms,
+                    &self.observability,
                 ) {
                     Ok(dirty) => dirty,
                     Err(err) => {
@@ -2644,6 +2645,8 @@ impl CapabilityRecord {
 pub enum CapabilityError {
     #[error("E.CAP capability {auth_ref} is not authorised")]
     Unauthorized { auth_ref: String },
+    #[error("E.CAP capability {auth_ref} missing from store")]
+    Missing { auth_ref: String },
     #[error("E.AUTH capability {auth_ref} subject mismatch")]
     SubjectMismatch { auth_ref: String },
     #[error("E.CAP capability {auth_ref} stream derivation failed: {source}")]
@@ -2716,9 +2719,10 @@ impl CapabilityError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::RateLimited { .. } => "E.RATE",
-            Self::Unauthorized { .. } | Self::StreamMismatch { .. } | Self::StreamDenied { .. } => {
-                "E.CAP"
-            }
+            Self::Unauthorized { .. }
+            | Self::Missing { .. }
+            | Self::StreamMismatch { .. }
+            | Self::StreamDenied { .. } => "E.CAP",
             Self::SubjectMismatch { .. }
             | Self::ClientQuotaExceeded { .. }
             | Self::ClientUsageOverflow { .. } => "E.AUTH",
@@ -2750,6 +2754,7 @@ impl CapabilityError {
             | Self::InvalidMessage { .. } => AdmissionStage::Structural,
             Self::SignatureInvalid { .. }
             | Self::Unauthorized { .. }
+            | Self::Missing { .. }
             | Self::SubjectMismatch { .. }
             | Self::StreamMismatch { .. }
             | Self::StreamDenied { .. }
@@ -2775,6 +2780,7 @@ impl CapabilityError {
             Self::StreamInvalid { .. } => Some("STREAM_ID"),
             Self::SignatureInvalid { .. } => Some("SIG_INVALID"),
             Self::Unauthorized { .. } => Some("CAP_MISSING"),
+            Self::Missing { .. } => Some("CAP_STORE_MISSING"),
             Self::SubjectMismatch { .. } => Some("AUTH_REF"),
             Self::StreamMismatch { .. } => Some("CAP_INVALID"),
             Self::StreamDenied { .. } => Some("CAP_DENIED"),
@@ -3926,6 +3932,7 @@ fn enforce_capability(
     stream: &str,
     now: u64,
     now_ms: u64,
+    observability: &HubObservability,
 ) -> Result<bool, CapabilityError> {
     if !store.records.contains_key(auth_ref) {
         return Err(CapabilityError::Unauthorized {
@@ -3947,10 +3954,21 @@ fn enforce_capability(
         }
     }
 
-    let record = store
-        .records
-        .get_mut(auth_ref)
-        .expect("capability existence checked above");
+    let record = match store.records.get_mut(auth_ref) {
+        Some(record) => record,
+        None => {
+            observability.record_submit_err("E.CAP.MISSING");
+            tracing::warn!(
+                auth_ref = %auth_ref,
+                subject = %subject,
+                stream = %stream,
+                "capability missing from store during enforcement"
+            );
+            return Err(CapabilityError::Missing {
+                auth_ref: auth_ref.to_string(),
+            });
+        }
+    };
 
     if record.subject != subject {
         return Err(CapabilityError::SubjectMismatch {
