@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde::Deserialize;
 use tokio::fs;
 
@@ -203,6 +203,7 @@ impl HubRuntimeConfig {
                 .or(file_cfg.dedup.lru_capacity)
                 .unwrap_or_else(|| DedupConfig::default().lru_capacity),
         };
+        validate_dedup_config(&dedup).context("validating dedup configuration")?;
         let admission = AdmissionConfig {
             capability_gating_enabled: overrides
                 .capability_gating_enabled
@@ -249,4 +250,25 @@ fn parse_config(contents: &str, path: &Path) -> Result<FileConfig> {
     let parsed = serde_path_to_error::deserialize(deserializer)
         .with_context(|| format!("parsing hub configuration at {}", path.display()))?;
     Ok(parsed)
+}
+
+fn validate_dedup_config(dedup: &DedupConfig) -> Result<()> {
+    ensure!(
+        dedup.bloom_capacity > 0,
+        "dedup bloom_capacity must be greater than 0 (got {})",
+        dedup.bloom_capacity
+    );
+    ensure!(
+        dedup.lru_capacity > 0,
+        "dedup lru_capacity must be greater than 0 (got {})",
+        dedup.lru_capacity
+    );
+    ensure!(
+        dedup.bloom_false_positive_rate.is_finite()
+            && dedup.bloom_false_positive_rate > 0.0
+            && dedup.bloom_false_positive_rate < 1.0,
+        "dedup bloom_false_positive_rate must be between 0 and 1 (exclusive); got {}",
+        dedup.bloom_false_positive_rate
+    );
+    Ok(())
 }

@@ -167,8 +167,8 @@ impl StreamRuntime {
         Ok(runtime)
     }
 
-    fn empty() -> Self {
-        Self::new(HubStreamState::default(), Vec::new()).expect("empty stream state")
+    fn empty() -> Result<Self> {
+        Self::new(HubStreamState::default(), Vec::new())
     }
 
     fn push_proven(&mut self, message: StreamMessageWithProof) {
@@ -274,14 +274,19 @@ enum DedupCheck {
 }
 
 impl DuplicateDetector {
-    fn new(config: &DedupConfig) -> Self {
-        let bloom_capacity = config.bloom_capacity.max(1);
-        let lru_capacity = NonZeroUsize::new(config.lru_capacity.max(1)).unwrap();
-        Self {
-            bloom: Bloom::new_for_fp_rate(bloom_capacity, config.bloom_false_positive_rate)
-                .expect("valid bloom filter configuration"),
+    fn new(config: &DedupConfig) -> Result<Self> {
+        let lru_capacity = NonZeroUsize::new(config.lru_capacity).ok_or_else(|| {
+            anyhow!(
+                "dedup lru_capacity must be greater than 0 (got {})",
+                config.lru_capacity
+            )
+        })?;
+        let bloom = Bloom::new_for_fp_rate(config.bloom_capacity, config.bloom_false_positive_rate)
+            .map_err(|err| anyhow!("building dedup bloom filter: {err}"))?;
+        Ok(Self {
+            bloom,
             recent: LruCache::new(lru_capacity),
-        }
+        })
     }
 
     fn seed<I: IntoIterator<Item = DedupKeyHash>>(&mut self, entries: I) {
@@ -344,7 +349,7 @@ impl HubPipeline {
         let anchors = load_anchor_log(storage).await?;
         let identity = load_hub_identity(storage).await?;
         let hub_signing_key = load_hub_signing_key(storage).await?;
-        let mut dedup_detector = DuplicateDetector::new(&config.dedup);
+        let mut dedup_detector = DuplicateDetector::new(&config.dedup)?;
         let recent_entries = match load_recent_dedup_cache(storage, &config.dedup).await? {
             Some(entries) => entries,
             None => {
@@ -607,10 +612,10 @@ impl HubPipeline {
         }
         .instrument(tracing::info_span!("hub_submit.capability_checks"))
         .await?;
-        let stream_runtime = guard
-            .streams
-            .entry(stream.clone())
-            .or_insert_with(StreamRuntime::empty);
+        let stream_runtime = match guard.streams.entry(stream.clone()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(StreamRuntime::empty()?),
+        };
 
         let seq = stream_runtime
             .state
@@ -838,10 +843,10 @@ impl HubPipeline {
         let stream = message.stream.clone();
 
         let mut guard = self.inner.write().await;
-        let stream_runtime = guard
-            .streams
-            .entry(stream.clone())
-            .or_insert_with(StreamRuntime::empty);
+        let stream_runtime = match guard.streams.entry(stream.clone()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(StreamRuntime::empty()?),
+        };
 
         if let Some(existing) = stream_runtime.message_by_seq(message.seq) {
             if existing != &message {
