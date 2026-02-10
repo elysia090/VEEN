@@ -40,6 +40,8 @@ const HEALTH_PATH: &str = "/tooling/healthz";
 const DEFAULT_JOB_IMAGE: &str = "veen-cli:latest";
 const JOB_SEND_GENERATE_NAME: &str = "veen-job-send-";
 const JOB_STREAM_GENERATE_NAME: &str = "veen-job-stream-";
+const JOB_SHELL_ARG0: &str = "veen-kube-job";
+const CLI_BINARY: &str = "veen";
 const CLIENT_STATE_PATH: &str = "/var/lib/veen-client";
 const CLIENT_SECRET_PATH: &str = "/secrets/veen-client";
 const CAP_STATE_PATH: &str = "/var/lib/veen-cap";
@@ -1055,8 +1057,10 @@ fn build_job_stream_manifest(args: &KubeJobStreamArgs, env: &[EnvVar]) -> Result
 
 fn build_job_command_base(subcommand: &str, hub_service: &str, stream: &str) -> Vec<String> {
     vec![
-        "placeholder".to_string(),
-        "veen".to_string(),
+        // `/bin/sh -c` treats the first argument after the script body as `$0`.
+        // Keep an explicit, stable value so the actual CLI command starts at `$1`.
+        JOB_SHELL_ARG0.to_string(),
+        CLI_BINARY.to_string(),
         subcommand.to_string(),
         "--hub".to_string(),
         format_hub_url(hub_service),
@@ -1962,5 +1966,37 @@ mod tests {
         let container_env = container.env.as_ref().expect("env vars");
         assert_eq!(container_env[0].name, "VEEN_ROLE");
         assert_eq!(container_env[0].value.as_deref(), Some("operator"));
+    }
+
+    #[test]
+    fn send_job_uses_explicit_shell_arg0_and_binary() {
+        let args = KubeJobSendArgs {
+            cluster_context: Some("ctx".into()),
+            namespace: Some("tenant-a".into()),
+            env: None,
+            hub_service: "veen-hub".into(),
+            client_secret: "client-secret".into(),
+            stream: "core/main".into(),
+            body: "{}".into(),
+            cap_secret: None,
+            profile_id: None,
+            timeout_ms: None,
+            state_pvc: None,
+            image: DEFAULT_JOB_IMAGE.into(),
+            env_file: None,
+        };
+        let job = build_job_send_manifest(&args, &[]).expect("job manifest");
+        let job_spec = job.spec.expect("job spec");
+        let pod_spec = job_spec.template.spec.expect("pod spec");
+        let container_args = pod_spec
+            .containers
+            .first()
+            .expect("container")
+            .args
+            .as_ref()
+            .expect("container args");
+        assert_eq!(container_args[1], JOB_SHELL_ARG0);
+        assert_eq!(container_args[2], CLI_BINARY);
+        assert_eq!(container_args[3], "send");
     }
 }
