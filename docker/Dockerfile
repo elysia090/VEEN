@@ -45,6 +45,9 @@ ENV VEEN_DATA_DIR=/var/lib/veen \
 EXPOSE 37411
 VOLUME ["/var/lib/veen"]
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["veen", "hub", "health", "--endpoint", "http://127.0.0.1:37411"]
+
 USER veen
 
 ENTRYPOINT ["/usr/local/bin/veen-entrypoint.sh"]
