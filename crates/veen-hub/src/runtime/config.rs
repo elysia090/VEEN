@@ -272,3 +272,199 @@ fn validate_dedup_config(dedup: &DedupConfig) -> Result<()> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+
+    fn default_listen() -> SocketAddr {
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 37411))
+    }
+
+    #[test]
+    fn dedup_defaults_are_valid() {
+        let dedup = DedupConfig::default();
+        assert_eq!(dedup.bloom_capacity, 10_000);
+        assert_eq!(dedup.lru_capacity, 4096);
+        assert!(validate_dedup_config(&dedup).is_ok());
+    }
+
+    #[test]
+    fn dedup_rejects_zero_bloom_capacity() {
+        let dedup = DedupConfig {
+            bloom_capacity: 0,
+            ..DedupConfig::default()
+        };
+        assert!(validate_dedup_config(&dedup).is_err());
+    }
+
+    #[test]
+    fn dedup_rejects_zero_lru_capacity() {
+        let dedup = DedupConfig {
+            lru_capacity: 0,
+            ..DedupConfig::default()
+        };
+        assert!(validate_dedup_config(&dedup).is_err());
+    }
+
+    #[test]
+    fn dedup_rejects_fp_rate_out_of_bounds() {
+        for &rate in &[0.0, 1.0, -0.1, f64::NAN, f64::INFINITY] {
+            let dedup = DedupConfig {
+                bloom_false_positive_rate: rate,
+                ..DedupConfig::default()
+            };
+            assert!(validate_dedup_config(&dedup).is_err(), "rate {rate} should fail");
+        }
+    }
+
+    #[test]
+    fn dedup_accepts_valid_fp_rate() {
+        for &rate in &[0.001, 0.01, 0.5, 0.999] {
+            let dedup = DedupConfig {
+                bloom_false_positive_rate: rate,
+                ..DedupConfig::default()
+            };
+            assert!(validate_dedup_config(&dedup).is_ok(), "rate {rate} should pass");
+        }
+    }
+
+    #[test]
+    fn parse_empty_config() {
+        let parsed = parse_config("", Path::new("test.toml"));
+        assert!(parsed.is_ok());
+        let cfg = parsed.unwrap();
+        assert!(cfg.listen.is_none());
+        assert!(cfg.profile_id.is_none());
+    }
+
+    #[test]
+    fn parse_full_config() {
+        let toml = r#"
+listen = "0.0.0.0:9999"
+profile_id = "test-hub"
+
+[tooling]
+enabled = true
+
+[anchor]
+enabled = false
+backend = "file"
+
+[observability]
+enable_metrics = true
+enable_logs = false
+
+[dedup]
+bloom_capacity = 50000
+bloom_false_positive_rate = 0.001
+lru_capacity = 8192
+
+[admission]
+capability_gating_enabled = false
+max_client_id_lifetime_sec = 3600
+max_msgs_per_client_id_per_label = 100
+pow_difficulty = 16
+
+[federation]
+replica_targets = ["https://replica1.example.com"]
+"#;
+        let cfg = parse_config(toml, Path::new("test.toml")).unwrap();
+        assert_eq!(cfg.listen.unwrap().port(), 9999);
+        assert_eq!(cfg.profile_id.as_deref(), Some("test-hub"));
+        assert_eq!(cfg.tooling.enabled, Some(true));
+        assert_eq!(cfg.anchor.enabled, Some(false));
+        assert_eq!(cfg.anchor.backend.as_deref(), Some("file"));
+        assert_eq!(cfg.observability.enable_metrics, Some(true));
+        assert_eq!(cfg.observability.enable_logs, Some(false));
+        assert_eq!(cfg.dedup.bloom_capacity, Some(50000));
+        assert_eq!(cfg.admission.pow_difficulty, Some(16));
+        assert_eq!(cfg.federation.replica_targets.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parse_rejects_invalid_toml() {
+        let result = parse_config("listen = not_valid", Path::new("bad.toml"));
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn from_sources_defaults_without_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = HubRuntimeConfig::from_sources(
+            default_listen(),
+            dir.path().to_path_buf(),
+            None,
+            HubRole::Primary,
+            HubConfigOverrides::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cfg.listen, default_listen());
+        assert!(cfg.anchors.enabled);
+        assert!(cfg.observability.enable_metrics);
+        assert!(cfg.admission.capability_gating_enabled);
+        assert!(!cfg.tooling_enabled);
+    }
+
+    #[tokio::test]
+    async fn from_sources_overrides_take_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let overrides = HubConfigOverrides {
+            tooling_enabled: Some(true),
+            anchors_enabled: Some(false),
+            bloom_capacity: Some(999),
+            ..Default::default()
+        };
+        let cfg = HubRuntimeConfig::from_sources(
+            default_listen(),
+            dir.path().to_path_buf(),
+            None,
+            HubRole::Primary,
+            overrides,
+        )
+        .await
+        .unwrap();
+        assert!(cfg.tooling_enabled);
+        assert!(!cfg.anchors.enabled);
+        assert_eq!(cfg.dedup.bloom_capacity, 999);
+    }
+
+    #[tokio::test]
+    async fn from_sources_replica_requires_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = HubRuntimeConfig::from_sources(
+            default_listen(),
+            dir.path().to_path_buf(),
+            None,
+            HubRole::Replica,
+            HubConfigOverrides::default(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("replica target"));
+    }
+
+    #[tokio::test]
+    async fn from_sources_with_toml_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("hub.toml");
+        tokio::fs::write(&config_path, "profile_id = \"file-profile\"\n")
+            .await
+            .unwrap();
+        let cfg = HubRuntimeConfig::from_sources(
+            default_listen(),
+            dir.path().to_path_buf(),
+            Some(config_path),
+            HubRole::Primary,
+            HubConfigOverrides::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cfg.profile_id.as_deref(), Some("file-profile"));
+    }
+}

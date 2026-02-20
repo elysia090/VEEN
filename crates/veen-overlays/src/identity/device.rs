@@ -114,3 +114,267 @@ impl<'de> Deserialize<'de> for DeviceId {
         deserializer.deserialize_bytes(DeviceIdVisitor)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::convert::TryFrom;
+
+    const ID_LEN: usize = super::ID_LEN;
+
+    fn sample_bytes() -> [u8; ID_LEN] {
+        let mut out = [0u8; ID_LEN];
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = (0x10_u8).wrapping_add(i as u8);
+        }
+        out
+    }
+
+    fn sample_key() -> [u8; super::super::ED25519_PUBLIC_KEY_LEN] {
+        let mut out = [0u8; super::super::ED25519_PUBLIC_KEY_LEN];
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = (0xB0_u8).wrapping_add(i as u8);
+        }
+        out
+    }
+
+    // --- Construction ---
+
+    #[test]
+    fn new_preserves_bytes() {
+        let bytes = sample_bytes();
+        let id = DeviceId::new(bytes);
+        assert_eq!(*id.as_bytes(), bytes);
+    }
+
+    #[test]
+    fn from_array_constructs_correctly() {
+        let bytes = sample_bytes();
+        let id = DeviceId::from(bytes);
+        assert_eq!(*id.as_bytes(), bytes);
+    }
+
+    #[test]
+    fn from_ref_array_constructs_correctly() {
+        let bytes = sample_bytes();
+        let id = DeviceId::from(&bytes);
+        assert_eq!(*id.as_bytes(), bytes);
+    }
+
+    #[test]
+    fn from_slice_accepts_correct_length() {
+        let bytes = sample_bytes();
+        let id = DeviceId::from_slice(&bytes).unwrap();
+        assert_eq!(*id.as_bytes(), bytes);
+    }
+
+    #[test]
+    fn from_slice_rejects_short_input() {
+        let err = DeviceId::from_slice(&[0u8; 31]).unwrap_err();
+        assert_eq!(err.expected(), ID_LEN);
+        assert_eq!(err.actual(), 31);
+    }
+
+    #[test]
+    fn from_slice_rejects_long_input() {
+        let err = DeviceId::from_slice(&[0u8; 33]).unwrap_err();
+        assert_eq!(err.expected(), ID_LEN);
+        assert_eq!(err.actual(), 33);
+    }
+
+    #[test]
+    fn from_slice_rejects_empty_input() {
+        let err = DeviceId::from_slice(&[]).unwrap_err();
+        assert_eq!(err.expected(), ID_LEN);
+        assert_eq!(err.actual(), 0);
+    }
+
+    // --- TryFrom ---
+
+    #[test]
+    fn try_from_slice_works() {
+        let bytes = sample_bytes();
+        let id = DeviceId::try_from(bytes.as_slice()).unwrap();
+        assert_eq!(*id.as_bytes(), bytes);
+    }
+
+    #[test]
+    fn try_from_slice_rejects_wrong_length() {
+        let short: &[u8] = &[1, 2, 3];
+        assert!(DeviceId::try_from(short).is_err());
+    }
+
+    #[test]
+    fn try_from_vec_works() {
+        let bytes = sample_bytes();
+        let id = DeviceId::try_from(bytes.to_vec()).unwrap();
+        assert_eq!(*id.as_bytes(), bytes);
+    }
+
+    #[test]
+    fn try_from_vec_rejects_wrong_length() {
+        assert!(DeviceId::try_from(vec![0u8; 10]).is_err());
+    }
+
+    // --- AsRef ---
+
+    #[test]
+    fn as_ref_returns_slice() {
+        let bytes = sample_bytes();
+        let id = DeviceId::new(bytes);
+        let slice: &[u8] = id.as_ref();
+        assert_eq!(slice, &bytes);
+    }
+
+    // --- Derive ---
+
+    #[test]
+    fn derive_produces_deterministic_result() {
+        let pk = sample_key();
+        let id1 = DeviceId::derive(&pk).unwrap();
+        let id2 = DeviceId::derive(&pk).unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn derive_different_keys_produce_different_ids() {
+        let pk1 = sample_key();
+        let mut pk2 = sample_key();
+        pk2[0] ^= 0xFF;
+        let id1 = DeviceId::derive(&pk1).unwrap();
+        let id2 = DeviceId::derive(&pk2).unwrap();
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn derive_rejects_wrong_key_length() {
+        let short_key = [0u8; 16];
+        assert!(DeviceId::derive(&short_key).is_err());
+
+        let long_key = [0u8; 64];
+        assert!(DeviceId::derive(&long_key).is_err());
+    }
+
+    #[test]
+    fn derive_rejects_empty_key() {
+        let empty: &[u8] = &[];
+        assert!(DeviceId::derive(empty).is_err());
+    }
+
+    #[test]
+    fn derive_matches_manual_ht_computation() {
+        let pk = sample_key();
+        let id = DeviceId::derive(&pk).unwrap();
+        assert_eq!(*id.as_bytes(), ht("id/device", &pk));
+    }
+
+    // --- Clone, Copy, PartialEq, Eq, Hash ---
+
+    #[test]
+    fn clone_and_copy_produce_equal_values() {
+        let id = DeviceId::new(sample_bytes());
+        let cloned = id.clone();
+        let copied = id;
+        assert_eq!(id, cloned);
+        assert_eq!(id, copied);
+    }
+
+    #[test]
+    fn hash_is_consistent_for_equal_values() {
+        let id1 = DeviceId::new(sample_bytes());
+        let id2 = DeviceId::new(sample_bytes());
+        let mut set = HashSet::new();
+        set.insert(id1);
+        assert!(set.contains(&id2));
+    }
+
+    #[test]
+    fn different_ids_are_not_equal() {
+        let id1 = DeviceId::new([0u8; ID_LEN]);
+        let id2 = DeviceId::new([1u8; ID_LEN]);
+        assert_ne!(id1, id2);
+    }
+
+    // --- Display / LowerHex / UpperHex ---
+
+    #[test]
+    fn display_outputs_lowercase_hex() {
+        let mut bytes = [0u8; ID_LEN];
+        bytes[0] = 0xAB;
+        bytes[31] = 0xCD;
+        let id = DeviceId::new(bytes);
+        let s = format!("{id}");
+        assert_eq!(s.len(), 64);
+        assert!(s.starts_with("ab"));
+        assert!(s.ends_with("cd"));
+    }
+
+    #[test]
+    fn lower_hex_format() {
+        let id = DeviceId::new([0xFF; ID_LEN]);
+        let s = format!("{id:x}");
+        assert_eq!(s, "ff".repeat(32));
+    }
+
+    #[test]
+    fn upper_hex_format() {
+        let id = DeviceId::new([0xFF; ID_LEN]);
+        let s = format!("{id:X}");
+        assert_eq!(s, "FF".repeat(32));
+    }
+
+    #[test]
+    fn display_zero_bytes() {
+        let id = DeviceId::new([0u8; ID_LEN]);
+        assert_eq!(format!("{id}"), "00".repeat(32));
+    }
+
+    // --- Debug ---
+
+    #[test]
+    fn debug_format_contains_type_name() {
+        let id = DeviceId::new([0u8; ID_LEN]);
+        let dbg = format!("{id:?}");
+        assert!(dbg.contains("DeviceId"));
+    }
+
+    // --- Serde round-trip with ciborium (CBOR) ---
+
+    #[test]
+    fn cbor_round_trip() {
+        let id = DeviceId::new(sample_bytes());
+        let mut buf = Vec::new();
+        ciborium::into_writer(&id, &mut buf).unwrap();
+        let decoded: DeviceId = ciborium::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(id, decoded);
+    }
+
+    #[test]
+    fn cbor_round_trip_all_zeros() {
+        let id = DeviceId::new([0u8; ID_LEN]);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&id, &mut buf).unwrap();
+        let decoded: DeviceId = ciborium::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(id, decoded);
+    }
+
+    #[test]
+    fn cbor_round_trip_all_ones() {
+        let id = DeviceId::new([0xFF; ID_LEN]);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&id, &mut buf).unwrap();
+        let decoded: DeviceId = ciborium::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(id, decoded);
+    }
+
+    #[test]
+    fn cbor_deserialize_wrong_length_fails() {
+        let short_bytes: &[u8] = &[1, 2, 3];
+        let mut buf = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Bytes(short_bytes.to_vec()), &mut buf).unwrap();
+        let result: Result<DeviceId, _> = ciborium::from_reader(buf.as_slice());
+        assert!(result.is_err());
+    }
+}

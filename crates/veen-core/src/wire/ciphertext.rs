@@ -53,13 +53,20 @@ impl<'a> CiphertextEnvelope<'a> {
         let mut enc = [0u8; HPKE_ENC_LEN];
         enc.copy_from_slice(&ciphertext[..HPKE_ENC_LEN]);
 
-        let hdr_len_bytes = &ciphertext[HPKE_ENC_LEN..HPKE_ENC_LEN + 4];
-        let body_len_bytes = &ciphertext[HPKE_ENC_LEN + 4..HPKE_ENC_LEN + 8];
-        let hdr_len =
-            u32::from_be_bytes(<[u8; 4]>::try_from(hdr_len_bytes).expect("slice length validated"));
-        let body_len = u32::from_be_bytes(
-            <[u8; 4]>::try_from(body_len_bytes).expect("slice length validated"),
-        );
+        let hdr_len_bytes: [u8; 4] = ciphertext[HPKE_ENC_LEN..HPKE_ENC_LEN + 4]
+            .try_into()
+            .map_err(|_| CiphertextParseError::Truncated {
+                expected: HPKE_ENC_LEN + 4,
+                actual: ciphertext.len(),
+            })?;
+        let body_len_bytes: [u8; 4] = ciphertext[HPKE_ENC_LEN + 4..HPKE_ENC_LEN + 8]
+            .try_into()
+            .map_err(|_| CiphertextParseError::Truncated {
+                expected: HPKE_ENC_LEN + 8,
+                actual: ciphertext.len(),
+            })?;
+        let hdr_len = u32::from_be_bytes(hdr_len_bytes);
+        let body_len = u32::from_be_bytes(body_len_bytes);
 
         let hdr_len_usize =
             usize::try_from(hdr_len).map_err(|_| CiphertextParseError::LengthOverflow)?;

@@ -100,7 +100,7 @@ fn cbor_error_response(
     let mut body = Vec::new();
     if let Err(err) = into_writer(&envelope, &mut body) {
         tracing::warn!(error = ?err, "serialising error envelope failed");
-        return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+        return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
     }
     (
         status,
@@ -456,195 +456,100 @@ impl<'de> Deserialize<'de> for StreamRequest {
     }
 }
 
-impl<'de> Deserialize<'de> for ReceiptRequest {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct ReceiptRequestVisitor;
-
-        impl<'de> Visitor<'de> for ReceiptRequestVisitor {
-            type Value = ReceiptRequest;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("receipt request CBOR map with integer keys")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+/// Generates a `Deserialize` impl for CBOR map types with integer keys that share
+/// the common pattern: `ver` (key 1, u64, required), `stream` (key 2, String, required),
+/// plus one additional required field at key 3.
+macro_rules! impl_cbor_three_field_request {
+    ($type:ident, $visitor:ident, $desc:expr, $field3:ident : $field3_ty:ty) => {
+        impl<'de> Deserialize<'de> for $type {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
             where
-                A: MapAccess<'de>,
+                D: serde::Deserializer<'de>,
             {
-                let mut ver = None;
-                let mut stream = None;
-                let mut seq = None;
+                struct $visitor;
 
-                while let Some(key) = map.next_key::<u64>()? {
-                    match key {
-                        1 => {
-                            if ver.is_some() {
-                                return Err(DeError::duplicate_field("ver"));
+                impl<'de> Visitor<'de> for $visitor {
+                    type Value = $type;
+
+                    fn expecting(
+                        &self,
+                        formatter: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        formatter.write_str($desc)
+                    }
+
+                    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+                    where
+                        A: MapAccess<'de>,
+                    {
+                        let mut ver: Option<u64> = None;
+                        let mut stream: Option<String> = None;
+                        let mut field3: Option<$field3_ty> = None;
+
+                        while let Some(key) = map.next_key::<u64>()? {
+                            match key {
+                                1 => {
+                                    if ver.is_some() {
+                                        return Err(DeError::duplicate_field("ver"));
+                                    }
+                                    ver = Some(map.next_value()?);
+                                }
+                                2 => {
+                                    if stream.is_some() {
+                                        return Err(DeError::duplicate_field("stream"));
+                                    }
+                                    stream = Some(map.next_value()?);
+                                }
+                                3 => {
+                                    if field3.is_some() {
+                                        return Err(DeError::duplicate_field(stringify!($field3)));
+                                    }
+                                    field3 = Some(map.next_value()?);
+                                }
+                                _ => {
+                                    return Err(DeError::custom(format!(
+                                        concat!("unknown ", $desc, " key {}"),
+                                        key
+                                    )));
+                                }
                             }
-                            ver = Some(map.next_value()?);
                         }
-                        2 => {
-                            if stream.is_some() {
-                                return Err(DeError::duplicate_field("stream"));
-                            }
-                            stream = Some(map.next_value()?);
-                        }
-                        3 => {
-                            if seq.is_some() {
-                                return Err(DeError::duplicate_field("seq"));
-                            }
-                            seq = Some(map.next_value()?);
-                        }
-                        _ => {
-                            return Err(DeError::custom(format!(
-                                "unknown receipt request key {key}"
-                            )));
-                        }
+
+                        Ok($type {
+                            ver: ver.ok_or_else(|| DeError::missing_field("ver"))?,
+                            stream: stream.ok_or_else(|| DeError::missing_field("stream"))?,
+                            $field3: field3
+                                .ok_or_else(|| DeError::missing_field(stringify!($field3)))?,
+                        })
                     }
                 }
 
-                let ver = ver.ok_or_else(|| DeError::missing_field("ver"))?;
-                let stream = stream.ok_or_else(|| DeError::missing_field("stream"))?;
-                let seq = seq.ok_or_else(|| DeError::missing_field("seq"))?;
-
-                Ok(ReceiptRequest { ver, stream, seq })
+                deserializer.deserialize_map($visitor)
             }
         }
-
-        deserializer.deserialize_map(ReceiptRequestVisitor)
-    }
+    };
 }
 
-impl<'de> Deserialize<'de> for ProofRequest {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct ProofRequestVisitor;
+impl_cbor_three_field_request!(
+    ReceiptRequest,
+    ReceiptRequestVisitor,
+    "receipt request CBOR map with integer keys",
+    seq: u64
+);
 
-        impl<'de> Visitor<'de> for ProofRequestVisitor {
-            type Value = ProofRequest;
+impl_cbor_three_field_request!(
+    ProofRequest,
+    ProofRequestVisitor,
+    "proof request CBOR map with integer keys",
+    seq: u64
+);
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("proof request CBOR map with integer keys")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut ver = None;
-                let mut stream = None;
-                let mut seq = None;
-
-                while let Some(key) = map.next_key::<u64>()? {
-                    match key {
-                        1 => {
-                            if ver.is_some() {
-                                return Err(DeError::duplicate_field("ver"));
-                            }
-                            ver = Some(map.next_value()?);
-                        }
-                        2 => {
-                            if stream.is_some() {
-                                return Err(DeError::duplicate_field("stream"));
-                            }
-                            stream = Some(map.next_value()?);
-                        }
-                        3 => {
-                            if seq.is_some() {
-                                return Err(DeError::duplicate_field("seq"));
-                            }
-                            seq = Some(map.next_value()?);
-                        }
-                        _ => {
-                            return Err(DeError::custom(format!(
-                                "unknown proof request key {key}"
-                            )));
-                        }
-                    }
-                }
-
-                let ver = ver.ok_or_else(|| DeError::missing_field("ver"))?;
-                let stream = stream.ok_or_else(|| DeError::missing_field("stream"))?;
-                let seq = seq.ok_or_else(|| DeError::missing_field("seq"))?;
-
-                Ok(ProofRequest { ver, stream, seq })
-            }
-        }
-
-        deserializer.deserialize_map(ProofRequestVisitor)
-    }
-}
-
-impl<'de> Deserialize<'de> for CheckpointRequest {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct CheckpointRequestVisitor;
-
-        impl<'de> Visitor<'de> for CheckpointRequestVisitor {
-            type Value = CheckpointRequest;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("checkpoint request CBOR map with integer keys")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut ver = None;
-                let mut stream = None;
-                let mut upto_seq = None;
-
-                while let Some(key) = map.next_key::<u64>()? {
-                    match key {
-                        1 => {
-                            if ver.is_some() {
-                                return Err(DeError::duplicate_field("ver"));
-                            }
-                            ver = Some(map.next_value()?);
-                        }
-                        2 => {
-                            if stream.is_some() {
-                                return Err(DeError::duplicate_field("stream"));
-                            }
-                            stream = Some(map.next_value()?);
-                        }
-                        3 => {
-                            if upto_seq.is_some() {
-                                return Err(DeError::duplicate_field("upto_seq"));
-                            }
-                            upto_seq = Some(map.next_value()?);
-                        }
-                        _ => {
-                            return Err(DeError::custom(format!(
-                                "unknown checkpoint request key {key}"
-                            )));
-                        }
-                    }
-                }
-
-                let ver = ver.ok_or_else(|| DeError::missing_field("ver"))?;
-                let stream = stream.ok_or_else(|| DeError::missing_field("stream"))?;
-                let upto_seq = upto_seq.ok_or_else(|| DeError::missing_field("upto_seq"))?;
-
-                Ok(CheckpointRequest {
-                    ver,
-                    stream,
-                    upto_seq,
-                })
-            }
-        }
-
-        deserializer.deserialize_map(CheckpointRequestVisitor)
-    }
-}
+impl_cbor_three_field_request!(
+    CheckpointRequest,
+    CheckpointRequestVisitor,
+    "checkpoint request CBOR map with integer keys",
+    upto_seq: u64
+);
 
 #[derive(Debug, Deserialize)]
 struct CommitWaitQuery {
@@ -720,7 +625,7 @@ async fn handle_submit(State(pipeline): State<HubPipeline>, body: Bytes) -> impl
                 cbor_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "E.UNAVAILABLE",
-                    err.to_string(),
+                    "service temporarily unavailable".to_string(),
                     None,
                     None,
                 )
@@ -791,7 +696,7 @@ async fn handle_submit(State(pipeline): State<HubPipeline>, body: Bytes) -> impl
                 cbor_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "E.UNAVAILABLE",
-                    err.to_string(),
+                    "service temporarily unavailable".to_string(),
                     None,
                     None,
                 )
@@ -842,7 +747,7 @@ async fn handle_stream(State(pipeline): State<HubPipeline>, body: Bytes) -> impl
                 cbor_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "E.UNAVAILABLE",
-                    err.to_string(),
+                    "service temporarily unavailable".to_string(),
                     None,
                     None,
                 )
@@ -853,7 +758,7 @@ async fn handle_stream(State(pipeline): State<HubPipeline>, body: Bytes) -> impl
             cbor_error_response(
                 StatusCode::NOT_FOUND,
                 "E.NOT_FOUND",
-                err.to_string(),
+                "stream not found".to_string(),
                 None,
                 None,
             )
@@ -895,7 +800,7 @@ async fn handle_receipt(State(pipeline): State<HubPipeline>, body: Bytes) -> imp
                 cbor_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "E.UNAVAILABLE",
-                    err.to_string(),
+                    "service temporarily unavailable".to_string(),
                     None,
                     None,
                 )
@@ -906,7 +811,7 @@ async fn handle_receipt(State(pipeline): State<HubPipeline>, body: Bytes) -> imp
             cbor_error_response(
                 StatusCode::NOT_FOUND,
                 "E.NOT_FOUND",
-                err.to_string(),
+                "receipt not found".to_string(),
                 None,
                 None,
             )
@@ -948,7 +853,7 @@ async fn handle_proof(State(pipeline): State<HubPipeline>, body: Bytes) -> impl 
                 cbor_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "E.UNAVAILABLE",
-                    err.to_string(),
+                    "service temporarily unavailable".to_string(),
                     None,
                     None,
                 )
@@ -959,7 +864,7 @@ async fn handle_proof(State(pipeline): State<HubPipeline>, body: Bytes) -> impl 
             cbor_error_response(
                 StatusCode::NOT_FOUND,
                 "E.NOT_FOUND",
-                err.to_string(),
+                "proof not found".to_string(),
                 None,
                 None,
             )
@@ -1001,7 +906,7 @@ async fn handle_checkpoint(State(pipeline): State<HubPipeline>, body: Bytes) -> 
                 cbor_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "E.UNAVAILABLE",
-                    err.to_string(),
+                    "service temporarily unavailable".to_string(),
                     None,
                     None,
                 )
@@ -1019,7 +924,7 @@ async fn handle_checkpoint(State(pipeline): State<HubPipeline>, body: Bytes) -> 
             cbor_error_response(
                 StatusCode::BAD_REQUEST,
                 "E.BAD_REQUEST",
-                err.to_string(),
+                "invalid checkpoint request".to_string(),
                 None,
                 None,
             )
@@ -1045,7 +950,7 @@ async fn handle_commit_wait(
             json_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "E.UNAVAILABLE",
-                err.to_string(),
+                "service temporarily unavailable".to_string(),
                 None,
                 None,
             )
@@ -1064,7 +969,7 @@ async fn handle_resync(
             json_error_response(
                 StatusCode::NOT_FOUND,
                 "E.NOT_FOUND",
-                err.to_string(),
+                "stream not found".to_string(),
                 None,
                 None,
             )
@@ -1096,7 +1001,7 @@ async fn handle_authorize(State(pipeline): State<HubPipeline>, body: Bytes) -> i
             cbor_error_response(
                 StatusCode::BAD_REQUEST,
                 "E.BAD_REQUEST",
-                err.to_string(),
+                "invalid authorization request".to_string(),
                 None,
                 None,
             )
@@ -1145,7 +1050,7 @@ async fn handle_cap_status(
             json_error_response(
                 StatusCode::BAD_REQUEST,
                 "E.BAD_REQUEST",
-                err.to_string(),
+                "invalid capability status request".to_string(),
                 None,
                 None,
             )
@@ -1164,7 +1069,7 @@ async fn handle_pow_request(
             json_error_response(
                 StatusCode::BAD_REQUEST,
                 "E.BAD_REQUEST",
-                err.to_string(),
+                "invalid proof-of-work request".to_string(),
                 None,
                 None,
             )
@@ -1183,7 +1088,7 @@ async fn handle_anchor(
             json_error_response(
                 StatusCode::BAD_REQUEST,
                 "E.BAD_REQUEST",
-                err.to_string(),
+                "invalid anchor request".to_string(),
                 None,
                 None,
             )
@@ -1202,7 +1107,7 @@ async fn handle_bridge(
             json_error_response(
                 StatusCode::BAD_REQUEST,
                 "E.BAD_REQUEST",
-                err.to_string(),
+                "bridge ingest failed".to_string(),
                 None,
                 None,
             )
@@ -1256,7 +1161,7 @@ async fn handle_ready(State(pipeline): State<HubPipeline>) -> impl IntoResponse 
             json_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "E.UNAVAILABLE",
-                err.to_string(),
+                "service temporarily unavailable".to_string(),
                 None,
                 None,
             )
@@ -1324,7 +1229,7 @@ async fn handle_role(
             json_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "E.UNAVAILABLE",
-                err.to_string(),
+                "service temporarily unavailable".to_string(),
                 None,
                 None,
             )
@@ -1341,7 +1246,7 @@ async fn handle_checkpoint_latest(State(pipeline): State<HubPipeline>) -> impl I
                 cbor_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "E.UNAVAILABLE",
-                    err.to_string(),
+                    "service temporarily unavailable".to_string(),
                     None,
                     None,
                 )
@@ -1359,7 +1264,7 @@ async fn handle_checkpoint_latest(State(pipeline): State<HubPipeline>) -> impl I
             cbor_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "E.UNAVAILABLE",
-                err.to_string(),
+                "service temporarily unavailable".to_string(),
                 None,
                 None,
             )
@@ -1382,7 +1287,7 @@ async fn handle_checkpoint_range(
                 cbor_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "E.UNAVAILABLE",
-                    err.to_string(),
+                    "service temporarily unavailable".to_string(),
                     None,
                     None,
                 )
@@ -1393,7 +1298,7 @@ async fn handle_checkpoint_range(
             cbor_error_response(
                 StatusCode::BAD_REQUEST,
                 "E.BAD_REQUEST",
-                err.to_string(),
+                "invalid checkpoint range request".to_string(),
                 None,
                 None,
             )

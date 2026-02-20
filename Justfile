@@ -1,12 +1,23 @@
 set shell := ["bash", "-cu"]
 
 alias d := default
+alias b := build
+alias t := test
+alias l := lint
 
 [private]
 ensure-toolchain := "rustup component add clippy rustfmt"
 
+default: fmt-check lint test
+
 help:
     @just --list
+
+build:
+    cargo build --workspace
+
+release:
+    cargo build --release --workspace
 
 fmt:
     cargo fmt --all
@@ -35,6 +46,9 @@ perf args="":
 test:
     cargo test --workspace
 
+test-verbose:
+    cargo test --workspace -- --nocapture
+
 check:
     cargo check --workspace --all-targets
 
@@ -45,3 +59,6 @@ ci:
     just fmt-check
     just lint
     just test
+
+clean:
+    cargo clean
