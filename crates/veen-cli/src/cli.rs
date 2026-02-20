@@ -310,12 +310,16 @@ macro_rules! bail_protocol {
 
 #[derive(Debug, Clone, Default, Args)]
 struct GlobalOptions {
+    /// Emit all output as machine-readable JSON.
     #[arg(long, global = true)]
     json: bool,
+    /// Suppress informational output; only errors are printed.
     #[arg(long, global = true)]
     quiet: bool,
+    /// Enable verbose logging (sets tracing to info level).
     #[arg(long, global = true)]
     verbose: bool,
+    /// HTTP request timeout in milliseconds.
     #[arg(long, value_name = "MS", global = true)]
     timeout_ms: Option<u64>,
 }
@@ -324,8 +328,18 @@ struct GlobalOptions {
 #[command(
     name = "veen",
     version,
-    about = "VEEN v0.0.1 command line interface",
-    long_about = None,
+    about = "VEEN — decentralised messaging toolkit",
+    long_about = "VEEN — decentralised messaging toolkit\n\n\
+        Manage hubs, streams, capabilities, wallets, and federation\n\
+        from a single command-line interface.\n\n\
+        Start with `veen keygen --out client.json` to create an identity,\n\
+        then `veen hub start` to launch a local hub.",
+    after_help = "ENVIRONMENT VARIABLES:\n  \
+        VEEN_HUB           Default hub URL (overridden by --hub)\n  \
+        VEEN_CLIENT        Default client bundle path (overridden by --client)\n  \
+        VEEN_DATA_DIR      Default data directory\n  \
+        RUST_LOG           Tracing filter (e.g. info,veen_hub=debug)\n\n\
+        Run `veen help <command>` for detailed help on any subcommand.",
     disable_help_subcommand = true
 )]
 #[allow(private_interfaces)]
@@ -395,10 +409,25 @@ fn fast_path_help_text() -> &'static str {
     FAST_PATH_HELP.get_or_init(|| {
         let bin = cli_binary_name();
         format!(
-            "{bin} - VEEN v0.0.1 command line interface\n\n\
+            "{bin} — decentralised messaging toolkit\n\n\
 USAGE:\n    {bin} [OPTIONS] <COMMAND>\n\n\
-Note: this is a condensed help view for quick startup.\n\
-For full help and subcommand details, run '{bin} help'.\n"
+COMMANDS:\n\
+    keygen         Generate a new client identity\n\
+    send           Send a message to a stream\n\
+    stream         Read messages from a stream\n\
+    hub            Hub lifecycle and tooling\n\
+    cap            Capability management\n\
+    id             Client identity inspection\n\
+    schema         Schema registry helpers\n\
+    wallet         Wallet overlay helpers\n\
+    env            Environment descriptor helpers\n\
+    kube           Kubernetes manifest generation\n\
+    selftest       Run self-test suites\n\n\
+OPTIONS:\n\
+    --json         Emit machine-readable JSON output\n\
+    --quiet        Suppress informational output\n\
+    --verbose      Enable verbose logging\n\n\
+Run '{bin} help' for the complete command list.\n"
         )
     })
 }
@@ -1194,10 +1223,13 @@ impl FromStr for RetentionValue {
 
 #[derive(Debug, Clone, Default, Args)]
 struct HubLocatorArgs {
-    #[arg(long, value_name = "URL|PATH")]
+    /// Hub URL or local data directory path.
+    #[arg(long, value_name = "URL|PATH", env = "VEEN_HUB")]
     hub: Option<String>,
-    #[arg(long, value_name = "PATH")]
+    /// Environment descriptor file to resolve hub from.
+    #[arg(long, value_name = "PATH", env = "VEEN_ENV")]
     env: Option<PathBuf>,
+    /// Hub name within the environment descriptor.
     #[arg(long = "hub-name", value_name = "NAME")]
     hub_name: Option<String>,
 }
@@ -1215,18 +1247,21 @@ impl HubLocatorArgs {
 
 #[derive(Args)]
 struct KeygenArgs {
+    /// Output path for the generated client identity bundle.
     #[arg(long)]
     out: PathBuf,
 }
 
 #[derive(Args)]
 struct IdShowArgs {
+    /// Path to the client identity bundle.
     #[arg(long)]
     client: PathBuf,
 }
 
 #[derive(Args)]
 struct IdRotateArgs {
+    /// Path to the client identity bundle.
     #[arg(long)]
     client: PathBuf,
 }
@@ -1245,22 +1280,31 @@ struct IdUsageArgs {
 struct SendArgs {
     #[command(flatten)]
     hub: HubLocatorArgs,
+    /// Path to the client identity bundle.
     #[arg(long)]
     client: PathBuf,
+    /// Target stream name.
     #[arg(long)]
     stream: String,
+    /// Message body (plain text or JSON).
     #[arg(long)]
     body: String,
+    /// Schema identifier to tag the message with.
     #[arg(long, value_name = "HEX32")]
     schema: Option<String>,
+    /// Message expiration as a UNIX timestamp.
     #[arg(long, value_name = "UNIX_TS")]
     expires_at: Option<u64>,
+    /// Capability token file to attach for authorization.
     #[arg(long)]
     cap: Option<PathBuf>,
+    /// Parent message reference (for threading).
     #[arg(long)]
     parent: Option<String>,
+    /// Files to attach to the message.
     #[arg(long)]
     attach: Vec<PathBuf>,
+    /// Skip persisting the message body locally.
     #[arg(long)]
     no_store_body: bool,
     /// Solve or supply a proof-of-work cookie requiring this difficulty (bits).
@@ -1431,14 +1475,19 @@ pub(crate) struct EnvTenantDescriptor {
 struct StreamArgs {
     #[command(flatten)]
     hub: HubLocatorArgs,
+    /// Path to the client identity bundle.
     #[arg(long)]
     client: PathBuf,
+    /// Stream name to read from.
     #[arg(long)]
     stream: String,
+    /// Sequence number to start reading from (default: 0).
     #[arg(long, default_value_t = 0)]
     from: u64,
+    /// Sequence number to stop reading at (inclusive).
     #[arg(long)]
     to: Option<u64>,
+    /// Include Merkle inclusion proofs in the output.
     #[arg(long)]
     with_proof: bool,
 }
