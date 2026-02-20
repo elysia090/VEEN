@@ -1564,7 +1564,7 @@ fn render_yaml_documents(docs: &[JsonValue]) -> Result<String> {
         if idx > 0 {
             rendered.push_str("---\n");
         }
-        let serialized = serde_yaml::to_string(doc).context("serializing manifest")?;
+        let serialized = serde_yml::to_string(doc).context("serializing manifest")?;
         rendered.push_str(&serialized);
     }
     if !rendered.ends_with('\n') {
@@ -1577,7 +1577,7 @@ async fn read_manifest_file(path: &Path) -> Result<Vec<JsonValue>> {
     let contents = fs::read_to_string(path)
         .await
         .with_context(|| format!("reading manifest {}", path.display()))?;
-    let docs = serde_yaml::Deserializer::from_str(&contents);
+    let docs = serde_yml::Deserializer::from_str(&contents);
     let mut values = Vec::new();
     for doc in docs {
         let value = JsonValue::deserialize(doc)?;
