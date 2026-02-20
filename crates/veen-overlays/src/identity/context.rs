@@ -237,8 +237,8 @@ mod tests {
     fn derive_produces_deterministic_result() {
         let pk = sample_key();
         let realm = RealmId::from(ht("id/realm", b"test-realm"));
-        let id1 = ContextId::derive(&pk, realm).unwrap();
-        let id2 = ContextId::derive(&pk, realm).unwrap();
+        let id1 = ContextId::derive(pk, realm).unwrap();
+        let id2 = ContextId::derive(pk, realm).unwrap();
         assert_eq!(id1, id2);
     }
 
@@ -248,8 +248,8 @@ mod tests {
         let mut pk2 = sample_key();
         pk2[0] ^= 0xFF;
         let realm = RealmId::from(ht("id/realm", b"test-realm"));
-        let id1 = ContextId::derive(&pk1, realm).unwrap();
-        let id2 = ContextId::derive(&pk2, realm).unwrap();
+        let id1 = ContextId::derive(pk1, realm).unwrap();
+        let id2 = ContextId::derive(pk2, realm).unwrap();
         assert_ne!(id1, id2);
     }
 
@@ -258,8 +258,8 @@ mod tests {
         let pk = sample_key();
         let realm1 = RealmId::from(ht("id/realm", b"realm-a"));
         let realm2 = RealmId::from(ht("id/realm", b"realm-b"));
-        let id1 = ContextId::derive(&pk, realm1).unwrap();
-        let id2 = ContextId::derive(&pk, realm2).unwrap();
+        let id1 = ContextId::derive(pk, realm1).unwrap();
+        let id2 = ContextId::derive(pk, realm2).unwrap();
         assert_ne!(id1, id2);
     }
 
@@ -267,14 +267,14 @@ mod tests {
     fn derive_rejects_wrong_key_length() {
         let short_key = [0u8; 16];
         let realm = RealmId::from(ht("id/realm", b"test"));
-        assert!(ContextId::derive(&short_key, realm).is_err());
+        assert!(ContextId::derive(short_key, realm).is_err());
     }
 
     #[test]
     fn derive_matches_manual_ht_computation() {
         let pk = sample_key();
         let realm = RealmId::from(ht("id/realm", b"my-app"));
-        let id = ContextId::derive(&pk, realm).unwrap();
+        let id = ContextId::derive(pk, realm).unwrap();
         let mut data = Vec::new();
         data.extend_from_slice(&pk);
         data.extend_from_slice(realm.as_ref());
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn clone_and_copy_produce_equal_values() {
         let id = ContextId::new(sample_bytes());
-        let cloned = id.clone();
+        let cloned = id;
         let copied = id;
         assert_eq!(id, cloned);
         assert_eq!(id, copied);
@@ -388,5 +388,16 @@ mod tests {
         ciborium::into_writer(&ciborium::Value::Bytes(short_bytes.to_vec()), &mut buf).unwrap();
         let result: Result<ContextId, _> = ciborium::from_reader(buf.as_slice());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn visitor_byte_buf_accepts_exact_length() {
+        use serde::de::value::Error as DeValueError;
+        use serde::de::Visitor;
+
+        let id = ContextIdVisitor
+            .visit_byte_buf::<DeValueError>(sample_bytes().to_vec())
+            .unwrap();
+        assert_eq!(id, ContextId::new(sample_bytes()));
     }
 }

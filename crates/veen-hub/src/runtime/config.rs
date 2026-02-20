@@ -315,7 +315,10 @@ mod tests {
                 bloom_false_positive_rate: rate,
                 ..DedupConfig::default()
             };
-            assert!(validate_dedup_config(&dedup).is_err(), "rate {rate} should fail");
+            assert!(
+                validate_dedup_config(&dedup).is_err(),
+                "rate {rate} should fail"
+            );
         }
     }
 
@@ -326,7 +329,10 @@ mod tests {
                 bloom_false_positive_rate: rate,
                 ..DedupConfig::default()
             };
-            assert!(validate_dedup_config(&dedup).is_ok(), "rate {rate} should pass");
+            assert!(
+                validate_dedup_config(&dedup).is_ok(),
+                "rate {rate} should pass"
+            );
         }
     }
 
@@ -443,10 +449,7 @@ replica_targets = ["https://replica1.example.com"]
         )
         .await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("replica target"));
+        assert!(result.unwrap_err().to_string().contains("replica target"));
     }
 
     #[tokio::test]

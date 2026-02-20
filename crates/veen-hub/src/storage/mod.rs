@@ -654,7 +654,10 @@ mod tests {
         assert!(state.join(CAPABILITIES_DIR).is_dir());
         assert!(state.join(CRDT_DIR).is_dir());
         assert!(state.join(ATTACHMENTS_DIR).is_dir());
-        assert!(state.join(ATTACHMENTS_DIR).join(ATTACHMENT_REFS_DIR).is_dir());
+        assert!(state
+            .join(ATTACHMENTS_DIR)
+            .join(ATTACHMENT_REFS_DIR)
+            .is_dir());
 
         // Anchors at data root.
         assert!(data.join(ANCHORS_DIR).is_dir());
@@ -757,12 +760,7 @@ mod tests {
         // Second call should fail.
         let result = write_pid_file(&data).await;
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("already exists")
-        );
+        assert!(result.unwrap_err().to_string().contains("already exists"));
 
         // Cleanup.
         remove_pid_file(&data).await.unwrap();

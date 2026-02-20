@@ -233,8 +233,8 @@ mod tests {
     #[test]
     fn derive_produces_deterministic_result() {
         let pk = sample_key();
-        let id1 = DeviceId::derive(&pk).unwrap();
-        let id2 = DeviceId::derive(&pk).unwrap();
+        let id1 = DeviceId::derive(pk).unwrap();
+        let id2 = DeviceId::derive(pk).unwrap();
         assert_eq!(id1, id2);
     }
 
@@ -243,18 +243,18 @@ mod tests {
         let pk1 = sample_key();
         let mut pk2 = sample_key();
         pk2[0] ^= 0xFF;
-        let id1 = DeviceId::derive(&pk1).unwrap();
-        let id2 = DeviceId::derive(&pk2).unwrap();
+        let id1 = DeviceId::derive(pk1).unwrap();
+        let id2 = DeviceId::derive(pk2).unwrap();
         assert_ne!(id1, id2);
     }
 
     #[test]
     fn derive_rejects_wrong_key_length() {
         let short_key = [0u8; 16];
-        assert!(DeviceId::derive(&short_key).is_err());
+        assert!(DeviceId::derive(short_key).is_err());
 
         let long_key = [0u8; 64];
-        assert!(DeviceId::derive(&long_key).is_err());
+        assert!(DeviceId::derive(long_key).is_err());
     }
 
     #[test]
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn derive_matches_manual_ht_computation() {
         let pk = sample_key();
-        let id = DeviceId::derive(&pk).unwrap();
+        let id = DeviceId::derive(pk).unwrap();
         assert_eq!(*id.as_bytes(), ht("id/device", &pk));
     }
 
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn clone_and_copy_produce_equal_values() {
         let id = DeviceId::new(sample_bytes());
-        let cloned = id.clone();
+        let cloned = id;
         let copied = id;
         assert_eq!(id, cloned);
         assert_eq!(id, copied);
@@ -376,5 +376,16 @@ mod tests {
         ciborium::into_writer(&ciborium::Value::Bytes(short_bytes.to_vec()), &mut buf).unwrap();
         let result: Result<DeviceId, _> = ciborium::from_reader(buf.as_slice());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn visitor_byte_buf_accepts_exact_length() {
+        use serde::de::value::Error as DeValueError;
+        use serde::de::Visitor;
+
+        let id = DeviceIdVisitor
+            .visit_byte_buf::<DeValueError>(sample_bytes().to_vec())
+            .unwrap();
+        assert_eq!(id, DeviceId::new(sample_bytes()));
     }
 }
