@@ -342,4 +342,85 @@ mod tests {
             Some(ctx_b)
         );
     }
+
+    #[test]
+    fn handle_target_org_variants() {
+        let ctx = ContextId::new([0x01; 32]);
+        let org = OrgId::new([0x02; 32]);
+
+        let ctx_target = HandleTarget::Context(ctx);
+        let org_target = HandleTarget::Org(org);
+
+        // target_type
+        assert_eq!(ctx_target.target_type(), HandleTargetType::Ctx);
+        assert_eq!(org_target.target_type(), HandleTargetType::Org);
+
+        // context_id: Org returns None
+        assert_eq!(org_target.context_id(), None);
+
+        // org_id: Context returns None, Org returns Some
+        assert_eq!(ctx_target.org_id(), None);
+        assert_eq!(org_target.org_id(), Some(org));
+
+        // From<OrgId>
+        let from_org: HandleTarget = org.into();
+        assert_eq!(from_org.org_id(), Some(org));
+    }
+
+    #[test]
+    fn handle_record_round_trip_org_target() {
+        let realm = RealmId::derive("org-realm");
+        let org = OrgId::new([0x77; 32]);
+        let record = HandleRecord::new(realm, "@org_handle", HandleTarget::Org(org), 99);
+
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&record, &mut buf).expect("serialize");
+        let decoded: HandleRecord = ciborium::de::from_reader(buf.as_slice()).expect("decode");
+        assert_eq!(decoded, record);
+        assert_eq!(decoded.target.org_id(), Some(org));
+        assert_eq!(decoded.target.context_id(), None);
+    }
+
+    #[test]
+    fn namespace_clear_resets_state() {
+        let realm = RealmId::derive("clear-test");
+        let ctx = ContextId::new([0xAA; 32]);
+        let mut ns = HandleNamespace::new();
+
+        assert!(ns.is_empty());
+        ns.upsert(HandleRecord::new(realm, "user", ctx.into(), 1), 1);
+        assert!(!ns.is_empty());
+        assert_eq!(ns.len(), 1);
+
+        ns.clear();
+        assert!(ns.is_empty());
+        assert_eq!(ns.len(), 0);
+        assert!(ns.resolve(realm, "user").is_none());
+    }
+
+    #[test]
+    fn namespace_records_iterator() {
+        let realm = RealmId::derive("iter-realm");
+        let ctx1 = ContextId::new([0x01; 32]);
+        let ctx2 = ContextId::new([0x02; 32]);
+        let mut ns = HandleNamespace::new();
+
+        ns.upsert(HandleRecord::new(realm, "a", ctx1.into(), 1), 1);
+        ns.upsert(HandleRecord::new(realm, "b", ctx2.into(), 2), 1);
+
+        let records: Vec<&HandleRecord> = ns.records().collect();
+        assert_eq!(records.len(), 2);
+    }
+
+    #[test]
+    fn handle_record_target_type_accessor() {
+        let realm = RealmId::derive("type-test");
+        let ctx = ContextId::new([0x10; 32]);
+        let record = HandleRecord::new(realm, "handle", HandleTarget::Context(ctx), 0);
+        assert_eq!(record.target_type(), HandleTargetType::Ctx);
+
+        let org = OrgId::new([0x20; 32]);
+        let org_record = HandleRecord::new(realm, "org", HandleTarget::Org(org), 0);
+        assert_eq!(org_record.target_type(), HandleTargetType::Org);
+    }
 }

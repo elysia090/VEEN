@@ -359,4 +359,25 @@ mod tests {
         let decoded: Result<Checkpoint, _> = ciborium::de::from_reader(buf.as_slice());
         assert!(decoded.is_err());
     }
+
+    #[test]
+    fn signing_bytes_returns_cbor_encoding() {
+        let checkpoint = Checkpoint {
+            ver: CHECKPOINT_VERSION,
+            label_prev: Label::from_slice(&[0x41; 32]).unwrap(),
+            label_curr: Label::from_slice(&[0x42; 32]).unwrap(),
+            upto_seq: 10,
+            mmr_root: MmrRoot::new([0x43; 32]),
+            epoch: 1,
+            hub_sig: Signature64::new([0x44; 64]),
+            witness_sigs: None,
+        };
+
+        let bytes = checkpoint.signing_bytes().expect("signing_bytes");
+        assert!(!bytes.is_empty(), "signing bytes must not be empty");
+
+        // Signing bytes must be CBOR-decodable.
+        let _value: ciborium::value::Value =
+            ciborium::de::from_reader(bytes.as_slice()).expect("signing bytes must be valid CBOR");
+    }
 }

@@ -316,9 +316,9 @@ impl Profile {
 
 #[cfg(test)]
 mod tests {
-    use ciborium::{de::from_reader, ser::into_writer};
+    use ciborium::{de::from_reader, ser::into_writer, value::Value};
     use hex::ToHex;
-    use std::str::FromStr;
+    use std::{convert::TryFrom, str::FromStr};
 
     use super::{Profile, ProfileId};
 
@@ -397,5 +397,175 @@ mod tests {
         let err = ProfileId::from_str("abcd").expect_err("length error");
         assert_eq!(err.expected(), Some(64));
         assert_eq!(err.actual(), Some(4));
+    }
+
+    #[test]
+    fn profile_id_from_and_as_ref() {
+        let bytes = [0xAB; 32];
+        let id = ProfileId::from(bytes);
+        assert_eq!(id.as_ref(), &bytes[..]);
+        let id2 = ProfileId::from(&bytes);
+        assert_eq!(id2.as_ref(), &bytes[..]);
+    }
+
+    #[test]
+    fn profile_id_try_from_slice() {
+        let bytes = [0x55; 32];
+        let id = ProfileId::try_from(bytes.as_slice()).expect("ok");
+        assert_eq!(id.as_ref(), &bytes[..]);
+        let err = ProfileId::try_from([0u8; 5].as_slice()).expect_err("too short");
+        assert_eq!(err.expected(), 32);
+    }
+
+    #[test]
+    fn profile_id_try_from_vec() {
+        let bytes = vec![0x77u8; 32];
+        let id = ProfileId::try_from(bytes.clone()).expect("ok");
+        assert_eq!(id.as_ref(), bytes.as_slice());
+    }
+
+    #[test]
+    fn profile_id_hex() {
+        let profile = Profile::default();
+        let hex = profile.id_hex().expect("id_hex");
+        assert_eq!(
+            hex,
+            "1db91032b4bf4cd8b9f56a782b299458e6f782d3a1276f04c50c7b02651038ca"
+        );
+    }
+
+    fn int(n: u64) -> Value {
+        Value::Integer(n.into())
+    }
+
+    /// Helper that builds a complete valid CBOR map for Profile.
+    fn valid_profile_map() -> Value {
+        Value::Map(vec![
+            (int(1), Value::Text("xchacha20poly1305".to_string())),
+            (int(2), Value::Text("hkdf-sha256".to_string())),
+            (int(3), Value::Text("ed25519".to_string())),
+            (int(4), Value::Text("x25519".to_string())),
+            (
+                int(5),
+                Value::Text("X25519-HKDF-SHA256-CHACHA20POLY1305".to_string()),
+            ),
+            (int(6), int(60)),
+            (int(7), int(256)),
+            (int(8), Value::Text("sha256".to_string())),
+        ])
+    }
+
+    #[test]
+    fn profile_serde_roundtrip() {
+        let profile = Profile::default();
+        let mut buf = Vec::new();
+        into_writer(&profile, &mut buf).expect("serialize profile");
+        let decoded: Profile = from_reader(buf.as_slice()).expect("deserialize profile");
+        assert_eq!(decoded, profile);
+    }
+
+    #[test]
+    fn profile_deserialize_missing_field() {
+        // Map with only key 1 (aead) – all others missing.
+        let partial = Value::Map(vec![(int(1), Value::Text("xchacha20poly1305".to_string()))]);
+        let mut buf = Vec::new();
+        into_writer(&partial, &mut buf).expect("serialize");
+        let result: Result<Profile, _> = from_reader(buf.as_slice());
+        assert!(result.is_err(), "must fail when fields are missing");
+    }
+
+    #[test]
+    fn profile_deserialize_unsupported_aead() {
+        let mut map = valid_profile_map();
+        // Replace key 1 with unsupported aead value.
+        if let Value::Map(ref mut entries) = map {
+            entries[0].1 = Value::Text("aes-gcm".to_string());
+        }
+        let mut buf = Vec::new();
+        into_writer(&map, &mut buf).expect("serialize");
+        let result: Result<Profile, _> = from_reader(buf.as_slice());
+        assert!(result.is_err(), "must fail for unsupported aead");
+    }
+
+    #[test]
+    fn profile_deserialize_unsupported_kdf() {
+        let mut map = valid_profile_map();
+        if let Value::Map(ref mut entries) = map {
+            entries[1].1 = Value::Text("argon2".to_string());
+        }
+        let mut buf = Vec::new();
+        into_writer(&map, &mut buf).expect("serialize");
+        let result: Result<Profile, _> = from_reader(buf.as_slice());
+        assert!(result.is_err(), "must fail for unsupported kdf");
+    }
+
+    #[test]
+    fn profile_deserialize_unsupported_sig() {
+        let mut map = valid_profile_map();
+        if let Value::Map(ref mut entries) = map {
+            entries[2].1 = Value::Text("ecdsa-p256".to_string());
+        }
+        let mut buf = Vec::new();
+        into_writer(&map, &mut buf).expect("serialize");
+        let result: Result<Profile, _> = from_reader(buf.as_slice());
+        assert!(result.is_err(), "must fail for unsupported sig");
+    }
+
+    #[test]
+    fn profile_deserialize_unsupported_dh() {
+        let mut map = valid_profile_map();
+        if let Value::Map(ref mut entries) = map {
+            entries[3].1 = Value::Text("ecdh-p256".to_string());
+        }
+        let mut buf = Vec::new();
+        into_writer(&map, &mut buf).expect("serialize");
+        let result: Result<Profile, _> = from_reader(buf.as_slice());
+        assert!(result.is_err(), "must fail for unsupported dh");
+    }
+
+    #[test]
+    fn profile_deserialize_unsupported_hpke() {
+        let mut map = valid_profile_map();
+        if let Value::Map(ref mut entries) = map {
+            entries[4].1 = Value::Text("bad-suite".to_string());
+        }
+        let mut buf = Vec::new();
+        into_writer(&map, &mut buf).expect("serialize");
+        let result: Result<Profile, _> = from_reader(buf.as_slice());
+        assert!(result.is_err(), "must fail for unsupported hpke_suite");
+    }
+
+    #[test]
+    fn profile_deserialize_unsupported_mmr_hash() {
+        let mut map = valid_profile_map();
+        if let Value::Map(ref mut entries) = map {
+            entries[7].1 = Value::Text("blake3".to_string());
+        }
+        let mut buf = Vec::new();
+        into_writer(&map, &mut buf).expect("serialize");
+        let result: Result<Profile, _> = from_reader(buf.as_slice());
+        assert!(result.is_err(), "must fail for unsupported mmr_hash");
+    }
+
+    #[test]
+    fn profile_deserialize_unknown_key() {
+        let with_unknown = Value::Map(vec![(int(99), Value::Text("unknown".to_string()))]);
+        let mut buf = Vec::new();
+        into_writer(&with_unknown, &mut buf).expect("serialize");
+        let result: Result<Profile, _> = from_reader(buf.as_slice());
+        assert!(result.is_err(), "must fail for unknown key 99");
+    }
+
+    #[test]
+    fn profile_deserialize_duplicate_key() {
+        // Two entries with key 1.
+        let dup = Value::Map(vec![
+            (int(1), Value::Text("xchacha20poly1305".to_string())),
+            (int(1), Value::Text("xchacha20poly1305".to_string())),
+        ]);
+        let mut buf = Vec::new();
+        into_writer(&dup, &mut buf).expect("serialize");
+        let result: Result<Profile, _> = from_reader(buf.as_slice());
+        assert!(result.is_err(), "must fail for duplicate key");
     }
 }

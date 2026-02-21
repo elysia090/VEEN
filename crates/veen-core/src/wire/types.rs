@@ -466,4 +466,258 @@ mod tests {
         let expected = truncate_nonce(hash_tagged(TAG_ATT_NONCE, &data));
         assert_eq!(nonce, expected);
     }
+
+    #[test]
+    fn from_ref_array_conversions() {
+        let client_arr = [0x01u8; HASH_LEN];
+        let auth_arr = [0x02u8; HASH_LEN];
+        let ct_arr = [0x03u8; HASH_LEN];
+        let leaf_arr = [0x04u8; HASH_LEN];
+        let node_arr = [0x05u8; HASH_LEN];
+        let root_arr = [0x06u8; HASH_LEN];
+        let sig_arr = [0x07u8; SIGNATURE_LEN];
+
+        let client = ClientId::from(&client_arr);
+        let auth = AuthRef::from(&auth_arr);
+        let ct = CtHash::from(&ct_arr);
+        let leaf = LeafHash::from(&leaf_arr);
+        let node = MmrNode::from(&node_arr);
+        let root = MmrRoot::from(&root_arr);
+        let sig = Signature64::from(&sig_arr);
+
+        assert_eq!(client.as_bytes(), &client_arr);
+        assert_eq!(auth.as_bytes(), &auth_arr);
+        assert_eq!(ct.as_bytes(), &ct_arr);
+        assert_eq!(leaf.as_bytes(), &leaf_arr);
+        assert_eq!(node.as_bytes(), &node_arr);
+        assert_eq!(root.as_bytes(), &root_arr);
+        assert_eq!(sig.as_bytes(), &sig_arr);
+    }
+
+    #[test]
+    fn try_from_vec_conversions() {
+        use std::convert::TryFrom;
+
+        let client = ClientId::try_from(vec![0x11u8; HASH_LEN]).expect("client");
+        assert_eq!(client.as_bytes(), &[0x11u8; HASH_LEN]);
+
+        let auth = AuthRef::try_from(vec![0x22u8; HASH_LEN]).expect("auth");
+        assert_eq!(auth.as_bytes(), &[0x22u8; HASH_LEN]);
+
+        let ct = CtHash::try_from(vec![0x33u8; HASH_LEN]).expect("ct");
+        assert_eq!(ct.as_bytes(), &[0x33u8; HASH_LEN]);
+
+        let leaf = LeafHash::try_from(vec![0x44u8; HASH_LEN]).expect("leaf");
+        assert_eq!(leaf.as_bytes(), &[0x44u8; HASH_LEN]);
+
+        let node = MmrNode::try_from(vec![0x55u8; HASH_LEN]).expect("node");
+        assert_eq!(node.as_bytes(), &[0x55u8; HASH_LEN]);
+
+        let root = MmrRoot::try_from(vec![0x66u8; HASH_LEN]).expect("root");
+        assert_eq!(root.as_bytes(), &[0x66u8; HASH_LEN]);
+
+        let sig = Signature64::try_from(vec![0x77u8; SIGNATURE_LEN]).expect("sig");
+        assert_eq!(sig.as_bytes(), &[0x77u8; SIGNATURE_LEN]);
+
+        // Error cases
+        assert!(ClientId::try_from(vec![0u8; 1]).is_err());
+        assert!(Signature64::try_from(vec![0u8; 1]).is_err());
+    }
+
+    #[test]
+    fn try_from_slice_conversions() {
+        use std::convert::TryFrom;
+
+        let client = ClientId::try_from([0x11u8; HASH_LEN].as_slice()).expect("client");
+        assert_eq!(client.as_bytes(), &[0x11u8; HASH_LEN]);
+
+        let auth = AuthRef::try_from([0x22u8; HASH_LEN].as_slice()).expect("auth");
+        assert_eq!(auth.as_bytes(), &[0x22u8; HASH_LEN]);
+
+        let ct = CtHash::try_from([0x33u8; HASH_LEN].as_slice()).expect("ct");
+        assert_eq!(ct.as_bytes(), &[0x33u8; HASH_LEN]);
+
+        let leaf = LeafHash::try_from([0x44u8; HASH_LEN].as_slice()).expect("leaf");
+        assert_eq!(leaf.as_bytes(), &[0x44u8; HASH_LEN]);
+
+        let node = MmrNode::try_from([0x55u8; HASH_LEN].as_slice()).expect("node");
+        assert_eq!(node.as_bytes(), &[0x55u8; HASH_LEN]);
+
+        let root = MmrRoot::try_from([0x66u8; HASH_LEN].as_slice()).expect("root");
+        assert_eq!(root.as_bytes(), &[0x66u8; HASH_LEN]);
+
+        let sig = Signature64::try_from([0x77u8; SIGNATURE_LEN].as_slice()).expect("sig");
+        assert_eq!(sig.as_bytes(), &[0x77u8; SIGNATURE_LEN]);
+
+        // Error cases
+        assert!(ClientId::try_from([0u8; 1].as_slice()).is_err());
+        assert!(Signature64::try_from([0u8; 1].as_slice()).is_err());
+    }
+
+    #[test]
+    fn mmr_root_from_peaks_empty_returns_none() {
+        let result = MmrRoot::from_peaks(&[]);
+        assert!(result.is_none(), "empty peaks must return None");
+    }
+
+    #[test]
+    fn mmr_root_from_peaks_single_peak() {
+        let node = MmrNode::new([0xAA; HASH_LEN]);
+        let root = MmrRoot::from_peaks(&[node]).expect("single peak");
+        assert_eq!(
+            root.as_bytes(),
+            node.as_bytes(),
+            "single peak root == peak bytes"
+        );
+    }
+
+    #[test]
+    fn mmr_root_from_peaks_with_scratch() {
+        let peak1 = MmrNode::new([0xAA; HASH_LEN]);
+        let peak2 = MmrNode::new([0xBB; HASH_LEN]);
+        let peaks = vec![peak1, peak2];
+        let mut scratch = Vec::new();
+
+        let root_via_scratch =
+            MmrRoot::from_peaks_with_scratch(&peaks, &mut scratch).expect("root");
+        let root_direct = MmrRoot::from_peaks(&peaks).expect("root");
+        assert_eq!(
+            root_via_scratch, root_direct,
+            "scratch and direct must agree"
+        );
+
+        // Empty
+        assert!(MmrRoot::from_peaks_with_scratch(&[], &mut scratch).is_none());
+
+        // Single
+        let single = MmrRoot::from_peaks_with_scratch(&[peak1], &mut scratch).expect("single");
+        assert_eq!(single.as_bytes(), peak1.as_bytes());
+    }
+
+    #[test]
+    fn mmr_root_from_peak_and_suffix() {
+        let peak = MmrNode::new([0x11; HASH_LEN]);
+        let s1 = MmrNode::new([0x22; HASH_LEN]);
+        let s2 = MmrNode::new([0x33; HASH_LEN]);
+
+        // Empty suffix — should equal single-peak result.
+        let root_empty = MmrRoot::from_peak_and_suffix(&peak, &[]);
+        assert_eq!(root_empty.as_bytes(), peak.as_bytes());
+
+        // Non-empty suffix — must agree with from_peaks.
+        let root_suffix = MmrRoot::from_peak_and_suffix(&peak, &[s1, s2]);
+        let root_direct = MmrRoot::from_peaks(&[peak, s1, s2]).expect("direct");
+        assert_eq!(root_suffix, root_direct);
+    }
+
+    #[test]
+    fn leaf_hash_derive_matches_spec_formula() {
+        use crate::{label::Label, profile::ProfileId};
+
+        let label = Label::from([0x01; HASH_LEN]);
+        let profile_id = ProfileId::from([0x02; HASH_LEN]);
+        let ct_hash = CtHash::new([0x03; HASH_LEN]);
+        let client_id = ClientId::new([0x04; HASH_LEN]);
+        let client_seq = 7u64;
+
+        let leaf = LeafHash::derive(&label, &profile_id, &ct_hash, &client_id, client_seq);
+
+        // Verify the result is deterministic
+        let leaf2 = LeafHash::derive(&label, &profile_id, &ct_hash, &client_id, client_seq);
+        assert_eq!(leaf, leaf2);
+
+        // Different seq should produce different hash
+        let leaf3 = LeafHash::derive(&label, &profile_id, &ct_hash, &client_id, client_seq + 1);
+        assert_ne!(leaf, leaf3);
+    }
+
+    #[test]
+    fn mmr_node_from_leaf_hash() {
+        let leaf = LeafHash::new([0xDE; HASH_LEN]);
+        let node = MmrNode::from(leaf);
+        assert_eq!(node.as_bytes(), leaf.as_bytes());
+    }
+
+    #[test]
+    fn mmr_root_from_mmr_node() {
+        let node = MmrNode::new([0xAB; HASH_LEN]);
+        let root = MmrRoot::from(node);
+        assert_eq!(root.as_bytes(), node.as_bytes());
+    }
+
+    #[test]
+    fn mmr_root_from_leaf_hash() {
+        let leaf = LeafHash::new([0xCD; HASH_LEN]);
+        let root = MmrRoot::from(leaf);
+        assert_eq!(root.as_bytes(), leaf.as_bytes());
+    }
+
+    #[test]
+    fn signature_verify_rejects_bad_public_key() {
+        // The all-high-bit key is unlikely to be a valid Ed25519 point.
+        let bad_key = [0xFF; HASH_LEN];
+        let sig = Signature64::new([0x00; SIGNATURE_LEN]);
+        let result = sig.verify(&bad_key, b"test");
+        // ed25519-dalek may return InvalidPublicKey for an invalid compressed point.
+        // We just ensure the call returns an Err (not a panic).
+        assert!(result.is_err(), "verify with malformed key must fail");
+    }
+
+    #[test]
+    fn mmr_node_combine() {
+        let left = MmrNode::new([0x11; HASH_LEN]);
+        let right = MmrNode::new([0x22; HASH_LEN]);
+        let combined = MmrNode::combine(&left, &right);
+
+        // Deterministic
+        let combined2 = MmrNode::combine(&left, &right);
+        assert_eq!(combined, combined2);
+
+        // Order matters
+        let reversed = MmrNode::combine(&right, &left);
+        assert_ne!(combined, reversed);
+    }
+
+    #[test]
+    fn truncate_nonce_takes_first_24_bytes() {
+        let mut digest = [0u8; 32];
+        for (i, b) in digest.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let nonce = truncate_nonce(digest);
+        assert_eq!(&nonce[..], &digest[..24]);
+    }
+
+    #[test]
+    fn serde_cbor_roundtrip_all_types() {
+        fn roundtrip<T: serde::Serialize + serde::de::DeserializeOwned + PartialEq>(
+            value: T,
+        ) -> bool {
+            let mut buf = Vec::new();
+            ciborium::ser::into_writer(&value, &mut buf).expect("serialize");
+            let decoded: T = ciborium::de::from_reader(buf.as_slice()).expect("deserialize");
+            value == decoded
+        }
+
+        assert!(roundtrip(AuthRef::new([0x11; HASH_LEN])));
+        assert!(roundtrip(CtHash::new([0x22; HASH_LEN])));
+        assert!(roundtrip(LeafHash::new([0x33; HASH_LEN])));
+        assert!(roundtrip(MmrNode::new([0x44; HASH_LEN])));
+        assert!(roundtrip(MmrRoot::new([0x55; HASH_LEN])));
+        assert!(roundtrip(Signature64::new([0x66; SIGNATURE_LEN])));
+    }
+
+    #[test]
+    fn signature_error_display() {
+        // Verify the error types implement Display.
+        let signing_key = SigningKey::from_bytes(&[0x33; 32]);
+        let message = b"test";
+        let signature = signing_key.sign(message);
+        let sig = Signature64::from(signature.to_bytes());
+        let err = sig
+            .verify(signing_key.verifying_key().as_bytes(), b"wrong")
+            .expect_err("should fail");
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
 }

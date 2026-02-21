@@ -1,3 +1,5 @@
+use std::convert::TryFrom;
+
 use ciborium::{de::from_reader, ser::into_writer};
 use hex::ToHex;
 
@@ -133,4 +135,83 @@ fn stream_id_from_str_accepts_uppercase_hex() {
     let input = "AA".repeat(STREAM_ID_LEN);
     let parsed = input.parse::<StreamId>().expect("uppercase hex stream id");
     assert_eq!(parsed.as_bytes(), &[0xaa; STREAM_ID_LEN]);
+}
+
+#[test]
+fn stream_id_new_and_as_ref() {
+    let bytes = [0x77; STREAM_ID_LEN];
+    let id = StreamId::new(bytes);
+    assert_eq!(id.as_bytes(), &bytes);
+    assert_eq!(id.as_ref(), &bytes[..]);
+}
+
+#[test]
+fn stream_id_from_ref_array() {
+    let bytes = [0x88; STREAM_ID_LEN];
+    let id = StreamId::from(&bytes);
+    assert_eq!(id.as_bytes(), &bytes);
+}
+
+#[test]
+fn stream_id_try_from_slice_and_vec() {
+    let bytes = [0x99; STREAM_ID_LEN];
+    let id = StreamId::try_from(bytes.as_slice()).expect("try_from slice");
+    assert_eq!(id.as_bytes(), &bytes);
+
+    let err = StreamId::try_from([0u8; 1].as_slice()).expect_err("too short");
+    assert_eq!(err.expected(), STREAM_ID_LEN);
+
+    let id2 = StreamId::try_from(bytes.to_vec()).expect("try_from vec");
+    assert_eq!(id2, id);
+
+    let err2 = StreamId::try_from(vec![0u8; 1]).expect_err("too short");
+    assert_eq!(err2.expected(), STREAM_ID_LEN);
+}
+
+#[test]
+fn stream_id_serde_invalid_length() {
+    let short: &[u8] = &[0u8; STREAM_ID_LEN - 1];
+    let mut buf = Vec::new();
+    into_writer(&serde_bytes::Bytes::new(short), &mut buf).expect("serialize");
+    let result: Result<StreamId, _> = from_reader(buf.as_slice());
+    assert!(result.is_err(), "should reject wrong-length bytes");
+}
+
+#[test]
+fn label_from_ref_array() {
+    let bytes = [0xAA; LABEL_LEN];
+    let label = Label::from(&bytes);
+    assert_eq!(label.as_bytes(), &bytes);
+}
+
+#[test]
+fn label_try_from_slice_and_vec() {
+    let bytes = [0xBB; LABEL_LEN];
+    let label = Label::try_from(bytes.as_slice()).expect("try_from slice");
+    assert_eq!(label.as_bytes(), &bytes);
+
+    let err = Label::try_from([0u8; 1].as_slice()).expect_err("too short");
+    assert_eq!(err.expected(), LABEL_LEN);
+
+    let label2 = Label::try_from(bytes.to_vec()).expect("try_from vec");
+    assert_eq!(label2, label);
+
+    let err2 = Label::try_from(vec![0u8; 1]).expect_err("too short");
+    assert_eq!(err2.expected(), LABEL_LEN);
+}
+
+#[test]
+fn label_as_ref() {
+    let bytes = [0xCC; LABEL_LEN];
+    let label = Label::from(bytes);
+    assert_eq!(label.as_ref(), &bytes[..]);
+}
+
+#[test]
+fn label_serde_roundtrip() {
+    let label = Label::from([0xDD; LABEL_LEN]);
+    let mut buf = Vec::new();
+    into_writer(&label, &mut buf).expect("serialize");
+    let decoded: Label = from_reader(buf.as_slice()).expect("deserialize");
+    assert_eq!(decoded, label);
 }
