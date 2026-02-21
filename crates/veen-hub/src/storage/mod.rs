@@ -828,4 +828,294 @@ mod tests {
         assert_eq!(SCHEMA_REGISTRY_FILE, "schema_descriptors.json");
         assert_eq!(RECENT_LEAF_HASHES_FILE, "recent_leaf_hashes.json");
     }
+
+    // ── attachments module ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn load_refcounts_returns_none_when_dir_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = make_storage(tmp.path());
+        // refs dir does not exist yet
+        let result = attachments::load_refcounts(&s).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn write_and_read_refcount() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = make_storage(tmp.path());
+
+        // Write a refcount.
+        attachments::write_refcount(&s, "abc123", 5).await.unwrap();
+        let count = attachments::read_refcount(&s, "abc123").await.unwrap();
+        assert_eq!(count, Some(5));
+
+        // Update to a new value.
+        attachments::write_refcount(&s, "abc123", 10).await.unwrap();
+        let count = attachments::read_refcount(&s, "abc123").await.unwrap();
+        assert_eq!(count, Some(10));
+
+        // Zero count removes the file.
+        attachments::write_refcount(&s, "abc123", 0).await.unwrap();
+        let count = attachments::read_refcount(&s, "abc123").await.unwrap();
+        assert!(count.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_refcount_returns_none_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = make_storage(tmp.path());
+        let count = attachments::read_refcount(&s, "nonexistent").await.unwrap();
+        assert!(count.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_refcounts_reads_existing_refs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = make_storage(tmp.path());
+
+        attachments::write_refcount(&s, "digest1", 3).await.unwrap();
+        attachments::write_refcount(&s, "digest2", 7).await.unwrap();
+
+        let counts = attachments::load_refcounts(&s).await.unwrap().unwrap();
+        assert_eq!(counts.get("digest1"), Some(&3));
+        assert_eq!(counts.get("digest2"), Some(&7));
+    }
+
+    #[tokio::test]
+    async fn rewrite_all_refcounts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = make_storage(tmp.path());
+
+        // Pre-populate with one entry.
+        attachments::write_refcount(&s, "old", 1).await.unwrap();
+
+        let mut new_counts = std::collections::HashMap::new();
+        new_counts.insert("alpha".to_string(), 2u64);
+        new_counts.insert("beta".to_string(), 0u64); // zero counts must be skipped
+        attachments::rewrite_all_refcounts(&s, &new_counts)
+            .await
+            .unwrap();
+
+        let loaded = attachments::load_refcounts(&s).await.unwrap().unwrap();
+        assert_eq!(loaded.get("alpha"), Some(&2));
+        assert!(
+            !loaded.contains_key("beta"),
+            "zero counts should not be written"
+        );
+        assert!(!loaded.contains_key("old"), "old entry should be removed");
+    }
+
+    // ── stream_index module ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stream_index_reader_returns_none_for_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nonexistent.index");
+        let reader = stream_index::StreamIndexReader::open(&path).await.unwrap();
+        assert!(reader.is_none());
+    }
+
+    #[tokio::test]
+    async fn append_and_load_stream_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = make_storage(tmp.path());
+
+        let entry1 = stream_index::StreamIndexEntry {
+            seq: 1,
+            leaf_hash: "aa".to_string(),
+            bundle: "bundle1.json".to_string(),
+        };
+        let entry2 = stream_index::StreamIndexEntry {
+            seq: 2,
+            leaf_hash: "bb".to_string(),
+            bundle: "bundle2.json".to_string(),
+        };
+
+        stream_index::append_stream_index(&s, "my-stream", &entry1)
+            .await
+            .unwrap();
+        stream_index::append_stream_index(&s, "my-stream", &entry2)
+            .await
+            .unwrap();
+
+        let path = s.stream_index_path("my-stream");
+        let entries = stream_index::load_stream_index(&path).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], entry1);
+        assert_eq!(entries[1], entry2);
+    }
+
+    #[tokio::test]
+    async fn load_stream_index_empty_when_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("no-stream.index");
+        let entries = stream_index::load_stream_index(&path).await.unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_stream_index_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = make_storage(tmp.path());
+
+        for seq in 1u64..=5 {
+            let entry = stream_index::StreamIndexEntry {
+                seq,
+                leaf_hash: format!("{:02x}", seq),
+                bundle: format!("b{seq}.json"),
+            };
+            stream_index::append_stream_index(&s, "stream", &entry)
+                .await
+                .unwrap();
+        }
+
+        let path = s.stream_index_path("stream");
+        let range = stream_index::load_stream_index_range(&path, 2, 4)
+            .await
+            .unwrap();
+        assert_eq!(range.len(), 3);
+        assert_eq!(range[0].seq, 2);
+        assert_eq!(range[2].seq, 4);
+
+        // from > to returns empty
+        let empty = stream_index::load_stream_index_range(&path, 5, 3)
+            .await
+            .unwrap();
+        assert!(empty.is_empty());
+
+        // Missing file returns empty
+        let missing_path = tmp.path().join("missing.index");
+        let missing = stream_index::load_stream_index_range(&missing_path, 1, 10)
+            .await
+            .unwrap();
+        assert!(missing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_stream_index_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = make_storage(tmp.path());
+
+        // Missing head returns None.
+        let head = stream_index::load_stream_index_head(&s, "stream")
+            .await
+            .unwrap();
+        assert!(head.is_none());
+
+        let entry = stream_index::StreamIndexEntry {
+            seq: 7,
+            leaf_hash: "deadbeef".to_string(),
+            bundle: "b7.json".to_string(),
+        };
+        stream_index::append_stream_index(&s, "stream", &entry)
+            .await
+            .unwrap();
+
+        let head = stream_index::load_stream_index_head(&s, "stream")
+            .await
+            .unwrap();
+        let head = head.expect("head must exist after append");
+        assert_eq!(head.last_seq, 7);
+        assert_eq!(head.last_leaf_hash, "deadbeef");
+    }
+
+    #[tokio::test]
+    async fn bundle_path_absolute_vs_relative() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = make_storage(tmp.path());
+
+        let relative_entry = stream_index::StreamIndexEntry {
+            seq: 1,
+            leaf_hash: "aa".to_string(),
+            bundle: "relative/bundle.json".to_string(),
+        };
+        let abs_path = stream_index::bundle_path(&s, &relative_entry);
+        assert!(abs_path.starts_with(s.messages_dir()));
+
+        let absolute_entry = stream_index::StreamIndexEntry {
+            seq: 1,
+            leaf_hash: "bb".to_string(),
+            bundle: "/absolute/path/bundle.json".to_string(),
+        };
+        let abs_abs_path = stream_index::bundle_path(&s, &absolute_entry);
+        assert_eq!(abs_abs_path.to_str().unwrap(), "/absolute/path/bundle.json");
+    }
+
+    #[tokio::test]
+    async fn load_refcounts_skips_non_ref_files_and_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = make_storage(tmp.path());
+
+        // Write a legitimate ref.
+        attachments::write_refcount(&s, "abc", 1).await.unwrap();
+
+        // Write a file without .ref extension – should be skipped.
+        let refs_dir = s.attachment_refs_dir();
+        tokio::fs::write(refs_dir.join("ignored.txt"), "2")
+            .await
+            .unwrap();
+
+        // Create a subdirectory – should be skipped (is_file() returns false).
+        tokio::fs::create_dir_all(refs_dir.join("subdir"))
+            .await
+            .unwrap();
+
+        let counts = attachments::load_refcounts(&s).await.unwrap().unwrap();
+        // Only "abc" should be present.
+        assert_eq!(counts.len(), 1);
+        assert_eq!(counts.get("abc"), Some(&1));
+    }
+
+    #[tokio::test]
+    async fn write_refcount_zero_when_file_absent_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = make_storage(tmp.path());
+
+        // Writing zero for a non-existent file must succeed without error.
+        attachments::write_refcount(&s, "ghost", 0)
+            .await
+            .expect("zero write for absent file must be ok");
+
+        // Nothing should have been created.
+        let count = attachments::read_refcount(&s, "ghost").await.unwrap();
+        assert!(count.is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_index_reader_iterates_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = make_storage(tmp.path());
+
+        let e1 = stream_index::StreamIndexEntry {
+            seq: 10,
+            leaf_hash: "aabbcc".to_string(),
+            bundle: "b10.json".to_string(),
+        };
+        let e2 = stream_index::StreamIndexEntry {
+            seq: 11,
+            leaf_hash: "ddeeff".to_string(),
+            bundle: "b11.json".to_string(),
+        };
+        stream_index::append_stream_index(&s, "iter-stream", &e1)
+            .await
+            .unwrap();
+        stream_index::append_stream_index(&s, "iter-stream", &e2)
+            .await
+            .unwrap();
+
+        let path = s.stream_index_path("iter-stream");
+        let mut reader = stream_index::StreamIndexReader::open(&path)
+            .await
+            .unwrap()
+            .expect("reader must be Some");
+
+        let first = reader.next_entry().await.unwrap().expect("first entry");
+        assert_eq!(first, e1);
+        let second = reader.next_entry().await.unwrap().expect("second entry");
+        assert_eq!(second, e2);
+        // EOF
+        let eof = reader.next_entry().await.unwrap();
+        assert!(eof.is_none());
+    }
 }

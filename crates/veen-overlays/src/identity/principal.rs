@@ -114,3 +114,142 @@ impl<'de> Deserialize<'de> for PrincipalId {
         deserializer.deserialize_bytes(PrincipalIdVisitor)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::convert::TryFrom;
+
+    fn sample_pk() -> [u8; 32] {
+        [0x22; 32]
+    }
+
+    #[test]
+    fn new_and_as_bytes() {
+        let bytes = [0x11; ID_LEN];
+        let id = PrincipalId::new(bytes);
+        assert_eq!(id.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn from_slice_success() {
+        let bytes = [0x22; ID_LEN];
+        let id = PrincipalId::from_slice(&bytes).expect("from_slice should succeed");
+        assert_eq!(id.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn from_slice_error_on_wrong_length() {
+        let err = PrincipalId::from_slice(&[0u8; ID_LEN - 1]).expect_err("should fail");
+        assert_eq!(err.expected(), ID_LEN);
+        assert_eq!(err.actual(), ID_LEN - 1);
+    }
+
+    #[test]
+    fn from_fixed_array() {
+        let bytes = [0x33; ID_LEN];
+        let id = PrincipalId::from(bytes);
+        assert_eq!(id.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn from_fixed_array_ref() {
+        let bytes = [0x44; ID_LEN];
+        let id = PrincipalId::from(&bytes);
+        assert_eq!(id.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn try_from_slice_success() {
+        let bytes = [0x55; ID_LEN];
+        let id = PrincipalId::try_from(bytes.as_slice()).expect("try_from slice");
+        assert_eq!(id.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn try_from_slice_error() {
+        let err = PrincipalId::try_from([0u8; 1].as_slice()).expect_err("should fail");
+        assert_eq!(err.expected(), ID_LEN);
+    }
+
+    #[test]
+    fn try_from_vec_success() {
+        let bytes = [0x66; ID_LEN];
+        let id = PrincipalId::try_from(bytes.to_vec()).expect("try_from vec");
+        assert_eq!(id.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn try_from_vec_error() {
+        let err = PrincipalId::try_from(vec![0u8; 1]).expect_err("should fail");
+        assert_eq!(err.expected(), ID_LEN);
+    }
+
+    #[test]
+    fn as_ref_returns_bytes() {
+        let bytes = [0x77; ID_LEN];
+        let id = PrincipalId::new(bytes);
+        assert_eq!(id.as_ref(), &bytes);
+    }
+
+    #[test]
+    fn display_is_hex() {
+        let bytes = [0xBB; ID_LEN];
+        let id = PrincipalId::new(bytes);
+        assert_eq!(id.to_string(), hex::encode(bytes));
+    }
+
+    #[test]
+    fn derive_success() {
+        let pk = sample_pk();
+        let id = PrincipalId::derive(pk).expect("derive should succeed");
+        assert_eq!(id.as_bytes(), &veen_core::ht("id/principal", &pk));
+    }
+
+    #[test]
+    fn derive_error_on_wrong_key_length() {
+        let short_pk = [0u8; 16];
+        let err = PrincipalId::derive(short_pk).expect_err("should fail");
+        assert_eq!(err.expected(), super::super::ED25519_PUBLIC_KEY_LEN);
+    }
+
+    #[test]
+    fn serde_cbor_roundtrip() {
+        let pk = sample_pk();
+        let id = PrincipalId::derive(pk).expect("derive");
+
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&id, &mut buf).expect("serialize");
+        let decoded: PrincipalId = ciborium::de::from_reader(buf.as_slice()).expect("deserialize");
+        assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn serde_cbor_invalid_length_error() {
+        let short: &[u8] = &[0u8; ID_LEN - 1];
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&serde_bytes::Bytes::new(short), &mut buf).expect("serialize");
+        let result: Result<PrincipalId, _> = ciborium::de::from_reader(buf.as_slice());
+        assert!(result.is_err(), "should reject wrong-length bytes");
+    }
+
+    #[test]
+    fn equality_and_hash() {
+        use std::collections::HashSet;
+        let bytes = [0xCC; ID_LEN];
+        let a = PrincipalId::new(bytes);
+        let b = PrincipalId::new(bytes);
+        assert_eq!(a, b);
+        let mut set = HashSet::new();
+        set.insert(a);
+        set.insert(b);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn clone_and_copy() {
+        let id = PrincipalId::new([0xDD; ID_LEN]);
+        let cloned = id;
+        assert_eq!(id, cloned);
+    }
+}

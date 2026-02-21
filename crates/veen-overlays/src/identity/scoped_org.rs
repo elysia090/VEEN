@@ -116,3 +116,153 @@ impl<'de> Deserialize<'de> for ScopedOrgId {
         deserializer.deserialize_bytes(ScopedOrgIdVisitor)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::convert::TryFrom;
+    use veen_core::realm::RealmId;
+
+    fn sample_org_id() -> OrgId {
+        OrgId::new([0xAA; ID_LEN])
+    }
+
+    fn sample_realm_id() -> RealmId {
+        RealmId::derive("test-realm")
+    }
+
+    #[test]
+    fn new_and_as_bytes() {
+        let bytes = [0x11; ID_LEN];
+        let id = ScopedOrgId::new(bytes);
+        assert_eq!(id.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn from_slice_success() {
+        let bytes = [0x22; ID_LEN];
+        let id = ScopedOrgId::from_slice(&bytes).expect("from_slice should succeed");
+        assert_eq!(id.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn from_slice_error_on_wrong_length() {
+        let err = ScopedOrgId::from_slice(&[0u8; ID_LEN - 1]).expect_err("should fail");
+        assert_eq!(err.expected(), ID_LEN);
+        assert_eq!(err.actual(), ID_LEN - 1);
+    }
+
+    #[test]
+    fn from_fixed_array() {
+        let bytes = [0x33; ID_LEN];
+        let id = ScopedOrgId::from(bytes);
+        assert_eq!(id.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn from_fixed_array_ref() {
+        let bytes = [0x44; ID_LEN];
+        let id = ScopedOrgId::from(&bytes);
+        assert_eq!(id.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn try_from_slice_success() {
+        let bytes = [0x55; ID_LEN];
+        let id = ScopedOrgId::try_from(bytes.as_slice()).expect("try_from slice");
+        assert_eq!(id.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn try_from_slice_error() {
+        let err = ScopedOrgId::try_from([0u8; 1].as_slice()).expect_err("should fail");
+        assert_eq!(err.expected(), ID_LEN);
+    }
+
+    #[test]
+    fn try_from_vec_success() {
+        let bytes = [0x66; ID_LEN];
+        let id = ScopedOrgId::try_from(bytes.to_vec()).expect("try_from vec");
+        assert_eq!(id.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn try_from_vec_error() {
+        let err = ScopedOrgId::try_from(vec![0u8; 1]).expect_err("should fail");
+        assert_eq!(err.expected(), ID_LEN);
+    }
+
+    #[test]
+    fn as_ref_returns_bytes() {
+        let bytes = [0x77; ID_LEN];
+        let id = ScopedOrgId::new(bytes);
+        assert_eq!(id.as_ref(), &bytes);
+    }
+
+    #[test]
+    fn display_is_hex() {
+        let bytes = [0xBB; ID_LEN];
+        let id = ScopedOrgId::new(bytes);
+        assert_eq!(id.to_string(), hex::encode(bytes));
+    }
+
+    #[test]
+    fn derive_produces_deterministic_id() {
+        let org = sample_org_id();
+        let realm = sample_realm_id();
+        let id1 = ScopedOrgId::derive(org, realm);
+        let id2 = ScopedOrgId::derive(org, realm);
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn derive_different_realms_differ() {
+        let org = sample_org_id();
+        let realm1 = RealmId::derive("realm-a");
+        let realm2 = RealmId::derive("realm-b");
+        let id1 = ScopedOrgId::derive(org, realm1);
+        let id2 = ScopedOrgId::derive(org, realm2);
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn serde_cbor_roundtrip() {
+        let org = sample_org_id();
+        let realm = sample_realm_id();
+        let id = ScopedOrgId::derive(org, realm);
+
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&id, &mut buf).expect("serialize");
+        let decoded: ScopedOrgId = ciborium::de::from_reader(buf.as_slice()).expect("deserialize");
+        assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn serde_cbor_invalid_length_error() {
+        let short: &[u8] = &[0u8; ID_LEN - 1];
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&serde_bytes::Bytes::new(short), &mut buf).expect("serialize");
+        let result: Result<ScopedOrgId, _> = ciborium::de::from_reader(buf.as_slice());
+        assert!(result.is_err(), "should reject wrong-length bytes");
+    }
+
+    #[test]
+    fn equality_and_hash() {
+        use std::collections::HashSet;
+        let bytes = [0xCC; ID_LEN];
+        let a = ScopedOrgId::new(bytes);
+        let b = ScopedOrgId::new(bytes);
+        assert_eq!(a, b);
+        let mut set = HashSet::new();
+        set.insert(a);
+        set.insert(b);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn clone_and_copy() {
+        let id = ScopedOrgId::new([0xDD; ID_LEN]);
+        let cloned = id;
+        assert_eq!(id, cloned);
+    }
+}

@@ -1062,4 +1062,303 @@ mod tests {
             .expect_err("unknown schema");
         assert!(matches!(err, OperationDecodeError::UnknownSchema { .. }));
     }
+
+    #[test]
+    fn id_type_constructors_and_conversions() {
+        use std::convert::TryFrom;
+
+        // OperationId
+        let bytes = sample_bytes(0x01);
+        let op = OperationId::new(bytes);
+        assert_eq!(op.as_bytes(), &bytes);
+        assert_eq!(op.as_ref(), &bytes[..]);
+
+        let op2 = OperationId::from(bytes);
+        assert_eq!(op2, op);
+        let op3 = OperationId::from(&bytes);
+        assert_eq!(op3, op);
+
+        let op4 = OperationId::try_from(bytes.as_slice()).expect("try_from slice");
+        assert_eq!(op4, op);
+        let err = OperationId::try_from([0u8; 1].as_slice()).expect_err("too short");
+        assert_eq!(err.expected(), OPERATION_ID_LEN);
+
+        let op5 = OperationId::try_from(bytes.to_vec()).expect("try_from vec");
+        assert_eq!(op5, op);
+        let err2 = OperationId::try_from(vec![0u8; 1]).expect_err("too short");
+        assert_eq!(err2.expected(), OPERATION_ID_LEN);
+
+        let display = op.to_string();
+        assert_eq!(display, hex::encode(bytes));
+
+        // AccountId
+        let abytes = sample_bytes(0x02);
+        let acc = AccountId::new(abytes);
+        assert_eq!(acc.as_bytes(), &abytes);
+        assert_eq!(acc.as_ref(), &abytes[..]);
+        let acc2 = AccountId::from(abytes);
+        assert_eq!(acc2, acc);
+        let acc3 = AccountId::from(&abytes);
+        assert_eq!(acc3, acc);
+        let acc4 = AccountId::try_from(abytes.as_slice()).expect("try_from slice");
+        assert_eq!(acc4, acc);
+        let acc_err = AccountId::try_from([0u8; 1].as_slice()).expect_err("too short");
+        assert_eq!(acc_err.expected(), ACCOUNT_ID_LEN);
+        let acc5 = AccountId::try_from(abytes.to_vec()).expect("try_from vec");
+        assert_eq!(acc5, acc);
+
+        // OpaqueId
+        let obytes = sample_bytes(0x03);
+        let oid = OpaqueId::new(obytes);
+        assert_eq!(oid.as_bytes(), &obytes);
+        assert_eq!(oid.as_ref(), &obytes[..]);
+        let oid2 = OpaqueId::from(obytes);
+        assert_eq!(oid2, oid);
+        let oid3 = OpaqueId::from(&obytes);
+        assert_eq!(oid3, oid);
+        let oid4 = OpaqueId::try_from(obytes.as_slice()).expect("try_from slice");
+        assert_eq!(oid4, oid);
+        let oid_err = OpaqueId::try_from([0u8; 1].as_slice()).expect_err("too short");
+        assert_eq!(oid_err.expected(), OPAQUE_ID_LEN);
+        let oid5 = OpaqueId::try_from(obytes.to_vec()).expect("try_from vec");
+        assert_eq!(oid5, oid);
+    }
+
+    #[test]
+    fn id_type_serde_roundtrip() {
+        let op = OperationId::new(sample_bytes(0xAA));
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&op, &mut buf).expect("serialize");
+        let decoded: OperationId = ciborium::de::from_reader(buf.as_slice()).expect("deserialize");
+        assert_eq!(decoded, op);
+
+        let acc = AccountId::new(sample_bytes(0xBB));
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&acc, &mut buf).expect("serialize");
+        let decoded: AccountId = ciborium::de::from_reader(buf.as_slice()).expect("deserialize");
+        assert_eq!(decoded, acc);
+
+        let oid = OpaqueId::new(sample_bytes(0xCC));
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&oid, &mut buf).expect("serialize");
+        let decoded: OpaqueId = ciborium::de::from_reader(buf.as_slice()).expect("deserialize");
+        assert_eq!(decoded, oid);
+    }
+
+    #[test]
+    fn id_type_serde_invalid_length() {
+        let short: &[u8] = &[0u8; OPERATION_ID_LEN - 1];
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&serde_bytes::Bytes::new(short), &mut buf).expect("serialize");
+        let result: Result<OperationId, _> = ciborium::de::from_reader(buf.as_slice());
+        assert!(result.is_err());
+
+        let short2: &[u8] = &[0u8; ACCOUNT_ID_LEN - 1];
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&serde_bytes::Bytes::new(short2), &mut buf).expect("serialize");
+        let result2: Result<AccountId, _> = ciborium::de::from_reader(buf.as_slice());
+        assert!(result2.is_err());
+    }
+
+    #[test]
+    fn operation_payload_all_schemas() {
+        fn encode_and_decode<T: serde::Serialize>(value: T, schema: [u8; 32]) -> OperationPayload {
+            let mut encoded = Vec::new();
+            into_writer(&value, &mut encoded).expect("encode");
+            OperationPayload::from_schema_and_body(schema, &encoded).expect("decode")
+        }
+
+        let principal = PrincipalId::from(sample_bytes(0x01));
+        let stream_id = StreamId::from(sample_bytes(0x02));
+
+        // AccessGrant
+        let grant = AccessGrant {
+            subject_identity: principal,
+            subject_label: None,
+            allowed_stream_ids: vec![stream_id],
+            expiry_time: 9999,
+            maximum_rate_per_second: None,
+            maximum_burst: None,
+            maximum_amount: None,
+            currency_code: None,
+            reason: None,
+            parent_operation_id: None,
+        };
+        let payload = encode_and_decode(grant.clone(), schema_access_grant());
+        assert_eq!(payload, OperationPayload::AccessGrant(grant));
+        assert_eq!(payload.schema_id(), schema_access_grant());
+
+        // AccessRevoke
+        let revoke = AccessRevoke {
+            subject_identity: principal,
+            target_capability_reference: None,
+            reason: None,
+            parent_operation_id: None,
+        };
+        let payload = encode_and_decode(revoke.clone(), schema_access_revoke());
+        assert_eq!(payload, OperationPayload::AccessRevoke(revoke));
+        assert_eq!(payload.schema_id(), schema_access_revoke());
+
+        // DelegatedExecution (with non-empty chain)
+        let delg = DelegatedExecution {
+            principal_identity: principal,
+            agent_identity: PrincipalId::from(sample_bytes(0x10)),
+            delegation_chain: vec![veen_core::wire::types::AuthRef::new(sample_bytes(0x20))],
+            operation_schema: SchemaId::from(sample_bytes(0x30)),
+            operation_body: ciborium::value::Value::Null,
+            parent_operation_id: None,
+            metadata: None,
+        };
+        let payload = encode_and_decode(delg.clone(), schema_delegated_execution());
+        assert_eq!(payload, OperationPayload::DelegatedExecution(delg));
+        assert_eq!(payload.schema_id(), schema_delegated_execution());
+
+        // AgreementDefinition
+        let agree_def = AgreementDefinition {
+            agreement_id: OpaqueId::new(sample_bytes(0x40)),
+            version: 1,
+            terms_hash: OpaqueId::new(sample_bytes(0x41)),
+            terms_attachment_root: None,
+            parties: vec![principal],
+            effective_time: None,
+            expiry_time: None,
+            metadata: None,
+        };
+        let payload = encode_and_decode(agree_def.clone(), schema_agreement_definition());
+        assert_eq!(payload, OperationPayload::AgreementDefinition(agree_def));
+        assert_eq!(payload.schema_id(), schema_agreement_definition());
+
+        // AgreementConfirmation
+        let agree_conf = AgreementConfirmation {
+            agreement_id: OpaqueId::new(sample_bytes(0x50)),
+            version: 1,
+            party_identity: principal,
+            decision: "accepted".to_string(),
+            decision_time: Some(100),
+            parent_operation_id: None,
+            metadata: None,
+        };
+        let payload = encode_and_decode(agree_conf.clone(), schema_agreement_confirmation());
+        assert_eq!(payload, OperationPayload::AgreementConfirmation(agree_conf));
+        assert_eq!(payload.schema_id(), schema_agreement_confirmation());
+
+        // DataPublication
+        let data_pub = DataPublication {
+            publication_id: OpaqueId::new(sample_bytes(0x60)),
+            publisher_identity: principal,
+            content_root: OpaqueId::new(sample_bytes(0x61)),
+            content_class: "text/plain".to_string(),
+            version: "1.0".to_string(),
+            labels: vec![],
+            source_uri: None,
+            metadata: None,
+        };
+        let payload = encode_and_decode(data_pub.clone(), schema_data_publication());
+        assert_eq!(payload, OperationPayload::DataPublication(data_pub));
+        assert_eq!(payload.schema_id(), schema_data_publication());
+
+        // StateCheckpoint
+        let state_cp = StateCheckpoint {
+            state_id: OpaqueId::new(sample_bytes(0x70)),
+            upto_stream_seq: 42,
+            mmr_root: MmrRoot::new(sample_bytes(0x71)),
+            state_hash: OpaqueId::new(sample_bytes(0x72)),
+            state_class: "snapshot".to_string(),
+            metadata: None,
+        };
+        let payload = encode_and_decode(state_cp.clone(), schema_state_checkpoint());
+        assert_eq!(payload, OperationPayload::StateCheckpoint(state_cp));
+        assert_eq!(payload.schema_id(), schema_state_checkpoint());
+
+        // RecoveryRequest
+        let rec_req = RecoveryRequest {
+            target_identity: principal,
+            requested_new_identity: PrincipalId::from(sample_bytes(0x80)),
+            reason: None,
+            request_time: None,
+            metadata: None,
+        };
+        let payload = encode_and_decode(rec_req.clone(), schema_recovery_request());
+        assert_eq!(payload, OperationPayload::RecoveryRequest(rec_req));
+        assert_eq!(payload.schema_id(), schema_recovery_request());
+
+        // RecoveryApproval
+        let rec_appr = RecoveryApproval {
+            target_identity: principal,
+            requested_new_identity: PrincipalId::from(sample_bytes(0x90)),
+            approver_identity: PrincipalId::from(sample_bytes(0x91)),
+            policy_group_id: None,
+            decision: "approved".to_string(),
+            decision_time: None,
+            parent_operation_id: None,
+            metadata: None,
+        };
+        let payload = encode_and_decode(rec_appr.clone(), schema_recovery_approval());
+        assert_eq!(payload, OperationPayload::RecoveryApproval(rec_appr));
+        assert_eq!(payload.schema_id(), schema_recovery_approval());
+
+        // RecoveryExecution (with non-empty references)
+        let rec_exec = RecoveryExecution {
+            target_identity: principal,
+            new_identity: PrincipalId::from(sample_bytes(0xA0)),
+            applied_time: None,
+            approval_references: vec![OperationId::new(sample_bytes(0xA1))],
+            metadata: None,
+        };
+        let payload = encode_and_decode(rec_exec.clone(), schema_recovery_execution());
+        assert_eq!(payload, OperationPayload::RecoveryExecution(rec_exec));
+        assert_eq!(payload.schema_id(), schema_recovery_execution());
+
+        // QueryAuditLog
+        let query_audit = QueryAuditLog {
+            requester_identity: principal,
+            resource_identifier: "res-1".to_string(),
+            resource_class: "class-a".to_string(),
+            query_parameters: None,
+            purpose_code: None,
+            result_digest: None,
+            request_time: None,
+            metadata: None,
+        };
+        let payload = encode_and_decode(query_audit.clone(), schema_query_audit());
+        assert_eq!(payload, OperationPayload::QueryAuditLog(query_audit));
+        assert_eq!(payload.schema_id(), schema_query_audit());
+
+        // FederationMirror
+        let fed_mirror = FederationMirror {
+            source_hub_identifier: "hub.example.com".to_string(),
+            source_label: Label::from(sample_bytes(0xB0)),
+            source_stream_seq: 42,
+            source_leaf_hash: LeafHash::from(sample_bytes(0xB1)),
+            source_receipt_root: MmrRoot::new(sample_bytes(0xB2)),
+            target_label: Label::from(sample_bytes(0xB3)),
+            mirror_time: None,
+            metadata: None,
+        };
+        let payload = encode_and_decode(fed_mirror.clone(), schema_federation_mirror());
+        assert_eq!(payload, OperationPayload::FederationMirror(fed_mirror));
+        assert_eq!(payload.schema_id(), schema_federation_mirror());
+
+        // PaidOperation schema_id
+        let paid = PaidOperation {
+            operation_type: "op".into(),
+            operation_args: ciborium::value::Value::Null,
+            payer_account: AccountId::new(sample_bytes(0xC0)),
+            payee_account: AccountId::new(sample_bytes(0xC1)),
+            amount: 1,
+            currency_code: None,
+            operation_reference: None,
+            parent_operation_id: None,
+            ttl_seconds: None,
+            metadata: None,
+        };
+        let paid_payload = OperationPayload::PaidOperation(paid);
+        assert_eq!(paid_payload.schema_id(), schema_paid_operation());
+    }
+
+    #[test]
+    fn operation_id_from_slice_error() {
+        let err = OperationId::from_slice(&[0u8; OPERATION_ID_LEN - 1]).expect_err("too short");
+        assert_eq!(err.expected(), OPERATION_ID_LEN);
+    }
 }

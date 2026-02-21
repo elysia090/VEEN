@@ -390,4 +390,117 @@ mod tests {
         assert!(!view.is_revoked(RevocationKind::CapToken, target, 9_950));
         assert!(view.is_revoked(RevocationKind::CapToken, target, 10_050));
     }
+
+    #[test]
+    fn revocation_target_from_fixed_array() {
+        let bytes = [0x33; REVOCATION_TARGET_LEN];
+        let t1 = RevocationTarget::from(bytes);
+        let t2 = RevocationTarget::from(&bytes);
+        assert_eq!(t1, t2);
+        assert_eq!(t1.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn revocation_target_try_from_slice_and_vec() {
+        use std::convert::TryFrom;
+        let bytes = [0x44; REVOCATION_TARGET_LEN];
+
+        let t = RevocationTarget::try_from(bytes.as_slice()).expect("from slice");
+        assert_eq!(t.as_bytes(), &bytes);
+
+        let err = RevocationTarget::try_from([0u8; 1].as_slice()).expect_err("should fail");
+        assert_eq!(err.expected(), REVOCATION_TARGET_LEN);
+
+        let t2 = RevocationTarget::try_from(bytes.to_vec()).expect("from vec");
+        assert_eq!(t2.as_bytes(), &bytes);
+
+        let err2 = RevocationTarget::try_from(vec![0u8; 1]).expect_err("should fail");
+        assert_eq!(err2.expected(), REVOCATION_TARGET_LEN);
+    }
+
+    #[test]
+    fn revocation_target_as_ref() {
+        let bytes = [0x55; REVOCATION_TARGET_LEN];
+        let t = RevocationTarget::new(bytes);
+        assert_eq!(t.as_ref(), &bytes[..]);
+    }
+
+    #[test]
+    fn revocation_target_serde_roundtrip() {
+        let target = RevocationTarget::new([0x77; REVOCATION_TARGET_LEN]);
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&target, &mut buf).expect("serialize");
+        let decoded: RevocationTarget =
+            ciborium::de::from_reader(buf.as_slice()).expect("deserialize");
+        assert_eq!(decoded, target);
+    }
+
+    #[test]
+    fn revocation_target_serde_invalid_length() {
+        let short: &[u8] = &[0u8; REVOCATION_TARGET_LEN - 1];
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&serde_bytes::Bytes::new(short), &mut buf).expect("serialize");
+        let result: Result<RevocationTarget, _> = ciborium::de::from_reader(buf.as_slice());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn revocation_target_display_is_hex() {
+        let bytes = [0x99; REVOCATION_TARGET_LEN];
+        let t = RevocationTarget::new(bytes);
+        assert_eq!(t.to_string(), hex::encode(bytes));
+    }
+
+    #[test]
+    fn revocation_record_cap_token_kind() {
+        let target = RevocationTarget::new([0xAA; REVOCATION_TARGET_LEN]);
+        let record = RevocationRecord {
+            kind: RevocationKind::CapToken,
+            target,
+            reason: Some("compromised".to_string()),
+            ts: 100,
+            ttl: Some(500),
+        };
+        assert!(record.is_active_at(100));
+        assert!(record.is_active_at(599));
+        assert!(!record.is_active_at(600));
+        assert_eq!(record.expires_at(), Some(600));
+    }
+
+    #[test]
+    fn revocation_record_serde_roundtrip() {
+        let record = RevocationRecord {
+            kind: RevocationKind::AuthRef,
+            target: RevocationTarget::new([0xBB; REVOCATION_TARGET_LEN]),
+            reason: Some("test".to_string()),
+            ts: 500,
+            ttl: Some(200),
+        };
+        // Use CBOR for round-trip since RevocationTarget serialises as raw bytes.
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&record, &mut buf).expect("serialize");
+        let decoded: RevocationRecord =
+            ciborium::de::from_reader(buf.as_slice()).expect("deserialize");
+        assert_eq!(decoded.kind, record.kind);
+        assert_eq!(decoded.target, record.target);
+        assert_eq!(decoded.ts, record.ts);
+        assert_eq!(decoded.reason, record.reason);
+        assert_eq!(decoded.ttl, record.ttl);
+    }
+
+    #[test]
+    fn view_len_and_empty() {
+        let mut view = RevocationView::new();
+        assert_eq!(view.len(), 0);
+
+        let target = RevocationTarget::new([0xCC; REVOCATION_TARGET_LEN]);
+        view.insert(RevocationRecord {
+            kind: RevocationKind::ClientId,
+            target,
+            reason: None,
+            ts: 1,
+            ttl: None,
+        });
+        assert_eq!(view.len(), 1);
+    }
 }
