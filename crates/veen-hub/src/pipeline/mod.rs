@@ -843,90 +843,97 @@ impl HubPipeline {
         } = request;
         let stream = message.stream.clone();
 
-        let mut guard = self.inner.write().await;
-        let stream_runtime = match guard.streams.entry(stream.clone()) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(StreamRuntime::empty()?),
-        };
+        let (message_with_proof, stream_index_entry, computed_root) = {
+            let mut guard = self.inner.write().await;
+            let stream_runtime = match guard.streams.entry(stream.clone()) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => entry.insert(StreamRuntime::empty()?),
+            };
 
-        if let Some(existing) = stream_runtime.message_by_seq(message.seq) {
-            if existing != &message {
-                bail!(
-                    "replica already has divergent message for {}#{}",
+            if let Some(existing) = stream_runtime.message_by_seq(message.seq) {
+                if existing != &message {
+                    bail!(
+                        "replica already has divergent message for {}#{}",
+                        stream,
+                        message.seq
+                    );
+                }
+                let mmr_root = stream_runtime
+                    .mmr
+                    .root()
+                    .map(|root| hex::encode(root.as_bytes()))
+                    .unwrap_or_default();
+                if !expected_mmr_root.is_empty() && expected_mmr_root != mmr_root {
+                    bail!("replica MMR root mismatch for {}#{}", stream, message.seq);
+                }
+                return Ok(BridgeIngestResponse {
                     stream,
+                    seq: message.seq,
+                    mmr_root,
+                });
+            }
+
+            let expected_seq = stream_runtime
+                .state
+                .messages
+                .last()
+                .map(|m| m.seq + 1)
+                .unwrap_or(1);
+
+            if message.seq != expected_seq {
+                bail!(
+                    "bridge message out of order for {}: expected {}, got {}",
+                    stream,
+                    expected_seq,
                     message.seq
                 );
             }
-            let mmr_root = stream_runtime
+
+            let leaf = leaf_hash_for(&message)?;
+            let leaf_hash_hex = hex::encode(leaf.as_bytes());
+            let (_, mmr_root, proof) = stream_runtime
                 .mmr
-                .root()
-                .map(|root| hex::encode(root.as_bytes()))
-                .unwrap_or_default();
-            if !expected_mmr_root.is_empty() && expected_mmr_root != mmr_root {
-                bail!("replica MMR root mismatch for {}#{}", stream, message.seq);
+                .append_with_proof(leaf)
+                .with_context(|| format!("appending leaf to MMR for stream {}", stream))?;
+            let computed_root = hex::encode(mmr_root.as_bytes());
+            if !expected_mmr_root.is_empty() && expected_mmr_root != computed_root {
+                bail!(
+                    "bridge mmr root mismatch for {}#{}: expected {}, computed {}",
+                    stream,
+                    message.seq,
+                    expected_mmr_root,
+                    computed_root
+                );
             }
-            return Ok(BridgeIngestResponse {
-                stream,
+
+            stream_runtime.insert_message_with_leaf(message.clone(), leaf);
+            let receipt = StreamReceipt {
                 seq: message.seq,
-                mmr_root,
-            });
-        }
+                leaf_hash: leaf_hash_hex.clone(),
+                mmr_root: computed_root.clone(),
+                hub_ts: message.sent_at,
+            };
+            let message_with_proof = StreamMessageWithProof {
+                message: message.clone(),
+                receipt: receipt.clone(),
+                proof: StreamProof::from(proof),
+            };
+            stream_runtime.push_proven(message_with_proof.clone());
 
-        let expected_seq = stream_runtime
-            .state
-            .messages
-            .last()
-            .map(|m| m.seq + 1)
-            .unwrap_or(1);
-
-        if message.seq != expected_seq {
-            bail!(
-                "bridge message out of order for {}: expected {}, got {}",
-                stream,
-                expected_seq,
-                message.seq
-            );
-        }
-
-        let leaf = leaf_hash_for(&message)?;
-        let (_, mmr_root, proof) = stream_runtime
-            .mmr
-            .append_with_proof(leaf)
-            .with_context(|| format!("appending leaf to MMR for stream {}", stream))?;
-        let computed_root = hex::encode(mmr_root.as_bytes());
-        if !expected_mmr_root.is_empty() && expected_mmr_root != computed_root {
-            bail!(
-                "bridge mmr root mismatch for {}#{}: expected {}, computed {}",
-                stream,
-                message.seq,
-                expected_mmr_root,
-                computed_root
-            );
-        }
-
-        stream_runtime.insert_message_with_leaf(message.clone(), leaf);
-        let receipt = StreamReceipt {
-            seq: message.seq,
-            leaf_hash: hex::encode(leaf.as_bytes()),
-            mmr_root: computed_root.clone(),
-            hub_ts: message.sent_at,
+            let stream_index_entry = StreamIndexEntry {
+                seq: message.seq,
+                leaf_hash: leaf_hash_hex,
+                bundle: self.storage.message_bundle_filename(&stream, message.seq),
+            };
+            (message_with_proof, stream_index_entry, computed_root)
         };
-        let message_with_proof = StreamMessageWithProof {
-            message: message.clone(),
-            receipt: receipt.clone(),
-            proof: StreamProof::from(proof),
-        };
-        stream_runtime.push_proven(message_with_proof.clone());
 
-        persist_message_bundle(&self.storage, &stream, message.seq, &message_with_proof).await?;
-        stream_index::append_stream_index(
+        persist_stream_state(&self.storage, &stream, &stream_index_entry).await?;
+        persist_message_bundle(
             &self.storage,
             &stream,
-            &StreamIndexEntry {
-                seq: message.seq,
-                leaf_hash: hex::encode(leaf.as_bytes()),
-                bundle: self.storage.message_bundle_filename(&stream, message.seq),
-            },
+            message_with_proof.message.seq,
+            &message_with_proof,
         )
         .await?;
         append_receipt(&self.storage, &message_with_proof).await?;
@@ -935,7 +942,7 @@ impl HubPipeline {
 
         Ok(BridgeIngestResponse {
             stream,
-            seq: message.seq,
+            seq: message_with_proof.message.seq,
             mmr_root: computed_root,
         })
     }
@@ -4419,23 +4426,30 @@ mod tests {
         Ok(())
     }
 
+    async fn init_pipeline_for_role_with_overrides(
+        data_dir: &Path,
+        role: HubRole,
+        mut overrides: HubConfigOverrides,
+    ) -> HubPipeline {
+        if matches!(role, HubRole::Replica) && overrides.replica_targets.is_none() {
+            overrides.replica_targets = Some(vec!["http://127.0.0.1:1".to_string()]);
+        }
+
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let config =
+            HubRuntimeConfig::from_sources(listen, data_dir.to_path_buf(), None, role, overrides)
+                .await
+                .unwrap();
+        let storage = HubStorage::bootstrap(&config).await.unwrap();
+        write_test_hub_key(storage.data_dir()).await.unwrap();
+        HubPipeline::initialise(&config, &storage).await.unwrap()
+    }
+
     async fn init_pipeline_with_overrides(
         data_dir: &Path,
         overrides: HubConfigOverrides,
     ) -> HubPipeline {
-        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let config = HubRuntimeConfig::from_sources(
-            listen,
-            data_dir.to_path_buf(),
-            None,
-            HubRole::Primary,
-            overrides,
-        )
-        .await
-        .unwrap();
-        let storage = HubStorage::bootstrap(&config).await.unwrap();
-        write_test_hub_key(storage.data_dir()).await.unwrap();
-        HubPipeline::initialise(&config, &storage).await.unwrap()
+        init_pipeline_for_role_with_overrides(data_dir, HubRole::Primary, overrides).await
     }
 
     async fn init_pipeline(data_dir: &Path) -> HubPipeline {
@@ -4732,6 +4746,70 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn bridge_ingest_persists_replica_state() -> Result<()> {
+        let rt = Runtime::new()?;
+        rt.block_on(async {
+            let temp = tempdir().unwrap();
+            let overrides = HubConfigOverrides {
+                capability_gating_enabled: Some(false),
+                ..HubConfigOverrides::default()
+            };
+            let pipeline =
+                init_pipeline_for_role_with_overrides(temp.path(), HubRole::Replica, overrides)
+                    .await;
+            let stream = "core/bridge";
+
+            let mut rng = OsRng;
+            let signing_key = SigningKey::generate(&mut rng);
+            let payload = serde_json::to_vec(&json!({"text": "bridge-ingest"}))
+                .context("encoding bridge payload")?;
+            let msg = build_msg(stream, &signing_key, 1, 0, None, &payload)?;
+            let sent_at = current_unix_timestamp()?;
+            let message = StoredMessage::from_wire(stream, 1, sent_at, &msg);
+
+            let leaf = leaf_hash_for(&message)?;
+            let (_, mmr_root, _) = Mmr::new()
+                .append_with_proof(leaf)
+                .context("building expected MMR root for bridge test")?;
+            let expected_mmr_root = hex::encode(mmr_root.as_bytes());
+
+            let response = pipeline
+                .bridge_ingest(BridgeIngestRequest {
+                    message: message.clone(),
+                    expected_mmr_root: expected_mmr_root.clone(),
+                })
+                .await?;
+            assert_eq!(response.seq, 1);
+            assert_eq!(response.mmr_root, expected_mmr_root);
+
+            let duplicate = pipeline
+                .bridge_ingest(BridgeIngestRequest {
+                    message,
+                    expected_mmr_root: response.mmr_root.clone(),
+                })
+                .await?;
+            assert_eq!(duplicate.seq, 1);
+            assert_eq!(duplicate.mmr_root, response.mmr_root);
+
+            let streamed = pipeline.stream(stream, 1, None, true, true).await?;
+            assert_eq!(streamed.items.len(), 1);
+            assert_eq!(streamed.items[0].stream_seq, 1);
+            assert!(streamed.items[0].receipt.is_some());
+
+            let index_head =
+                stream_index::load_stream_index_head(&pipeline.storage, stream).await?;
+            assert_eq!(index_head.map(|head| head.last_seq), Some(1));
+
+            let bundle_path = pipeline.storage.message_bundle_path(stream, 1);
+            assert!(fs::try_exists(&bundle_path)
+                .await
+                .context("checking bridge bundle path")?);
+
+            Ok::<(), anyhow::Error>(())
+        })?;
+        Ok(())
+    }
     #[test]
     fn submit_rejects_duplicate_leaf_hash() -> Result<()> {
         let rt = Runtime::new()?;
