@@ -104,7 +104,7 @@ use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 #[cfg(unix)]
 use nix::unistd::Pid;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::time::Instant;
 #[cfg(unix)]
 use tokio::signal::unix::{signal as unix_signal, SignalKind};
@@ -1606,6 +1606,7 @@ async fn run_hub_foreground(args: HubStartArgs) -> Result<()> {
     }
 
     storage::ensure_data_dir_layout(&args.data_dir).await?;
+    ensure_hub_start_preflight(&args.data_dir).await?;
 
     let HubStartArgs {
         listen,
@@ -1653,7 +1654,6 @@ async fn run_hub_foreground(args: HubStartArgs) -> Result<()> {
         .with_context(|| format!("updating hub state in {}", data_dir.display()))?;
 
     save_hub_state(&data_dir, &state).await?;
-    write_pid_file(&data_dir, process::id()).await?;
     storage::ensure_tls_snapshot(&data_dir).await?;
 
     tracing::info!(
@@ -1731,9 +1731,9 @@ async fn spawn_background_hub(args: &HubStartArgs) -> Result<()> {
     {
         bail_hub!("hub process exited immediately with status {status}");
     }
-    drop(child);
 
-    let ready_state = wait_for_hub_ready(&args.data_dir).await?;
+    let ready_state = wait_for_hub_ready(&args.data_dir, pid, &mut child).await?;
+    drop(child);
 
     if let Some(ref hub_id) = ready_state.hub_id {
         println!("hub_id: {hub_id}");
@@ -1744,8 +1744,9 @@ async fn spawn_background_hub(args: &HubStartArgs) -> Result<()> {
     if let Some(ref profile) = ready_state.profile_id {
         println!("profile_id: {profile}");
     }
+    let ready_pid = ready_state.pid.unwrap_or(pid);
     println!("data_dir: {}", ready_state.data_dir);
-    println!("hub running in background with pid={pid}");
+    println!("hub running in background with pid={ready_pid}");
     println!(
         "use `veen hub stop --data-dir {}` to stop the hub",
         args.data_dir.display()
@@ -1754,11 +1755,31 @@ async fn spawn_background_hub(args: &HubStartArgs) -> Result<()> {
     Ok(())
 }
 
-async fn wait_for_hub_ready(data_dir: &Path) -> Result<HubRuntimeState> {
+fn hub_state_ready_for_pid(state: &HubRuntimeState, expected_pid: u32) -> bool {
+    state.running
+        && state.hub_id.is_some()
+        && state.listen.is_some()
+        && state.pid == Some(expected_pid)
+}
+
+async fn wait_for_hub_ready(
+    data_dir: &Path,
+    expected_pid: u32,
+    child: &mut std::process::Child,
+) -> Result<HubRuntimeState> {
     const ATTEMPTS: u32 = 100;
     for attempt in 0..ATTEMPTS {
+        if let Some(status) = child
+            .try_wait()
+            .context("checking hub process status while waiting for ready state")?
+        {
+            bail_hub!(
+                "hub process {expected_pid} exited before reporting ready state (status {status})"
+            );
+        }
+
         let state = load_hub_state(data_dir).await?;
-        if state.running && state.hub_id.is_some() && state.listen.is_some() {
+        if hub_state_ready_for_pid(&state, expected_pid) {
             return Ok(state);
         }
         if attempt == ATTEMPTS - 1 {
@@ -1767,9 +1788,133 @@ async fn wait_for_hub_ready(data_dir: &Path) -> Result<HubRuntimeState> {
         sleep(Duration::from_millis(100)).await;
     }
     bail_hub!(
-        "hub process in {} did not report ready state within timeout",
-        data_dir.display()
+        "hub process {expected_pid} in {} did not report ready state within timeout",
+        data_dir.display(),
     );
+}
+
+#[cfg(unix)]
+fn process_is_running(pid: u32) -> Result<bool> {
+    let raw_pid = match i32::try_from(pid) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    let pid = Pid::from_raw(raw_pid);
+    match kill(pid, None) {
+        Ok(()) => Ok(true),
+        Err(Errno::ESRCH) => Ok(false),
+        Err(err) => Err(anyhow!(
+            "failed to check hub process {raw_pid} status: {err}"
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> Result<bool> {
+    let filter = format!("PID eq {pid}");
+    let output = StdCommand::new("tasklist")
+        .args(["/FI", filter.as_str(), "/FO", "CSV", "/NH"])
+        .output()
+        .with_context(|| format!("checking hub process {pid} status"))?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "tasklist failed while checking hub process {pid}: {}",
+            output.status
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let needle = format!(",\"{pid}\"");
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .any(|line| line.starts_with('"') && line.contains(&needle)))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn process_is_running(_pid: u32) -> Result<bool> {
+    Ok(false)
+}
+
+async fn mark_hub_state_stopped(
+    data_dir: &Path,
+    mut state: HubRuntimeState,
+) -> Result<HubRuntimeState> {
+    let stop_ts = current_unix_timestamp()?;
+    state.record_stop(stop_ts);
+    save_hub_state(data_dir, &state).await?;
+    remove_pid_file(data_dir).await?;
+    Ok(state)
+}
+
+async fn reconcile_hub_state_with_process(
+    data_dir: &Path,
+    state: HubRuntimeState,
+) -> Result<HubRuntimeState> {
+    if !state.running {
+        return Ok(state);
+    }
+
+    let Some(pid) = state.pid else {
+        tracing::warn!(
+            data_dir = %data_dir.display(),
+            "hub state marked running without pid; marking stopped"
+        );
+        return mark_hub_state_stopped(data_dir, state).await;
+    };
+
+    if process_is_running(pid)? {
+        return Ok(state);
+    }
+
+    tracing::warn!(
+        pid,
+        data_dir = %data_dir.display(),
+        "hub state marked running but process not found; marking stopped"
+    );
+    mark_hub_state_stopped(data_dir, state).await
+}
+
+async fn cleanup_stale_pid_file(data_dir: &Path) -> Result<()> {
+    let Some(pid) = read_pid_file(data_dir).await? else {
+        return Ok(());
+    };
+
+    if process_is_running(pid)? {
+        bail_hub!(
+            "hub process {pid} is already running; use `veen hub stop --data-dir {}` first",
+            data_dir.display()
+        );
+    }
+
+    tracing::warn!(
+        pid,
+        data_dir = %data_dir.display(),
+        "removing stale hub pid file"
+    );
+    remove_pid_file(data_dir).await?;
+    Ok(())
+}
+
+async fn ensure_hub_start_preflight(data_dir: &Path) -> Result<()> {
+    let state = load_hub_state(data_dir).await?;
+    let state = reconcile_hub_state_with_process(data_dir, state).await?;
+
+    if state.running {
+        let pid_suffix = state
+            .pid
+            .map(|pid| format!(" (pid {pid})"))
+            .unwrap_or_default();
+        bail_usage!(
+            "hub in {} is already marked as running{}",
+            data_dir.display(),
+            pid_suffix
+        );
+    }
+
+    cleanup_stale_pid_file(data_dir).await?;
+    Ok(())
 }
 
 async fn wait_for_shutdown_signal() -> Result<()> {
@@ -1796,39 +1941,67 @@ async fn wait_for_shutdown_signal() -> Result<()> {
 
 #[cfg(unix)]
 async fn signal_and_wait_for_exit(pid: u32) -> Result<()> {
-    let raw_pid = pid as i32;
+    if !process_is_running(pid)? {
+        return Ok(());
+    }
+
+    let raw_pid = match i32::try_from(pid) {
+        Ok(value) => value,
+        Err(_) => bail_hub!("hub process id {pid} is out of range"),
+    };
     let pid = Pid::from_raw(raw_pid);
-    kill(pid, Signal::SIGINT)
-        .map_err(|err| anyhow!("failed to signal hub process {raw_pid}: {err}"))?;
+    match kill(pid, Signal::SIGINT) {
+        Ok(()) => {}
+        Err(Errno::ESRCH) => return Ok(()),
+        Err(err) => return Err(anyhow!("failed to signal hub process {raw_pid}: {err}")),
+    }
 
     let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        match kill(pid, None) {
-            Ok(()) => {
-                if Instant::now() >= deadline {
-                    bail_hub!("hub process {raw_pid} did not exit within 30 seconds");
-                }
-                sleep(Duration::from_millis(100)).await;
-            }
-            Err(Errno::ESRCH) => break,
-            Err(err) => {
-                return Err(anyhow!(
-                    "failed to check hub process {raw_pid} status: {err}"
-                ));
-            }
+    while process_is_running(raw_pid as u32)? {
+        if Instant::now() >= deadline {
+            bail_hub!("hub process {raw_pid} did not exit within 30 seconds");
         }
+        sleep(Duration::from_millis(100)).await;
     }
 
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+async fn signal_and_wait_for_exit(pid: u32) -> Result<()> {
+    if !process_is_running(pid)? {
+        return Ok(());
+    }
+
+    let pid_arg = pid.to_string();
+    let status = StdCommand::new("taskkill")
+        .args(["/PID", pid_arg.as_str(), "/T", "/F"])
+        .status()
+        .with_context(|| format!("stopping hub process {pid} with taskkill"))?;
+
+    if !status.success() && process_is_running(pid)? {
+        bail_hub!("failed to stop hub process {pid} with taskkill (status {status})");
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while process_is_running(pid)? {
+        if Instant::now() >= deadline {
+            bail_hub!("hub process {pid} did not exit within 30 seconds");
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    Ok(())
+}
+
+#[cfg(all(not(unix), not(windows)))]
 async fn signal_and_wait_for_exit(_pid: u32) -> Result<()> {
     bail_hub!("hub stop is not supported on this platform");
 }
 
 async fn handle_hub_stop(args: HubStopArgs) -> Result<()> {
     let state = load_hub_state(&args.data_dir).await?;
+    let state = reconcile_hub_state_with_process(&args.data_dir, state).await?;
     if !state.running {
         bail_usage!(
             "hub in {} is not marked as running",
@@ -1868,6 +2041,7 @@ async fn handle_hub_status(args: HubStatusArgs) -> Result<()> {
     let result = match resolved.into_reference() {
         HubReference::Local(data_dir) => {
             let state = load_hub_state(&data_dir).await?;
+            let state = reconcile_hub_state_with_process(&data_dir, state).await?;
 
             let profile_id = state.profile_id.as_deref().with_context(|| {
                 format!("hub in {} has not been initialised", data_dir.display())
@@ -2034,6 +2208,7 @@ async fn handle_hub_health(args: HubHealthArgs) -> Result<()> {
     match resolved.into_reference() {
         HubReference::Local(data_dir) => {
             let state = load_hub_state(&data_dir).await?;
+            let state = reconcile_hub_state_with_process(&data_dir, state).await?;
             let now = current_unix_timestamp()?;
 
             if stdout_enabled {
@@ -2233,6 +2408,7 @@ async fn handle_hub_metrics(args: HubMetricsArgs) -> Result<()> {
     match resolved.into_reference() {
         HubReference::Local(data_dir) => {
             let state = load_hub_state(&data_dir).await?;
+            let state = reconcile_hub_state_with_process(&data_dir, state).await?;
             let metrics = state.metrics.clone();
 
             if args.raw {
@@ -6988,6 +7164,7 @@ fn render_snapshot_verify(
         println!("wallet.account_id: {}", state.account_id);
         println!("wallet.balance: {}", state.balance);
     }
+
     Ok(())
 }
 
@@ -7632,6 +7809,7 @@ fn record_selftest_stub_marker(suite: SelftestSuite) -> Result<()> {
         }
         println!("stubbed selftest suite: {name}");
     }
+
     Ok(())
 }
 
@@ -7733,6 +7911,7 @@ async fn handle_env_show(args: EnvShowArgs) -> Result<()> {
     } else {
         render_env_descriptor_summary(&descriptor);
     }
+
     Ok(())
 }
 
@@ -9258,6 +9437,7 @@ fn ensure_capability_matches(
                 .collect::<Vec<_>>()
         );
     }
+
     Ok(())
 }
 
@@ -9610,13 +9790,41 @@ impl HubHttpClient {
     }
 }
 
-async fn write_pid_file(data_dir: &Path, pid: u32) -> Result<()> {
+async fn read_pid_file(data_dir: &Path) -> Result<Option<u32>> {
     let pid_path = data_dir.join(HUB_PID_FILE);
-    fs::write(&pid_path, pid.to_string())
+    if !fs::try_exists(&pid_path)
         .await
-        .with_context(|| format!("writing pid file {}", pid_path.display()))?;
-    restrict_private_permissions(&pid_path).await?;
-    Ok(())
+        .with_context(|| format!("checking pid file {}", pid_path.display()))?
+    {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(&pid_path)
+        .await
+        .with_context(|| format!("reading pid file {}", pid_path.display()))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        tracing::warn!(
+            pid_file = %pid_path.display(),
+            "hub pid file was empty; treating it as stale"
+        );
+        remove_pid_file(data_dir).await?;
+        return Ok(None);
+    }
+
+    match trimmed.parse::<u32>() {
+        Ok(pid) => Ok(Some(pid)),
+        Err(err) => {
+            tracing::warn!(
+                pid_file = %pid_path.display(),
+                value = trimmed,
+                error = %err,
+                "hub pid file was invalid; treating it as stale"
+            );
+            remove_pid_file(data_dir).await?;
+            Ok(None)
+        }
+    }
 }
 
 async fn remove_pid_file(data_dir: &Path) -> Result<()> {
@@ -9892,6 +10100,7 @@ async fn ensure_clean_directory(path: &Path) -> Result<()> {
             return Err(anyhow!(err)).context(format!("checking {}", path.display()));
         }
     }
+
     Ok(())
 }
 
@@ -9902,6 +10111,7 @@ async fn ensure_absent(path: &Path) -> Result<()> {
     {
         bail_usage!("refusing to overwrite existing file {}", path.display());
     }
+
     Ok(())
 }
 
@@ -9981,6 +10191,7 @@ async fn write_env_descriptor(path: &Path, descriptor: &EnvDescriptor) -> Result
         let _ = fs::remove_file(&tmp_path).await;
         return Err(err).with_context(|| format!("replacing {}", path.display()));
     }
+
     Ok(())
 }
 
@@ -9998,6 +10209,7 @@ fn ensure_non_empty_field(value: &str, field: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail_usage!("{field} must not be empty", field = field);
     }
+
     Ok(())
 }
 

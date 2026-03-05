@@ -215,6 +215,90 @@ fn hub_start_rejects_zero_pow_difficulty() {
 }
 
 #[test]
+fn hub_state_ready_requires_expected_pid() {
+    let mut state = HubRuntimeState::new(Path::new("/tmp/veen"));
+    state.running = true;
+    state.hub_id = Some("hub-1".to_string());
+    state.listen = Some("127.0.0.1:8080".to_string());
+    state.pid = Some(42);
+
+    assert!(super::hub_state_ready_for_pid(&state, 42));
+    assert!(!super::hub_state_ready_for_pid(&state, 7));
+
+    state.hub_id = None;
+    assert!(!super::hub_state_ready_for_pid(&state, 42));
+}
+
+#[tokio::test]
+async fn reconcile_hub_state_marks_running_without_pid_as_stopped() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let mut state = HubRuntimeState::new(dir.path());
+    state.running = true;
+    state.started_at = Some(1);
+    save_hub_state(dir.path(), &state).await?;
+
+    let reconciled = super::reconcile_hub_state_with_process(dir.path(), state).await?;
+    assert!(!reconciled.running);
+    assert!(reconciled.pid.is_none());
+    assert!(reconciled.stopped_at.is_some());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_pid_file_cleans_up_invalid_contents() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let pid_path = dir.path().join(HUB_PID_FILE);
+    tokio::fs::write(&pid_path, "not-a-number").await?;
+
+    let pid = read_pid_file(dir.path()).await?;
+    assert!(pid.is_none());
+    assert!(!tokio::fs::try_exists(&pid_path).await?);
+
+    Ok(())
+}
+
+fn spawn_short_sleep_process() -> anyhow::Result<std::process::Child> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Milliseconds 900"])
+            .spawn()
+            .context("spawning short-lived helper process on Windows")
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("sh")
+            .args(["-c", "sleep 1"])
+            .spawn()
+            .context("spawning short-lived helper process on unix")
+    }
+}
+
+#[tokio::test]
+async fn wait_for_hub_ready_rejects_stale_pid_state() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let mut state = HubRuntimeState::new(dir.path());
+    state.running = true;
+    state.hub_id = Some("hub-stale".to_string());
+    state.listen = Some("127.0.0.1:39001".to_string());
+    state.pid = Some(9999);
+    save_hub_state(dir.path(), &state).await?;
+
+    let mut child = spawn_short_sleep_process()?;
+    let child_pid = child.id();
+
+    let err = super::wait_for_hub_ready(dir.path(), child_pid, &mut child)
+        .await
+        .unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("exited before reporting ready state"));
+
+    Ok(())
+}
+#[test]
 fn retention_value_parser_supports_seconds_and_indefinite() {
     assert_eq!(
         "600".parse::<RetentionValue>().unwrap(),
