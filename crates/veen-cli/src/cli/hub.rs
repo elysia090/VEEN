@@ -69,16 +69,22 @@ impl fmt::Display for HubLogLevel {
 
 #[derive(Args, Clone)]
 pub(crate) struct HubStartArgs {
+    /// Listen address for the hub HTTP API (for example: 127.0.0.1:8080).
     #[arg(long, value_parser = clap::value_parser!(SocketAddr))]
     pub(crate) listen: SocketAddr,
+    /// Data directory for hub runtime state and append-only storage.
     #[arg(long)]
     pub(crate) data_dir: PathBuf,
+    /// Optional path to a hub configuration file.
     #[arg(long)]
     pub(crate) config: Option<PathBuf>,
+    /// Override profile identifier (64 hex characters).
     #[arg(long, value_name = "HEX32")]
     pub(crate) profile_id: Option<String>,
+    /// Run in the foreground instead of daemonizing.
     #[arg(long)]
     pub(crate) foreground: bool,
+    /// Hub log verbosity level.
     #[arg(long, value_enum, value_name = "LEVEL")]
     pub(crate) log_level: Option<HubLogLevel>,
     /// Require proof-of-work from clients before accepting submissions.
@@ -91,6 +97,7 @@ pub(crate) struct HubStartArgs {
 
 #[derive(Args)]
 pub(crate) struct HubStopArgs {
+    /// Data directory used by the running hub instance.
     #[arg(long)]
     pub(crate) data_dir: PathBuf,
 }
@@ -109,10 +116,13 @@ pub(crate) struct HubKeyArgs {
 
 #[derive(Args)]
 pub(crate) struct HubVerifyRotationArgs {
+    /// Checkpoint file containing witness signatures.
     #[arg(long)]
     pub(crate) checkpoint: PathBuf,
+    /// Previous hub key (64 hex characters).
     #[arg(long, value_name = "OLD_HEX32")]
     pub(crate) old_key: String,
+    /// Replacement hub key (64 hex characters).
     #[arg(long, value_name = "NEW_HEX32")]
     pub(crate) new_key: String,
 }
@@ -121,6 +131,7 @@ pub(crate) struct HubVerifyRotationArgs {
 pub(crate) struct HubHealthArgs {
     #[command(flatten)]
     pub(crate) hub: HubLocatorArgs,
+    /// Emit machine-readable JSON output.
     #[arg(long)]
     pub(crate) json: bool,
 }
@@ -129,6 +140,7 @@ pub(crate) struct HubHealthArgs {
 pub(crate) struct HubMetricsArgs {
     #[command(flatten)]
     pub(crate) hub: HubLocatorArgs,
+    /// Print raw histogram distributions instead of summary metrics.
     #[arg(long)]
     pub(crate) raw: bool,
 }
@@ -137,6 +149,7 @@ pub(crate) struct HubMetricsArgs {
 pub(crate) struct HubProfileArgs {
     #[command(flatten)]
     pub(crate) hub: HubLocatorArgs,
+    /// Emit machine-readable JSON output.
     #[arg(long)]
     pub(crate) json: bool,
 }
@@ -145,10 +158,13 @@ pub(crate) struct HubProfileArgs {
 pub(crate) struct HubRoleArgs {
     #[command(flatten)]
     pub(crate) hub: HubLocatorArgs,
+    /// Filter role lookup by realm identifier (64 hex characters).
     #[arg(long, value_name = "HEX32")]
     pub(crate) realm: Option<String>,
+    /// Filter role lookup by stream name.
     #[arg(long)]
     pub(crate) stream: Option<String>,
+    /// Emit machine-readable JSON output.
     #[arg(long)]
     pub(crate) json: bool,
 }
@@ -157,6 +173,7 @@ pub(crate) struct HubRoleArgs {
 pub(crate) struct HubKexPolicyArgs {
     #[command(flatten)]
     pub(crate) hub: HubLocatorArgs,
+    /// Emit machine-readable JSON output.
     #[arg(long)]
     pub(crate) json: bool,
 }
@@ -165,6 +182,7 @@ pub(crate) struct HubKexPolicyArgs {
 pub(crate) struct HubAdmissionArgs {
     #[command(flatten)]
     pub(crate) hub: HubLocatorArgs,
+    /// Emit machine-readable JSON output.
     #[arg(long)]
     pub(crate) json: bool,
 }
@@ -173,10 +191,13 @@ pub(crate) struct HubAdmissionArgs {
 pub(crate) struct HubAdmissionLogArgs {
     #[command(flatten)]
     pub(crate) hub: HubLocatorArgs,
+    /// Maximum number of admission events to return.
     #[arg(long)]
     pub(crate) limit: Option<u64>,
+    /// Comma-separated error codes to include.
     #[arg(long)]
     pub(crate) codes: Option<String>,
+    /// Emit machine-readable JSON output.
     #[arg(long)]
     pub(crate) json: bool,
 }
@@ -191,8 +212,10 @@ pub(crate) struct HubCheckpointLatestArgs {
 pub(crate) struct HubCheckpointRangeArgs {
     #[command(flatten)]
     pub(crate) hub: HubLocatorArgs,
+    /// Start epoch (inclusive).
     #[arg(long, value_name = "EPOCH")]
     pub(crate) from_epoch: Option<u64>,
+    /// End epoch (inclusive).
     #[arg(long, value_name = "EPOCH")]
     pub(crate) to_epoch: Option<u64>,
 }
