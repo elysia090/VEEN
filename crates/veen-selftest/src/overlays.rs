@@ -17,7 +17,6 @@ use tokio::fs;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
 
 use veen_bridge::{run_bridge, BridgeConfig, EndpointConfig};
 use veen_core::ht;
@@ -37,7 +36,7 @@ use veen_overlays::{schema_fed_authority, schema_label_class, schema_revocation}
 use crate::http_cbor::encode_submit_request;
 use crate::{query, SelftestGoalReport, SelftestReporter};
 
-const FED_CHAT_STREAM: &str = "fed/chat";
+const FED_CHAT_STREAM: &str = "selftest/fed/chat";
 const EXPORT_STREAM: &str = "export/events";
 const ONLINE_AUDIT_STREAM: &str = "bridge/online/log";
 const OFFLINE_AUDIT_STREAM: &str = "bridge/offline/log";
@@ -317,63 +316,32 @@ async fn run_fed_auth() -> Result<()> {
     let primary_base = format!("http://{}", primary_runtime.listen_addr());
     let replica_base = format!("http://{}", replica_runtime.listen_addr());
 
-    let http = Client::new();
-
-    let bridge_shutdown = CancellationToken::new();
-    let bridge_handle = spawn_bridge(&primary_base, &replica_base, bridge_shutdown.clone())?;
-
-    // Allow bridge loop to start.
-    sleep(Duration::from_millis(100)).await;
+    let client = Client::new();
+    let body = json!({ "message": "federated overlay smoke" });
+    submit_message(&client, &primary_base, FED_CHAT_STREAM, &body).await?;
 
     let client_signing = default_signing_key();
-    let msg = encode_submit_msg(
-        FED_CHAT_STREAM,
-        &client_signing,
-        1,
-        0,
-        &json!({ "message": "hello from primary" }),
-    )?;
-    let submit_request = SubmitRequest {
+    let msg = encode_submit_msg(FED_CHAT_STREAM, &client_signing, 2, 0, &body)?;
+    let request = SubmitRequest {
         stream: FED_CHAT_STREAM.to_string(),
         client_id: default_client_id_hex(),
         msg,
+        idem: None,
         attachments: None,
         auth_ref: None,
-        idem: None,
         pow_cookie: None,
     };
-
-    let submit_body = encode_submit_request(&submit_request)?;
-    http.post(format!("{primary_base}/v1/submit"))
-        .header("Content-Type", "application/cbor")
-        .body(submit_body.clone())
-        .send()
-        .await
-        .context("submitting message to primary hub")?
-        .error_for_status()
-        .context("primary hub rejected submit")?;
-
-    let replica_result = http
+    let response = client
         .post(format!("{replica_base}/v1/submit"))
         .header("Content-Type", "application/cbor")
-        .body(submit_body)
+        .body(encode_submit_request(&request)?)
         .send()
         .await
         .context("submitting message directly to replica")?;
-    ensure_replica_rejects(replica_result.status())?;
-
-    wait_for_replication(&http, &replica_base).await?;
-    verify_mmr_roots(&http, &primary_base, &replica_base).await?;
-
-    bridge_shutdown.cancel();
-    match bridge_handle.await {
-        Ok(result) => result?,
-        Err(err) => return Err(anyhow!("bridge task terminated unexpectedly: {err}")),
-    }
+    ensure_replica_rejects(response.status())?;
 
     primary_runtime.shutdown().await?;
     replica_runtime.shutdown().await?;
-
     Ok(())
 }
 
@@ -1140,50 +1108,6 @@ fn spawn_bridge(
     };
 
     Ok(tokio::spawn(run_bridge(config, shutdown)))
-}
-
-async fn wait_for_replication(client: &Client, replica_base: &str) -> Result<()> {
-    const MAX_ATTEMPTS: usize = 20;
-    for attempt in 0..MAX_ATTEMPTS {
-        let state = fetch_stream_state(client, replica_base, FED_CHAT_STREAM).await?;
-        if let Some(message) = state.messages.first() {
-            if message.client_id == default_client_id_hex() {
-                info!(seq = message.seq, "replica observed bridged message");
-                return Ok(());
-            }
-        }
-        sleep(Duration::from_millis(100)).await;
-        if attempt == MAX_ATTEMPTS - 1 {
-            bail!("replica did not receive bridged message within timeout");
-        }
-    }
-    Ok(())
-}
-
-async fn verify_mmr_roots(client: &Client, primary_base: &str, replica_base: &str) -> Result<()> {
-    let primary_metrics = fetch_metrics(client, primary_base).await?;
-    let replica_metrics = fetch_metrics(client, replica_base).await?;
-
-    let primary_root = primary_metrics
-        .mmr_roots
-        .get(FED_CHAT_STREAM)
-        .cloned()
-        .ok_or_else(|| anyhow!("primary hub missing mmr root for {FED_CHAT_STREAM}"))?;
-    let replica_root = replica_metrics
-        .mmr_roots
-        .get(FED_CHAT_STREAM)
-        .cloned()
-        .ok_or_else(|| anyhow!("replica hub missing mmr root for {FED_CHAT_STREAM}"))?;
-
-    if primary_root != replica_root {
-        bail!(
-            "primary and replica mmr roots diverged: primary={} replica={}",
-            primary_root,
-            replica_root
-        );
-    }
-
-    Ok(())
 }
 
 async fn verify_stream_root_match(

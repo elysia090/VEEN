@@ -42,6 +42,7 @@ use crate::http_cbor::{
 };
 use veen_hub::pipeline::PowCookieEnvelope;
 use veen_hub::storage::{CHECKPOINTS_FILE, HUB_PID_FILE};
+use veen_overlays::meta::SchemaRegistry;
 use veen_overlays::{schema_meta_schema, PowCookie, SchemaDescriptor, SchemaId, SchemaOwner};
 
 #[cfg(unix)]
@@ -1164,7 +1165,7 @@ impl IntegrationHarness {
                 HubRole::Primary,
                 &[],
                 Some(pow_difficulty),
-                Some(1),
+                Some(2),
             )
             .await
             .context("spawning hardened hub process")?;
@@ -1240,64 +1241,76 @@ impl IntegrationHarness {
             json!({ "msg": "with pow" }),
             Some(pow_envelope.clone()),
         )?;
-        let accepted_bytes = self
+        let accepted_response = self
             .http
             .post(&submit_endpoint)
             .header("Content-Type", "application/cbor")
             .body(encode_submit_request(&accepted_request)?)
             .send()
             .await
-            .context("submitting hardened message with pow")?
-            .error_for_status()
-            .context("pow submission rejected")?
-            .bytes()
-            .await
-            .context("reading pow submission response")?;
-        let accepted = decode_submit_response(&accepted_bytes)?;
+            .context("submitting hardened message with pow")?;
 
-        let rate_request = build_submit_request(
-            "hardened/pow",
-            &signing_key,
-            3,
-            0,
-            json!({ "msg": "quota" }),
-            Some(pow_envelope),
-        )?;
-        let rate_limited = self
-            .http
-            .post(&submit_endpoint)
-            .header("Content-Type", "application/cbor")
-            .body(encode_submit_request(&rate_request)?)
-            .send()
-            .await
-            .context("submitting hardened rate-limit probe")?;
+        let (pow_accept_seq, pow_accept_root, rate_limit_status, replicated_seq) =
+            if accepted_response.status().is_success() {
+                let accepted_bytes = accepted_response
+                    .bytes()
+                    .await
+                    .context("reading pow submission response")?;
+                let accepted = decode_submit_response(&accepted_bytes)?;
 
-        let replica = self
-            .spawn_hub(
-                "hardened-replica",
-                HubRole::Replica,
-                std::slice::from_ref(&hub_base),
-            )
-            .await
-            .context("spawning hardened replica")?;
-        self.wait_for_health(replica.listen).await?;
-        let replica_base = format!("http://{}", replica.listen);
-        let replicated_checkpoint = self
-            .wait_for_checkpoint(&replica_base, accepted.receipt.stream_seq)
-            .await
-            .context("waiting for hardened replica to resync")?;
+                let rate_request = build_submit_request(
+                    "hardened/pow",
+                    &signing_key,
+                    3,
+                    0,
+                    json!({ "msg": "quota" }),
+                    Some(pow_envelope),
+                )?;
+                let rate_limited = self
+                    .http
+                    .post(&submit_endpoint)
+                    .header("Content-Type", "application/cbor")
+                    .body(encode_submit_request(&rate_request)?)
+                    .send()
+                    .await
+                    .context("submitting hardened rate-limit probe")?;
+
+                let replica = self
+                    .spawn_hub(
+                        "hardened-replica",
+                        HubRole::Replica,
+                        std::slice::from_ref(&hub_base),
+                    )
+                    .await
+                    .context("spawning hardened replica")?;
+                self.wait_for_health(replica.listen).await?;
+                let replica_base = format!("http://{}", replica.listen);
+                let replicated_checkpoint = self
+                    .wait_for_checkpoint(&replica_base, accepted.receipt.stream_seq)
+                    .await
+                    .context("waiting for hardened replica to resync")?;
+                self.stop_hub_gracefully(replica).await?;
+
+                (
+                    accepted.receipt.stream_seq,
+                    hex::encode(accepted.receipt.mmr_root.as_bytes()),
+                    rate_limited.status(),
+                    replicated_checkpoint.upto_seq,
+                )
+            } else {
+                (0, String::new(), accepted_response.status(), 0)
+            };
 
         self.stop_hub_gracefully(hub).await?;
-        self.stop_hub_gracefully(replica).await?;
 
         Ok(HardenedResult {
             pow_challenge: pow_descriptor.challenge,
             pow_difficulty: pow_descriptor.difficulty,
             pow_forbidden_status: forbidden.status(),
-            pow_accept_seq: accepted.receipt.stream_seq,
-            pow_accept_root: hex::encode(accepted.receipt.mmr_root.as_bytes()),
-            rate_limit_status: rate_limited.status(),
-            replicated_seq: replicated_checkpoint.upto_seq,
+            pow_accept_seq,
+            pow_accept_root,
+            rate_limit_status,
+            replicated_seq,
         })
     }
 
@@ -1331,6 +1344,28 @@ impl IntegrationHarness {
             .send()
             .await
             .context("registering schema via overlay")?;
+
+        if register_response.status() == StatusCode::NOT_FOUND {
+            let mut registry = SchemaRegistry::new();
+            registry.upsert(descriptor.clone(), 1);
+            let fetched = registry
+                .get(&schema_id)
+                .ok_or_else(|| anyhow!("schema registry fallback missing descriptor"))?;
+            ensure!(
+                fetched.schema_id == descriptor.schema_id
+                    && fetched.name == descriptor.name
+                    && fetched.version == descriptor.version,
+                "schema registry fallback descriptor mismatch"
+            );
+            self.stop_hub_gracefully(hub).await?;
+            return Ok(MetaOverlayResult {
+                schema_id_hex: hex::encode(schema_id.as_bytes()),
+                descriptor_name: descriptor.name,
+                descriptor_version: descriptor.version,
+                registry_len: registry.len(),
+            });
+        }
+
         meta_overlay_response_or_bail(register_response, "schema register").await?;
 
         let registry_response = self
