@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use rand::rngs::OsRng;
 use reqwest::{Client, ClientBuilder};
 use serde::Serialize;
 use tempfile::TempDir;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 
 use veen_core::cap_stream_id_from_label;
 use veen_core::profile::Profile;
@@ -84,6 +85,7 @@ pub struct PerfSummary {
 struct HttpContext {
     base_url: String,
     client: Client,
+    submit_url: String,
 }
 
 struct PerfHarness {
@@ -120,9 +122,11 @@ impl PerfHarness {
                 let client = ClientBuilder::new()
                     .build()
                     .context("building HTTP client for perf harness")?;
+                let submit_url = format!("{url}/v1/submit");
                 let http = Arc::new(HttpContext {
                     base_url: url,
                     client,
+                    submit_url,
                 });
                 (Some(server), Some(http))
             }
@@ -148,9 +152,9 @@ impl PerfHarness {
     }
 
     async fn drive(&self, cfg: &PerfConfig) -> Result<PerfSummary> {
-        let verify = Arc::new(Mutex::new(new_latency_recorder()?));
-        let commit = Arc::new(Mutex::new(new_latency_recorder()?));
-        let end_to_end = Arc::new(Mutex::new(new_latency_recorder()?));
+        let mut verify = new_latency_recorder()?;
+        let mut commit = new_latency_recorder()?;
+        let mut end_to_end = new_latency_recorder()?;
 
         let semaphore = Arc::new(Semaphore::new(cfg.concurrency));
         let mut tasks = Vec::with_capacity(cfg.requests);
@@ -176,17 +180,16 @@ impl PerfHarness {
         }
 
         let mut submit_ok_total = 0u64;
-        let mut submit_err_total = std::collections::BTreeMap::new();
+        let mut submit_err_total = BTreeMap::new();
         for task in tasks {
             match task.await? {
                 Ok(task_latencies) => {
                     merge_task_latencies(
-                        Arc::clone(&verify),
-                        Arc::clone(&commit),
-                        Arc::clone(&end_to_end),
+                        &mut verify,
+                        &mut commit,
+                        &mut end_to_end,
                         task_latencies,
-                    )
-                    .await?;
+                    )?;
                     submit_ok_total += 1;
                 }
                 Err(err) => {
@@ -198,24 +201,20 @@ impl PerfHarness {
         let elapsed = start.elapsed().as_secs_f64().max(f64::EPSILON);
         let throughput_rps = submit_ok_total as f64 / elapsed;
 
-        let verify_guard = verify.lock().await;
-        let commit_guard = commit.lock().await;
-        let end_guard = end_to_end.lock().await;
-
         let metrics = HubMetricsSnapshot {
             submit_ok_total,
             submit_err_total,
             verify_latency_ms: HistogramSnapshot::from_histogram(
-                verify_guard.histogram(),
-                &verify_guard.stats(),
+                verify.histogram(),
+                &verify.stats(),
             ),
             commit_latency_ms: HistogramSnapshot::from_histogram(
-                commit_guard.histogram(),
-                &commit_guard.stats(),
+                commit.histogram(),
+                &commit.stats(),
             ),
             end_to_end_latency_ms: HistogramSnapshot::from_histogram(
-                end_guard.histogram(),
-                &end_guard.stats(),
+                end_to_end.histogram(),
+                &end_to_end.stats(),
             ),
         };
 
@@ -239,15 +238,15 @@ struct TaskLatencies {
     end: LatencyRecorder,
 }
 
-async fn merge_task_latencies(
-    verify: Arc<Mutex<LatencyRecorder>>,
-    commit: Arc<Mutex<LatencyRecorder>>,
-    end: Arc<Mutex<LatencyRecorder>>,
+fn merge_task_latencies(
+    verify: &mut LatencyRecorder,
+    commit: &mut LatencyRecorder,
+    end: &mut LatencyRecorder,
     task_latencies: TaskLatencies,
 ) -> Result<()> {
-    verify.lock().await.merge_from(&task_latencies.verify)?;
-    commit.lock().await.merge_from(&task_latencies.commit)?;
-    end.lock().await.merge_from(&task_latencies.end)?;
+    verify.merge_from(&task_latencies.verify)?;
+    commit.merge_from(&task_latencies.commit)?;
+    end.merge_from(&task_latencies.end)?;
     Ok(())
 }
 
@@ -353,11 +352,10 @@ impl PerfDriver {
                     .http
                     .as_ref()
                     .ok_or_else(|| anyhow!("missing HTTP context for perf run"))?;
-                let url = format!("{}/v1/submit", http.base_url);
                 let body = encode_submit_request(&request)?;
                 let response = http
                     .client
-                    .post(url)
+                    .post(&http.submit_url)
                     .header("Content-Type", "application/cbor")
                     .body(body)
                     .send()
